@@ -65,13 +65,19 @@ fn main() -> ExitCode {
 /// user's prompt.
 fn arm_watchdog() {
     std::thread::spawn(|| {
-        let ms = match std::env::var("OOPSINPUT_TEST_DEADLINE_MS") {
-            Ok(v) => v.parse().unwrap_or(DET_DEADLINE_MS),
-            Err(_) => DET_DEADLINE_MS,
-        };
-        std::thread::sleep(std::time::Duration::from_millis(ms));
+        std::thread::sleep(std::time::Duration::from_millis(deadline_ms()));
         std::process::exit(1);
     });
+}
+
+/// Test hooks exist in debug builds only (the PTY suite runs against the
+/// debug profile); release binaries have a fixed deadline and no hang hook.
+fn deadline_ms() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Ok(v) = std::env::var("OOPSINPUT_TEST_DEADLINE_MS") {
+        return v.parse().unwrap_or(DET_DEADLINE_MS);
+    }
+    DET_DEADLINE_MS
 }
 
 /// Read one proposal from stdin (+ adapter flags), analyze, record a shadow
@@ -80,8 +86,9 @@ fn check(args: &[String]) -> ExitCode {
     let started = Instant::now();
     arm_watchdog();
 
-    // Test hook: prove the watchdog end-to-end (a plugin pointed at a hanging
-    // binary must still run the user's command).
+    // Test hook (debug builds only): prove the watchdog end-to-end — a plugin
+    // pointed at a hanging binary must still run the user's command.
+    #[cfg(debug_assertions)]
     if std::env::var("OOPSINPUT_TEST_HANG").is_ok() {
         std::thread::sleep(std::time::Duration::from_secs(30));
     }
@@ -131,31 +138,34 @@ fn doctor() -> ExitCode {
     );
 
     let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        println!("  config:     HOME is unset — cannot locate config or plugin");
+    } else {
+        let config = format!("{home}/.config/oopsinput/config");
+        let config_exists = std::fs::metadata(&config).is_ok();
+        println!(
+            "  config:     {config} {}",
+            if config_exists {
+                "(present)"
+            } else {
+                "(absent — defaults in effect)"
+            }
+        );
+        println!("  mode:       shadow (default)");
 
-    let config = format!("{home}/.config/oopsinput/config");
-    let config_exists = std::fs::metadata(&config).is_ok();
-    println!(
-        "  config:     {config} {}",
-        if config_exists {
-            "(present)"
-        } else {
-            "(absent — defaults in effect)"
-        }
-    );
-    println!("  mode:       shadow (default)");
-
-    let zshrc = format!("{home}/.zshrc");
-    let plugin_installed = std::fs::read_to_string(&zshrc)
-        .map(|s| s.contains(">>> oopsinput >>>"))
-        .unwrap_or(false);
-    println!(
-        "  plugin:     {}",
-        if plugin_installed {
-            "installed (block present in ~/.zshrc)"
-        } else {
-            "not installed (run zsh/install.zsh)"
-        }
-    );
+        let zshrc = format!("{home}/.zshrc");
+        let plugin_installed = std::fs::read_to_string(&zshrc)
+            .map(|s| s.contains(">>> oopsinput >>>"))
+            .unwrap_or(false);
+        println!(
+            "  plugin:     {}",
+            if plugin_installed {
+                "installed (block present in ~/.zshrc)"
+            } else {
+                "not installed (run zsh/install.zsh)"
+            }
+        );
+    }
 
     if zsh.is_some() {
         ExitCode::SUCCESS
@@ -166,11 +176,16 @@ fn doctor() -> ExitCode {
 
 /// PATH lookup via direct metadata checks — never through a shell (SPEC §9).
 fn find_in_path(name: &str) -> Option<String> {
-    let path = std::env::var("PATH").ok()?;
+    find_in_path_list(&std::env::var("PATH").ok()?, name)
+}
+
+fn find_in_path_list(path: &str, name: &str) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
     for dir in path.split(':').filter(|d| !d.is_empty()) {
         let candidate = format!("{dir}/{name}");
         if let Ok(meta) = std::fs::metadata(&candidate)
             && meta.is_file()
+            && meta.permissions().mode() & 0o111 != 0
         {
             return Some(candidate);
         }
@@ -204,5 +219,24 @@ mod tests {
     #[test]
     fn find_in_path_misses_nonsense() {
         assert!(find_in_path("definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn find_in_path_requires_executable_bit() {
+        // Regression (bughunt #3): a plain file named like the binary was
+        // reported as found by doctor.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("oopsinput-xbit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("zsh");
+        std::fs::write(&file, "not a binary").unwrap();
+
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(find_in_path_list(dir.to_str().unwrap(), "zsh").is_none());
+
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(find_in_path_list(dir.to_str().unwrap(), "zsh").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
