@@ -182,8 +182,9 @@ fn resolution_kinds_are_correctly_extracted() {
     let out = s.run(&[
         "alias myls='ls -l'",
         "myls /tmp", // alias, multi-word buffer
-        "myls",      // alias, single-word buffer (regression:
-        //                            single-word split string-indexed to "m")
+        // alias, single-word buffer — regression: the (z) split of a single
+        // word once got string-indexed, resolving "m" instead of "myls"
+        "myls",
         "echo pty-res-ok",         // builtin
         "/bin/ls /tmp",            // command
         "definitely-not-real-xyz", // none

@@ -60,9 +60,9 @@ pub enum ReadError {
     Stdin,
 }
 
-/// Hard cap on proposal input size; larger input is truncated and the analysis
-/// degrades to `observe` per SPEC §10 (in shadow, that distinction is recorded
-/// only).
+/// Hard cap on proposal input size (SPEC §10): bytes beyond it are not read.
+/// Downgrading oversized input to an explicit `observe` decision arrives with
+/// the analysis layers.
 const MAX_INPUT_BYTES: u64 = 1 << 20;
 
 impl Proposal {

@@ -91,13 +91,12 @@ fn check(args: &[String]) -> ExitCode {
     };
 
     // M1 shadow: no layers yet — always allow, always record.
+    let duration_us = started.elapsed().as_micros();
     let decision = Decision {
         decision: "allow",
         reason_code: "shadow.observed",
         evidence: Vec::new(),
-        timings_us: Timings {
-            total: started.elapsed().as_micros(),
-        },
+        timings_us: Timings { total: duration_us },
     };
 
     events::append(&events::Event {
@@ -107,7 +106,7 @@ fn check(args: &[String]) -> ExitCode {
         res_kind: proposal.res_kind.as_str(),
         buffer_bytes: proposal.buffer.len(),
         word_count: proposal.buffer.split_whitespace().count(),
-        duration_us: started.elapsed().as_micros(),
+        duration_us,
     });
 
     match serde_json::to_string(&decision) {
