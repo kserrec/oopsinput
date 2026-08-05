@@ -55,7 +55,10 @@ Bugs found & regression-locked during M1:
 - [ ] ui.rs: /dev/tty single-key prompts; escaping pass (control/ANSI/OSC/bidi
       neutralized) + fuzz target
 - [ ] `y` runs correction / `n` runs original / Ctrl-C cancels; replacement
-      returns on fd 3, never argv/stdout
+      returns on fd 3, never argv/stdout — **security-critical channel** (audit
+      2026-08-05): the one path where binary output becomes an executed
+      command; same rigor as the event log (exact bytes, no interpretation,
+      pinned tests)
 - [ ] `suggest` mode enabled by default post-install
 - [ ] Acceptance: golden typo cases pass; command words that resolve NEVER
       prompt; p95 within budget
@@ -103,6 +106,12 @@ Bugs found & regression-locked during M1:
 ## M6 — Share-ready polish
 
 - [ ] README: honest pitch, install, what it does/doesn't do, uninstall
+- [ ] CI (audit 2026-08-05): fmt --check, clippy -D warnings, cargo test, and
+      cargo-deny (supply-chain + license check; also vets unfamiliar
+      transitive deps like serde_json's `zmij`) on every push
+- [ ] SECURITY.md (audit 2026-08-05): security posture, the accepted
+      same-user trust boundary, what the tool does/doesn't defend against,
+      vulnerability-report contact
 - [ ] `oopsinput doctor` covers: plugin installed, widgets wrapped, config
       valid, model reachable (optional), state perms
 - [ ] Clean-machine test: fresh user → install → shadow → report → uninstall
