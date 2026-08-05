@@ -217,11 +217,18 @@ Key decisions:
   `accept-and-hold`, `accept-and-infer-next-history`, in both Emacs and Vi
   keymaps, preserving any previously-installed wrapper (capture-and-delegate,
   never assume defaults).
-- **Fail open, bounded.** Plugin-side timeout (default 150 ms for the
-  deterministic path; the binary signals "model pending" before exceeding it,
-  extending the wait to the model deadline, default 2 s). On any failure —
-  binary missing, crash, timeout, malformed output — the original command runs
-  unchanged, with at most one concise diagnostic per session.
+- **Fail open, bounded.** The deadline (150 ms deterministic path; the model
+  path gets its own longer deadline when L4 lands) is enforced by a watchdog
+  inside the binary that force-exits with the fail-open code — the plugin
+  itself carries no timer. Two facts make this sufficient: the binary is ours
+  and arms the watchdog before doing anything else, and zsh's job control
+  independently returns control to the widget if the check process is stopped
+  or killed (verified by test). On any failure — binary missing, crash,
+  deadline, malformed output — the original command runs unchanged, with at
+  most one concise diagnostic per session. Residual boundary: a check process
+  unable to exit at all (e.g. a thread wedged in uninterruptible disk I/O —
+  state dir on a hung network filesystem) could still block the prompt; this
+  is documented, not defended.
 - **`check --json` seam.** The same analysis is reachable as
   `oopsinput check --json < proposal.json` → decision JSON on stdout. This is
   the stable integration point future agent adapters use; proposals carry an

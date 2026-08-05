@@ -47,6 +47,9 @@ Bugs found & regression-locked during M1:
 ## M2 — Lexer + typo layer (first visible value)
 
 - [ ] lexer.rs: conservative lexer per SPEC §13, fuzz smoke test, never panics
+- [ ] Deferred bughunt finding: the 1 MB input cap errors (fail-open, event
+      lost) when it lands mid-UTF-8-character — read bytes and truncate at a
+      char boundary so oversized input is capped-and-analyzed instead
 - [ ] layers/typo.rs: exact resolution check, bounded edit distance vs PATH +
       plugin-supplied names
 - [ ] ui.rs: /dev/tty single-key prompts; escaping pass (control/ANSI/OSC/bidi
