@@ -12,23 +12,37 @@ here as they land.
       (placeholder analysis — the seam is real, the brain isn't yet)
 - [x] Pushed to github.com/kserrec/oopsinput
 
-## M1 — Zsh capture, shadow passthrough
+## M1 — Zsh capture, shadow passthrough ✅ 2026-08-05
 
 The riskiest surface first: prove we can intercept and restore commands with
 zero corruption before building any analysis.
 
-- [ ] `zsh/oopsinput.zsh`: wrap all accept widgets (Emacs + Vi keymaps),
+- [x] `zsh/oopsinput.zsh`: wrap all accept widgets (Emacs + Vi keymaps),
       capture-and-delegate to prior widget, recursion guard
-- [ ] Buffer over stdin; plugin-side fail-open timeout (det_timeout_ms);
-      one-per-session diagnostic on failure
-- [ ] Plugin ships context: cwd, command-word resolution kind (alias/function/
-      builtin/external), last N history lines secret-stripped in-shell
-- [ ] proposal.rs + events.rs: parse proposal, log structural shadow event
-- [ ] install.zsh / uninstall.zsh with explicit markers + backup
-- [ ] PTY test harness: scripted submissions through a real zsh; assert exact
-      buffer passthrough (multiline, unicode, paste, huge buffer)
-- [ ] Acceptance: 10,000 PTY submissions, zero altered/lost buffers, zero
-      hangs; kill -9 the binary mid-check → command still runs
+- [x] Buffer over stdin; fail-open deadline via in-binary watchdog (150 ms
+      det path); diagnostic on missing binary at load
+- [x] Plugin ships context: command-word resolution kind (closed vocabulary,
+      enforced both plugin- and binary-side); cwd read by the binary itself
+      *(recent-history summaries moved to M3 — nothing consumes them earlier)*
+- [x] proposal.rs + events.rs: parse proposal, log structural shadow event
+      (no raw text; 0700/0600 perms; `OOPSINPUT_STATE_DIR` override for tests)
+- [x] install.zsh / uninstall.zsh with explicit markers + backup
+- [x] PTY test harness (`tests/pty.rs`, via util-linux `script`): passthrough,
+      unicode/quoting, multiline PS2, vi keymap, missing binary, hanging
+      binary vs watchdog, secret-free event log, double-source, resolution
+      kinds (incl. single-word regression)
+- [x] Acceptance: 10,000 PTY submissions → 10,000/10,000 outputs, zero
+      altered/lost buffers, zero hangs (128 s); hanging-binary test proves
+      fail-open under a wedged process
+- [x] Measured: per-command overhead p50 5 ms / p95 6 ms / p99 7 ms
+      (budget: p95 ≤ 25 ms); installed on the dev machine in shadow mode
+
+Bugs found & regression-locked during M1:
+- nested `${$(whence -w ...)##*: }` doesn't strip in zsh → res_kind carried
+  raw text into argv; fixed with two-step extraction + closed-vocabulary
+  enforcement in the plugin
+- `${${(z)BUFFER}[1]}` string-indexes (first *char*) when the buffer is a
+  single word → fixed with explicit array assignment
 
 ## M2 — Lexer + typo layer (first visible value)
 

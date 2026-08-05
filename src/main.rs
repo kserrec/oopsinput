@@ -1,7 +1,8 @@
 //! oopsinput — catches commands that probably aren't what you meant, before they run.
 //!
-//! M0 skeleton: subcommand dispatch and the `check` seam are real; analysis is a
-//! placeholder that always allows. See SPEC.md (canonical) and PLAN.md.
+//! M1: real proposal intake from the zsh plugin, shadow-mode analysis (always
+//! allow, record structural event), self-watchdog deadline so a wedged process
+//! can never hold the user's shell. See SPEC.md (canonical) and PLAN.md.
 //!
 //! Exit code contract (the zsh plugin treats anything unexpected as fail-open allow):
 //!   0  = allow, run the original buffer unchanged
@@ -11,14 +12,19 @@
 //!   2  = usage error
 //!   1  = internal error (plugin fails open)
 
-use std::io::Read;
+mod events;
+mod proposal;
+
 use std::process::ExitCode;
 use std::time::Instant;
 
 use serde::Serialize;
 
-/// Hard cap on proposal input size; larger input degrades to `observe` per SPEC §10.
-const MAX_INPUT_BYTES: u64 = 1 << 20;
+use proposal::Proposal;
+
+/// Deterministic-path deadline (SPEC §10). The watchdog force-exits with the
+/// fail-open code if analysis ever exceeds it; config surface arrives later.
+const DET_DEADLINE_MS: u64 = 150;
 
 #[derive(Serialize)]
 struct Decision {
@@ -40,7 +46,7 @@ fn main() -> ExitCode {
             println!("oopsinput {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Some("check") => check(),
+        Some("check") => check(&args[1..]),
         Some("doctor") => doctor(),
         None | Some("help") | Some("--help") => {
             print_help();
@@ -53,32 +59,56 @@ fn main() -> ExitCode {
     }
 }
 
-/// Read one proposal (raw buffer for now; JSON envelope lands in M1) from stdin,
-/// analyze, print a Decision as JSON on stdout, and signal via exit code.
-fn check() -> ExitCode {
-    let started = Instant::now();
+/// If analysis wedges for any reason, exit with the fail-open code before the
+/// shell-side wait becomes perceptible. The process is per-command, so a blunt
+/// exit is safe: there is nothing to clean up that matters more than the
+/// user's prompt.
+fn arm_watchdog() {
+    std::thread::spawn(|| {
+        let ms = match std::env::var("OOPSINPUT_TEST_DEADLINE_MS") {
+            Ok(v) => v.parse().unwrap_or(DET_DEADLINE_MS),
+            Err(_) => DET_DEADLINE_MS,
+        };
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        std::process::exit(1);
+    });
+}
 
-    let mut buffer = String::new();
-    if std::io::stdin()
-        .take(MAX_INPUT_BYTES)
-        .read_to_string(&mut buffer)
-        .is_err()
-    {
-        // Non-UTF8 or read failure: fail open, say nothing on stdout the
-        // plugin would misread.
-        return ExitCode::from(1);
+/// Read one proposal from stdin (+ adapter flags), analyze, record a shadow
+/// event, print a Decision as JSON on stdout, signal via exit code.
+fn check(args: &[String]) -> ExitCode {
+    let started = Instant::now();
+    arm_watchdog();
+
+    // Test hook: prove the watchdog end-to-end (a plugin pointed at a hanging
+    // binary must still run the user's command).
+    if std::env::var("OOPSINPUT_TEST_HANG").is_ok() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
     }
 
-    // M0 placeholder: no analysis yet. The seam (stdin -> decision JSON ->
-    // exit code) is the stable contract everything else plugs into.
+    let Ok(proposal) = Proposal::from_check_invocation(args) else {
+        return ExitCode::from(1);
+    };
+
+    // M1 shadow: no layers yet — always allow, always record.
     let decision = Decision {
         decision: "allow",
-        reason_code: "m0.placeholder",
+        reason_code: "shadow.observed",
         evidence: Vec::new(),
         timings_us: Timings {
             total: started.elapsed().as_micros(),
         },
     };
+
+    events::append(&events::Event {
+        ts_ms: events::now_ms(),
+        decision: decision.decision,
+        reason_code: decision.reason_code,
+        res_kind: proposal.res_kind.as_str(),
+        buffer_bytes: proposal.buffer.len(),
+        word_count: proposal.buffer.split_whitespace().count(),
+        duration_us: started.elapsed().as_micros(),
+    });
 
     match serde_json::to_string(&decision) {
         Ok(json) => {
@@ -89,8 +119,8 @@ fn check() -> ExitCode {
     }
 }
 
-/// Environment sanity checks. Grows per milestone (plugin install state,
-/// config validity, model reachability).
+/// Environment sanity checks. Grows per milestone (config validity, model
+/// reachability).
 fn doctor() -> ExitCode {
     println!("oopsinput doctor");
     println!("  version:    {}", env!("CARGO_PKG_VERSION"));
@@ -102,6 +132,7 @@ fn doctor() -> ExitCode {
     );
 
     let home = std::env::var("HOME").unwrap_or_default();
+
     let config = format!("{home}/.config/oopsinput/config");
     let config_exists = std::fs::metadata(&config).is_ok();
     println!(
@@ -113,7 +144,19 @@ fn doctor() -> ExitCode {
         }
     );
     println!("  mode:       shadow (default)");
-    println!("  plugin:     not installed (arrives in M1)");
+
+    let zshrc = format!("{home}/.zshrc");
+    let plugin_installed = std::fs::read_to_string(&zshrc)
+        .map(|s| s.contains(">>> oopsinput >>>"))
+        .unwrap_or(false);
+    println!(
+        "  plugin:     {}",
+        if plugin_installed {
+            "installed (block present in ~/.zshrc)"
+        } else {
+            "not installed (run zsh/install.zsh)"
+        }
+    );
 
     if zsh.is_some() {
         ExitCode::SUCCESS
