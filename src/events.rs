@@ -52,15 +52,23 @@ fn state_dir() -> Option<PathBuf> {
 /// user their command or their prompt.
 pub fn append(event: &Event) {
     let Some(dir) = state_dir() else { return };
-    if std::fs::create_dir_all(&dir).is_err() {
+    append_to(&dir, event);
+}
+
+fn append_to(dir: &std::path::Path, event: &Event) {
+    if std::fs::create_dir_all(dir).is_err() {
         return;
     }
     // Best-effort tighten to user-only; failure is not fatal.
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
 
-    let Ok(line) = serde_json::to_string(event) else {
+    let Ok(mut line) = serde_json::to_string(event) else {
         return;
     };
+    // One buffer, one write syscall: concurrent shells append to this file,
+    // and O_APPEND atomicity holds per write call — a separate newline write
+    // would let two processes interleave and corrupt the JSONL stream.
+    line.push('\n');
     let Ok(mut f) = OpenOptions::new()
         .append(true)
         .create(true)
@@ -69,12 +77,54 @@ pub fn append(event: &Event) {
     else {
         return;
     };
-    let _ = writeln!(f, "{line}");
+    let _ = f.write_all(line.as_bytes());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_appends_never_interleave() {
+        // Regression (bughunt #1): the line and its newline were two separate
+        // write syscalls, so simultaneous shells could corrupt the JSONL
+        // stream. Hammer from many threads and require every line to parse.
+        let dir = std::env::temp_dir().join(format!("oopsinput-ev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        std::thread::scope(|s| {
+            for t in 0..16 {
+                let dir = dir.clone();
+                s.spawn(move || {
+                    for i in 0..50 {
+                        append_to(
+                            &dir,
+                            &Event {
+                                ts_ms: t * 1000 + i,
+                                decision: "allow",
+                                reason_code: "shadow.observed",
+                                res_kind: "command",
+                                buffer_bytes: 10,
+                                word_count: 2,
+                                duration_us: 1,
+                            },
+                        );
+                    }
+                });
+            }
+        });
+
+        let log = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 16 * 50, "lost or glued lines");
+        for line in lines {
+            assert!(
+                serde_json::from_str::<serde_json::Value>(line).is_ok(),
+                "corrupt JSONL line: {line}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn event_serializes_structural_fields_only() {
