@@ -44,6 +44,23 @@ Bugs found & regression-locked during M1:
 - `${${(z)BUFFER}[1]}` string-indexes (first *char*) when the buffer is a
   single word → fixed with explicit array assignment
 
+## Post-M1 hardening ✅ 2026-08-05
+
+Same-day refactor + bughunt + audit passes over M0/M1. Landed: no-functional-
+change refactor; atomic single-write event append (concurrency, pinned);
+doctor executable-bit check (pinned); test hooks gated to debug builds;
+uninstall refuses damaged marker blocks instead of deleting to EOF (pinned);
+load diagnostic renders control chars visibly via zsh (V) — note (qqqq) is
+insufficient, it leaves control bytes raw (pinned); SPEC §6 aligned with the
+implemented watchdog fail-open design. Deferred items live in M2/M6 below.
+
+Name decision (research 2026-08-05, recorded so it isn't re-litigated):
+"oopsinput" verified clear on GitHub (repos + org name), crates.io, npm,
+PyPI, and .com/.dev/.io/.org domains, with no product using the name.
+Rejected alternatives: `noops` (established NoOps industry term, npm+PyPI
+taken), `oopsh` (existing OOPSH shell project + oopsh.com taken), `oopsys`
+(French IT firm Oopsys + OOP ambiguity), `nooops` (triple-o typo trap).
+
 ## M2 — Lexer + typo layer (first visible value)
 
 - [ ] lexer.rs: conservative lexer per SPEC §13, fuzz smoke test, never panics
