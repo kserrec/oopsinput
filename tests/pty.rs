@@ -10,6 +10,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+/// Render a string as a zsh $'\xNN' literal, byte-exact.
+fn zsh_byte_quote(s: &str) -> String {
+    let hex: String = s.bytes().map(|b| format!("\\x{b:02x}")).collect();
+    format!("$'{hex}'")
+}
+
 struct Session {
     dir: PathBuf,
 }
@@ -29,7 +35,9 @@ impl Session {
 
         let mut zshrc = String::new();
         zshrc.push_str("PS1='PTYTEST%% '\n");
-        zshrc.push_str(&format!("export OOPSINPUT_BIN={bin:?}\n"));
+        // $'\xNN' quoting so override paths can carry raw bytes (the escape-
+        // injection test needs a real ESC byte to reach the env var).
+        zshrc.push_str(&format!("export OOPSINPUT_BIN={}\n", zsh_byte_quote(&bin)));
         zshrc.push_str(&format!(
             "export OOPSINPUT_STATE_DIR={:?}\n",
             dir.join("state")
@@ -126,6 +134,21 @@ fn missing_binary_fails_open() {
     assert!(
         out.contains("pty-nofail-ok"),
         "command lost with missing binary:\n{out}"
+    );
+}
+
+#[test]
+fn missing_binary_diagnostic_escapes_hostile_path() {
+    // Audit finding #4: the load diagnostic prints the env-supplied binary
+    // path; a value carrying terminal escape sequences must not be rendered
+    // raw (here: an OSC title-set sequence).
+    let hostile = "/nonexistent/\u{1b}]0;EVIL\u{7}x";
+    let s = Session::new(Some(hostile), &[]);
+    let out = s.run(&["echo pty-esc-ok"]);
+    assert!(out.contains("pty-esc-ok"), "commands did not run:\n{out}");
+    assert!(
+        !out.contains("\u{1b}]0;EVIL"),
+        "raw escape sequence from OOPSINPUT_BIN reached the terminal:\n{out:?}"
     );
 }
 

@@ -15,7 +15,10 @@
 
 typeset -g _OOPSINPUT_BIN=${OOPSINPUT_BIN:-$HOME/.local/bin/oopsinput}
 if [[ ! -x $_OOPSINPUT_BIN ]]; then
-    print -u2 "oopsinput: binary not found at $_OOPSINPUT_BIN — guard disabled for this session"
+    # (V) renders control characters visibly (^[ etc.) — a hostile env value
+    # cannot emit raw terminal sequences through this diagnostic. Note (qqqq)
+    # is NOT sufficient: it wraps in $'...' but leaves control bytes raw.
+    print -u2 "oopsinput: binary not found at ${(V)_OOPSINPUT_BIN} — guard disabled for this session"
     return 0
 fi
 
