@@ -143,3 +143,78 @@ helpers had no timeout and run after the watchdog retires (now `run_bounded`
 kills and reaps at a deadline, satisfying SPEC §9-1); candidate names could
 carry control characters; install.zsh's `-f` guard wrote through a dangling
 config symlink (now `-e || -L`).
+
+## M3 — Danger + context layers, policy, warning UI ✅ 2026-08-06
+
+- [x] layers/danger.rs: rule tables per SPEC §5-L2 (fs, git, system, privilege)
+      — ✅ 2026-08-06: candidate marking + direct-catastrophic flag (recursive
+      delete of / or ~); codes feed the shadow event log now, policy consumes
+      them next. priv.sudo fires only when the wrapped command tripped a rule.
+      Golden corpus eval/golden/danger.json (command-shape pairs; the
+      context-flip pairs arrive with policy + L3 below)
+- [x] layers/context.rs: git facts, target facts, near-miss targets — all
+      hard-capped syscall collectors — ✅ 2026-08-06: runs only on L2
+      candidates (common path stays syscall-free); git status as an external
+      helper per the standing rule (absolute path, fixed argv, 80 ms kill);
+      honest None when evidence is unavailable. Danger layer now hands its
+      literal targets to L3. Measured on this repo: candidate path ~4.7 ms
+      incl. git spawn (debug build; release figures in PLAN's header)
+- [x] policy.rs: evidence → decision matrix; direct-catastrophic subset;
+      intervention budget + per-rule cooldown; shadow conversion; full SPEC
+      §15 config surface incl. warn-once on unknown keys — ✅ 2026-08-06.
+      `warranted` is the mode-blind matrix the golden corpus pins;
+      `cap_for_mode` downgrades preserve the policy reason (that IS the
+      shadow conversion — an `observe` with reason `policy.dirty_work_at_risk`
+      is a hypothetical intervention for the M5 report). Budget/cooldown
+      machinery built and tested but not consumed at runtime until the
+      warning UI exists (gates run with commit=false semantics; nothing
+      invisible may spend budget). det_timeout_ms now drives the watchdog.
+      Flagship pair proven live: dirty `git reset --hard` → observe/
+      dirty_work_at_risk; probe in ~4.7 ms
+- [x] Warning UI: anatomy per SPEC §7; e/edit c/cancel r/run-once; exact
+      buffer restore on edit (PTY-tested) — ✅ 2026-08-06. Warn tier is
+      advisory (timeout runs), confirm tier pauses (timeout cancels — `r`
+      never the default). Budget/cooldown gates went live with it (spend
+      only on actually-shown prompts); outcomes land in the event log. The
+      deferred multi-byte key bug is fixed: the key reader consumes complete
+      escape sequences (CSI/SS3/alt-chords), PTY-pinned by
+      arrow_keys_at_a_prompt_leave_no_stray_bytes. Both flagship acceptance
+      halves PTY-proven: dirty reset warns with facts named and cancel has
+      zero side effects; clean reset passes silently
+- [x] recency relation (rest of SPEC §5-L3) — ✅ 2026-08-06, stronger than
+      spec'd: instead of stripping secrets from history text, the plugin
+      computes the relation itself and sends only sanitized summaries (age,
+      shares-a-word bit, first two words constrained to [A-Za-z0-9_-]{1,32},
+      else "_") — no raw history text ever crosses; the binary re-sanitizes.
+      Payload gained a third NUL section; surfaces as
+      recency.target_overlap evidence and the "previous command: git diff"
+      warning line (PTY-proven). Also hardened run_staged: a missing marker
+      now panics with the transcript instead of hanging the suite
+- [x] eval/golden: paired counterfactual cases for every danger rule (≥30%
+      pairs) — ✅ 2026-08-06: danger.json 41 command-shape cases +
+      policy.json 19 context-flip cases; every danger rule has a paired
+      presence; both corpora enforce the ratio in cargo test (CI itself: M6)
+- [x] Acceptance — ✅ 2026-08-06, all PTY-proven: dirty `git reset --hard`
+      warns with facts named / clean reset silent; corpus green; cancel has
+      zero side effects (dirty bytes verified untouched on disk)
+
+Post-M3 refactor + bughunt + audit passes ✅ 2026-08-06 (same session).
+Refactor: one shared bounded wait-or-kill loop (`src/proc.rs`), one home for
+the deterministic deadline, one golden-corpus runner, warning-message
+building moved to ui.rs; zero functional change. Bughunt fixed seven, each
+regression-pinned — the typo prompt preempted policy warnings on compound
+buffers (`gti status; git reset --hard` warned about nothing); short-flag
+clusters were read letter-by-letter so `rm -force /` became a catastrophic
+confirm though rm rejects it outright; a redirect's existing target vouched
+for `rm -rf $DIR`; the recency shares-a-word bit was always 1 (zsh's reverse
+subscript search `(Ie)` returns 0 when absent, making the test a tautology)
+and counted shared flags as shared targets; recency cost ~7.5 ms/command at
+10k history (now 0.125 ms via direct HISTCMD lookups); `>&-` was recorded as
+truncating a file named `-`; the PTY harness could hang the suite in its
+drain tail. Audit fixed four, each re-verified with the probe that proved it:
+`git status` executed `core.fsmonitor` from the analyzed repository's own
+config, so typing `rm -rf ./build` inside a directory obtained from someone
+else ran a stranger's program (exec-capable keys now neutralized on the
+command line); recency words reached the terminal without the escaper; state
+files were written through symlinks; the policy state file had no read or
+entry cap.

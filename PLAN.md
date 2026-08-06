@@ -6,12 +6,15 @@ here as they land.
 
 Completed milestones, all archived verbatim in
 [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md): M0 (skeleton and governance), M1 (zsh
-capture + shadow passthrough), Post-M1 hardening — ✅ 2026-08-05 — and M2
-(lexer + typo layer, the first user-visible value, with its refactor/bughunt/
-audit passes) — ✅ 2026-08-06. Current measured cost, release build including
-spawn: p50 3.6 ms / p95 4.4 ms on the common path, p50 16.3 ms / p95 19.5 ms
-on the typo path (budgets 25 / 75). The archive also holds the 2026-08-05
-name decision — settled, don't re-litigate.
+capture + shadow passthrough), Post-M1 hardening — ✅ 2026-08-05 — M2 (lexer
++ typo layer, the first user-visible value) and M3 (danger + context layers,
+policy, warning UI — the deterministic product complete), each with its
+refactor/bughunt/audit passes — ✅ 2026-08-06. The archive also holds the
+2026-08-05 name decision — settled, don't re-litigate.
+
+Current measured cost, release build including process spawn (budgets 25 /
+75 p95): common path p50 2.4 ms / p95 4.4 ms; typo path p50 16.3 ms / p95
+19.5 ms; candidate path incl. the git helper p50 15.0 ms / p95 18.1 ms.
 
 Standing rules carried out of archived milestones:
 
@@ -50,61 +53,8 @@ Standing rules carried out of archived milestones:
   exists today" statements — is fixed on sight, no queue. Substantive SPEC
   changes (behavior, scope, security posture) still go through Kyle first.
 
-## M3 — Danger + context layers, policy, warning UI
-
-- [x] layers/danger.rs: rule tables per SPEC §5-L2 (fs, git, system, privilege)
-      — ✅ 2026-08-06: candidate marking + direct-catastrophic flag (recursive
-      delete of / or ~); codes feed the shadow event log now, policy consumes
-      them next. priv.sudo fires only when the wrapped command tripped a rule.
-      Golden corpus eval/golden/danger.json (command-shape pairs; the
-      context-flip pairs arrive with policy + L3 below)
-- [x] layers/context.rs: git facts, target facts, near-miss targets — all
-      hard-capped syscall collectors — ✅ 2026-08-06: runs only on L2
-      candidates (common path stays syscall-free); git status as an external
-      helper per the standing rule (absolute path, fixed argv, 80 ms kill);
-      honest None when evidence is unavailable. Danger layer now hands its
-      literal targets to L3. Measured on this repo: candidate path ~4.7 ms
-      incl. git spawn
-- [x] policy.rs: evidence → decision matrix; direct-catastrophic subset;
-      intervention budget + per-rule cooldown; shadow conversion; full SPEC
-      §15 config surface incl. warn-once on unknown keys — ✅ 2026-08-06.
-      `warranted` is the mode-blind matrix the golden corpus pins;
-      `cap_for_mode` downgrades preserve the policy reason (that IS the
-      shadow conversion — an `observe` with reason `policy.dirty_work_at_risk`
-      is a hypothetical intervention for the M5 report). Budget/cooldown
-      machinery built and tested but not consumed at runtime until the
-      warning UI exists (gates run with commit=false semantics; nothing
-      invisible may spend budget). det_timeout_ms now drives the watchdog.
-      Flagship pair proven live: dirty `git reset --hard` → observe/
-      dirty_work_at_risk; probe in ~4.7 ms
-- [x] Warning UI: anatomy per SPEC §7; e/edit c/cancel r/run-once; exact
-      buffer restore on edit (PTY-tested) — ✅ 2026-08-06. Warn tier is
-      advisory (timeout runs), confirm tier pauses (timeout cancels — `r`
-      never the default). Budget/cooldown gates went live with it (spend
-      only on actually-shown prompts); outcomes land in the event log. The
-      deferred multi-byte key bug is fixed: the key reader consumes complete
-      escape sequences (CSI/SS3/alt-chords), PTY-pinned by
-      arrow_keys_at_a_prompt_leave_no_stray_bytes. Both flagship acceptance
-      halves PTY-proven: dirty reset warns with facts named and cancel has
-      zero side effects; clean reset passes silently
-- [x] recency relation (rest of SPEC §5-L3) — ✅ 2026-08-06, stronger than
-      spec'd: instead of stripping secrets from history text, the plugin
-      computes the relation itself and sends only sanitized summaries (age,
-      shares-a-word bit, first two words constrained to [A-Za-z0-9_-]{1,32},
-      else "_") — no raw history text ever crosses; the binary re-sanitizes.
-      Payload gained a third NUL section; surfaces as
-      recency.target_overlap evidence and the "previous command: git diff"
-      warning line (PTY-proven). Also hardened run_staged: a missing marker
-      now panics with the transcript instead of hanging the suite
-- [x] eval/golden: paired counterfactual cases for every danger rule (≥30%
-      pairs) — ✅ 2026-08-06: danger.json 42 command-shape cases +
-      policy.json 19 context-flip cases; every danger rule has a paired
-      presence; both corpora enforce the ratio in cargo test (CI itself: M6)
-- [x] Acceptance — ✅ 2026-08-06, all PTY-proven: dirty `git reset --hard`
-      warns with facts named / clean reset silent; corpus green; cancel has
-      zero side effects (dirty bytes verified untouched on disk)
-
-**M3 complete.**
+M3 — Danger + context layers, policy, warning UI ✅ 2026-08-06 → archived
+in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
 
 ## M4 — Inference layer
 
@@ -124,7 +74,10 @@ Standing rules carried out of archived milestones:
 ## M5 — Shadow pilot + report
 
 - [ ] `oopsinput report`: rates, latencies, evidence-code ranking, hypothetical
-      interventions from shadow data
+      interventions from shadow data. The mechanism it reads (built in M3):
+      a mode downgrade preserves the policy reason, so an event recorded as
+      `observe` with reason `policy.*` is an intervention that *would* have
+      fired — count those, don't recompute them
 - [ ] `oopsinput purge`; retention pruning
 - [ ] Author pilot: ≥1,000 natural commands in shadow+suggest; review top
       candidates + random allow sample; findings → regression fixtures.
@@ -146,26 +99,23 @@ Standing rules carried out of archived milestones:
       transitive deps like serde_json's `zmij`) on every push
 - [ ] SECURITY.md (audit 2026-08-05): security posture, the accepted
       same-user trust boundary, what the tool does/doesn't defend against,
-      vulnerability-report contact. Must state precisely (audit 2026-08-06,
-      learned from the `stty` finding): "same user" does NOT imply every
-      directory on $PATH is trusted — the typo layer fires on *unresolvable*
-      commands, so any helper resolved by name turns any typo into execution
-      of a predictable name from whatever directory leads $PATH (`.`, or a
-      repo's ./bin added by direnv); document the external-helper rule that
-      follows from it (see header). Also record: install.zsh leaves any
-      existing path (dangling symlinks included) untouched rather than
-      writing through it, and the binary refuses to write through a symlink
-      in its own state dir.
-      **Must also document the residual git-helper risk** (audit
-      2026-08-06): we neutralize the config keys that make `git status`
-      execute something (`core.fsmonitor`, hooks path, pager), but that
-      defense is a curated list — a future git release could add a new
-      exec-capable key. State plainly that oopsinput runs `git status` in
-      whatever directory the user is standing in, and that a repository
-      directory obtained from someone else (extracted archive, committed
-      fixture repo) is untrusted input. The structural fix — reading the
-      index ourselves, no git spawn at all — is a v2 candidate, not a v1
-      promise.
+      vulnerability-report contact. Three things it must state precisely:
+      (1) "same user" does NOT imply every directory on $PATH is trusted —
+      the typo layer fires on *unresolvable* commands, so any helper resolved
+      by name turns any typo into execution of a predictable name from
+      whatever directory leads $PATH (`.`, or a repo's ./bin added by
+      direnv); this is the rationale behind the external-helper standing rule
+      in the header (audit 2026-08-06, from the `stty` finding).
+      (2) The residual git-helper risk (audit 2026-08-06): oopsinput runs
+      `git status` in whatever directory the user is standing in, and a
+      repository obtained from someone else (extracted archive, committed
+      fixture repo) is untrusted input. We neutralize the exec-capable config
+      keys, but that is a curated list a future git release could outgrow.
+      The structural fix — reading the index ourselves, no git spawn — is a
+      v2 candidate, not a v1 promise.
+      (3) install.zsh leaves any existing path (dangling symlinks included)
+      untouched rather than writing through it, and the binary refuses to
+      write through a symlink in its own state dir.
 - [ ] `oopsinput doctor` covers: plugin installed, widgets wrapped, config
       valid, model reachable (optional), state perms
 - [ ] Clean-machine test: fresh user → install → shadow → report → uninstall
