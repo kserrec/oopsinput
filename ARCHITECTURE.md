@@ -10,13 +10,16 @@ How it relates to the other documents:
   and SPEC disagree, SPEC wins.
 - **[PLAN.md](PLAN.md)** tracks *progress*: which milestones are done and what
   each one covered.
-- **This document** covers *how the code works right now* — the M0–M2 state:
-  command capture in zsh, the conservative lexer, the typo layer with its
-  single-key prompt and correction channel, event logging, and the test
-  harness that proves buffers survive intact. Of the four analysis layers
-  designed in SPEC, only the first (typo) is built; danger, context, and
-  model are mentioned here only where the existing code leaves seams for
-  them.
+- **This document** covers *how the code works right now*, in depth through
+  the M2 state: command capture in zsh, the conservative lexer, the typo
+  layer with its single-key prompt and correction channel, event logging, and
+  the test harness that proves buffers survive intact. Two M3 layers have
+  since landed and are summarized in §9 pending this document's next full
+  refresh: the danger layer (`src/layers/danger.rs`, curated rule tables that
+  mark candidates) and the deterministic half of the context layer
+  (`src/layers/context.rs`, git/filesystem facts collected only for
+  candidates). Policy and the model layer remain unbuilt; nothing intervenes
+  on danger yet.
 
 ## 1. The pieces
 
@@ -579,10 +582,11 @@ Short versions — SPEC has the full arguments:
 
 Honest about what today's code does *not* do:
 
-- **Only the typo layer exists.** Danger, context, and model analysis are
-  designed in SPEC §5 but unbuilt, so no command is ever flagged for being
-  destructive yet. A `rm -rf` that resolves is passed through silently and
-  recorded, nothing more.
+- **Nothing intervenes on danger yet.** The danger and context layers now
+  *recognize* high-consequence commands and record their evidence, but the
+  policy engine that turns evidence into warnings is unbuilt — so a
+  `rm -rf` that resolves is passed through silently and recorded with its
+  evidence codes, nothing more. The model layer (L4) is also unbuilt.
 - **Only the first line of a multi-line command is analyzed.**
   Continuation lines typed at the `PS2` prompt pass through untouched.
 - **A multi-byte keypress at the prompt leaves stray bytes behind.** Arrow
@@ -600,7 +604,26 @@ Honest about what today's code does *not* do:
 
 See [PLAN.md](PLAN.md) — M0 (skeleton), M1 (zsh capture + shadow
 passthrough), and M2 (lexer + typo layer, the first user-visible value) are
-complete. M3 is next: the danger and context layers, the policy engine, and
-the warning UI. Files SPEC §16 lists for later milestones (`policy.rs`,
-`model.rs`, and the remaining `layers/`) don't exist yet by design — modules
-are created when their milestone starts.
+complete. M3 is underway; landed 2026-08-06, documented so far only here and
+in their module headers:
+
+- **`src/layers/danger.rs`** (L2) — curated rule tables recognizing
+  high-consequence command shapes (recursive/forced deletes with target
+  classification, git history rewrites, block-device writes, service stops,
+  package removal, sudo escalation). Emits stable evidence codes plus a
+  direct-catastrophic flag (recursive delete of `/` or home); never
+  intervenes on its own. It also hands the literal targets of fired rules to
+  L3.
+- **`src/layers/context.rs`** (L3, deterministic half) — fresh facts
+  collected only when L2 marked a candidate: git branch/detached/dirty/
+  untracked (dirty counts via `git status` as a bounded external helper —
+  absolute path, fixed argv, hard timeout), and per-target stats (exists,
+  symlink, capped entry count, canonicalized cwd/parent detection, near-miss
+  siblings). Unavailable evidence is reported as unavailable, never guessed.
+- **`src/distance.rs`** — the bounded edit distance, moved out of the typo
+  layer so context's near-miss check shares one implementation.
+
+Still ahead in M3: the recency relation (plugin-supplied), the policy
+engine, and the warning UI. Files SPEC §16 lists for later milestones
+(`policy.rs`, `model.rs`, `layers/infer.rs`) don't exist yet by design —
+modules are created when their milestone starts.

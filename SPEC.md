@@ -403,6 +403,8 @@ that key, say so once.
 oopsinput/
 ├── SPEC.md              # this file — canonical
 ├── PLAN.md              # milestones and progress
+├── PLAN-ARCHIVE.md      # completed milestones, archived verbatim
+├── ARCHITECTURE.md      # how the pieces fit — the developer's map
 ├── CLAUDE.md            # working agreement for coding sessions
 ├── README.md
 ├── LICENSE              # Apache-2.0
@@ -411,6 +413,7 @@ oopsinput/
 │   ├── main.rs          # dispatch: check / report / doctor / purge / version
 │   ├── proposal.rs      # input types + JSON seam          (M1)
 │   ├── lexer.rs         # conservative shell lexer          (M2)
+│   ├── distance.rs      # bounded edit distance, shared by typo + context (M3)
 │   ├── layers/          # typo.rs danger.rs context.rs infer.rs  (M2–M4)
 │   ├── policy.rs        # evidence → decision + budgets     (M3)
 │   ├── ui.rs            # /dev/tty prompts + escaping       (M2)
@@ -420,6 +423,7 @@ oopsinput/
 │   ├── oopsinput.zsh    # widget wrapper plugin
 │   ├── install.zsh
 │   └── uninstall.zsh
+├── scripts/             # dev/acceptance tooling (pty-gate.zsh)
 ├── eval/golden/         # paired JSON cases
 └── tests/               # integration + PTY tests
 ```

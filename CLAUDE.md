@@ -3,6 +3,12 @@
 SPEC.md is canonical; PLAN.md tracks milestones. When implementation and SPEC
 disagree, stop and update SPEC first (with Kyle), then code.
 
+Documentation must stay faithful to reality at all times (Kyle, 2026-08-06).
+Purely descriptive drift — SPEC §16's tree, module lists, "what exists
+today" claims in any doc — is standing-approved: fix it on sight. Only
+substantive SPEC changes (behavior, scope, security posture) need Kyle's
+sign-off first.
+
 ## Build / test
 
 Rust via rustup (user-level). If `cargo` isn't on PATH in a fresh shell:

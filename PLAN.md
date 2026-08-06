@@ -25,12 +25,11 @@ Standing rules carried out of archived milestones:
 - **Word boundaries follow the shell, not Unicode**: `lexer::is_shell_whitespace`
   (space/tab/newline only) governs every decision about where a word starts
   or ends (bughunt 2026-08-06).
-
-Open question for Kyle (structure review 2026-08-06): SPEC §16's repository
-tree omits `scripts/` (pty-gate.zsh), which exists and is documented in
-ARCHITECTURE.md. Adding the one line is a SPEC edit, so it waits for his
-sign-off. Same review also added the test-derivation rule to CLAUDE.md
-(tests come from proven failure modes, never ritual).
+- **Documentation stays faithful to reality at all times** (Kyle,
+  2026-08-06, resolving the structure-review question about SPEC §16's
+  stale tree): purely descriptive drift — file trees, module lists, "what
+  exists today" statements — is fixed on sight, no queue. Substantive SPEC
+  changes (behavior, scope, security posture) still go through Kyle first.
 
 ## M3 — Danger + context layers, policy, warning UI
 
