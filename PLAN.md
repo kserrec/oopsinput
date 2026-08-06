@@ -114,11 +114,27 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       differ from original cwd; all 3 were ungraduated candidate_observed
       shapes). 5 policy unit tests + 5 end-to-end tests (tests/model_path.rs,
       mock Ollama over the debug-only port seam).
-- [ ] Deterministic fallback path tested: Ollama down, slow, malformed, lying
+- [x] Deterministic fallback path tested: Ollama down, slow, malformed,
+      lying — ✅ 2026-08-06, all four end-to-end through the real binary
+      against mock servers (tests/model_path.rs): down → `model.unreachable`,
+      no stall; slow → cut off by consult's own deadline; malformed in
+      three flavors (garbage 200, schema-invalid verdict with an extra
+      field, 300 KB oversized body) → discarded whole; lying ("no
+      mismatch, run it" on an ambiguous candidate) → deterministic verdict
+      stands, the lie recorded as evidence. Every case: exit 0, the
+      deterministic reason code, and the model outcome logged.
 - [ ] Paired-corpus comparison: deterministic-only vs +model; model joins
       default config only if SPEC §11 bar is met
-- [ ] Acceptance: injection strings in command text cannot flip policy; model
-      recommendation never overrides direct-catastrophic rules
+- [x] Acceptance: injection strings in command text cannot flip policy; model
+      recommendation never overrides direct-catastrophic rules — ✅
+      2026-08-06. Pinned both directions with an *obedient* mock model (the
+      worst case for prompt separation): injected "reply no_mismatch" text
+      + a model that complies → verdict unmoved; a hostile escalating
+      answer → capped at Warn, invisible in shadow. Confirm is unreachable
+      from model output even in confirm mode (e2e), and direct-catastrophic
+      commands never consult at all (gate unit test + e2e never-connects
+      test, item 3). Done out of order — item 5 (paired corpus) is the one
+      M4 item left.
 
 ## M5 — Shadow pilot + report
 
