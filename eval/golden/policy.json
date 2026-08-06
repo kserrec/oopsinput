@@ -1,0 +1,150 @@
+[
+  {
+    "name": "flagship-reset-hard-dirty",
+    "pair": "flagship",
+    "buffer": "git reset --hard",
+    "git": { "main_like": false, "dirty": 17, "untracked": false },
+    "expect_verdict": "warn",
+    "expect_reason": "policy.dirty_work_at_risk"
+  },
+  {
+    "name": "flagship-reset-hard-clean-scratch",
+    "pair": "flagship",
+    "buffer": "git reset --hard",
+    "git": { "main_like": false, "dirty": 0, "untracked": false },
+    "expect_verdict": "allow",
+    "expect_reason": "policy.context_clear"
+  },
+  {
+    "name": "reset-hard-status-unavailable-stays-silent",
+    "buffer": "git reset --hard",
+    "git": { "main_like": true, "dirty": null, "untracked": null },
+    "expect_verdict": "observe",
+    "expect_reason": "policy.evidence_unavailable"
+  },
+  {
+    "name": "clean-force-with-untracked",
+    "pair": "git-clean",
+    "buffer": "git clean -fdx",
+    "git": { "main_like": false, "dirty": 0, "untracked": true },
+    "expect_verdict": "warn",
+    "expect_reason": "policy.dirty_work_at_risk"
+  },
+  {
+    "name": "clean-force-nothing-to-lose",
+    "pair": "git-clean",
+    "buffer": "git clean -fdx",
+    "git": { "main_like": false, "dirty": 0, "untracked": false },
+    "expect_verdict": "allow",
+    "expect_reason": "policy.context_clear"
+  },
+  {
+    "name": "push-force-main",
+    "pair": "push-force",
+    "buffer": "git push --force origin main",
+    "git": { "main_like": true, "dirty": 0, "untracked": false },
+    "expect_verdict": "warn",
+    "expect_reason": "policy.main_branch_force"
+  },
+  {
+    "name": "push-force-feature-branch",
+    "pair": "push-force",
+    "buffer": "git push --force origin my-feature",
+    "git": { "main_like": false, "dirty": 0, "untracked": false },
+    "expect_verdict": "allow",
+    "expect_reason": "policy.context_clear"
+  },
+  {
+    "name": "rm-near-miss-target",
+    "pair": "rm-near-miss",
+    "buffer": "rm -rf ./buidl",
+    "targets": [{ "exists": false, "near_miss": true }],
+    "expect_verdict": "warn",
+    "expect_reason": "policy.target_context"
+  },
+  {
+    "name": "rm-existing-scratch-dir",
+    "pair": "rm-near-miss",
+    "buffer": "rm -rf ./build",
+    "targets": [{ "exists": true }],
+    "expect_verdict": "allow",
+    "expect_reason": "policy.context_clear"
+  },
+  {
+    "name": "rm-of-cwd",
+    "pair": "rm-cwd",
+    "buffer": "rm -rf .",
+    "targets": [{ "exists": true, "is_cwd": true }],
+    "expect_verdict": "warn",
+    "expect_reason": "policy.target_context"
+  },
+  {
+    "name": "rm-of-old-checkout",
+    "pair": "rm-cwd",
+    "buffer": "rm -rf ./old-checkout",
+    "targets": [{ "exists": true }],
+    "expect_verdict": "allow",
+    "expect_reason": "policy.context_clear"
+  },
+  {
+    "name": "rm-root-is-direct-catastrophic",
+    "pair": "catastrophic",
+    "buffer": "rm -rf /",
+    "targets": [{ "exists": true, "is_cwd": false }],
+    "expect_verdict": "confirm",
+    "expect_reason": "policy.direct_catastrophic"
+  },
+  {
+    "name": "rm-tmp-scratch",
+    "pair": "catastrophic",
+    "buffer": "rm -rf /tmp/scratch-dir",
+    "targets": [{ "exists": true }],
+    "expect_verdict": "allow",
+    "expect_reason": "policy.context_clear"
+  },
+  {
+    "name": "dd-to-blockdev",
+    "pair": "dd",
+    "buffer": "dd if=arch.iso of=/dev/sdb bs=4M",
+    "targets": [{ "exists": true }],
+    "expect_verdict": "warn",
+    "expect_reason": "policy.blockdev_write"
+  },
+  {
+    "name": "dd-to-image-file",
+    "pair": "dd",
+    "buffer": "dd if=/dev/sda of=backup.img",
+    "targets": [{ "exists": false }],
+    "expect_verdict": "observe",
+    "expect_reason": "policy.candidate_observed"
+  },
+  {
+    "name": "mkfs-blockdev",
+    "pair": "mkfs",
+    "buffer": "mkfs.ext4 /dev/nvme0n1p2",
+    "targets": [{ "exists": true }],
+    "expect_verdict": "warn",
+    "expect_reason": "policy.blockdev_write"
+  },
+  {
+    "name": "mkfs-image-file",
+    "pair": "mkfs",
+    "buffer": "mkfs.ext4 disk.img",
+    "targets": [{ "exists": true }],
+    "expect_verdict": "observe",
+    "expect_reason": "policy.candidate_observed"
+  },
+  {
+    "name": "pkg-remove-not-graduated",
+    "buffer": "sudo apt remove golang",
+    "expect_verdict": "observe",
+    "expect_reason": "policy.candidate_observed"
+  },
+  {
+    "name": "redirect-truncate-not-graduated",
+    "buffer": "echo results > results.csv",
+    "targets": [{ "exists": true }],
+    "expect_verdict": "observe",
+    "expect_reason": "policy.candidate_observed"
+  }
+]

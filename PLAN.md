@@ -46,14 +46,18 @@ Standing rules carried out of archived milestones:
       honest None when evidence is unavailable. Danger layer now hands its
       literal targets to L3. Measured on this repo: candidate path ~4.7 ms
       incl. git spawn
-- [ ] recency relation (rest of SPEC §5-L3): plugin-supplied structural
-      summaries of recent commands, secrets stripped in the plugin — zsh
-      plugin change, so PTY tests required
-- [ ] policy.rs: evidence → decision matrix; direct-catastrophic subset;
-      intervention budget + per-rule cooldown; shadow conversion. Note a
-      minimal config reader already exists from M2 ($OOPSINPUT_MODE > config
-      `mode` key > shadow, unknown values → shadow); this expands it to the
-      full SPEC §15 surface incl. warn-once on unknown keys
+- [x] policy.rs: evidence → decision matrix; direct-catastrophic subset;
+      intervention budget + per-rule cooldown; shadow conversion; full SPEC
+      §15 config surface incl. warn-once on unknown keys — ✅ 2026-08-06.
+      `warranted` is the mode-blind matrix the golden corpus pins;
+      `cap_for_mode` downgrades preserve the policy reason (that IS the
+      shadow conversion — an `observe` with reason `policy.dirty_work_at_risk`
+      is a hypothetical intervention for the M5 report). Budget/cooldown
+      machinery built and tested but not consumed at runtime until the
+      warning UI exists (gates run with commit=false semantics; nothing
+      invisible may spend budget). det_timeout_ms now drives the watchdog.
+      Flagship pair proven live: dirty `git reset --hard` → observe/
+      dirty_work_at_risk; probe in ~4.7 ms
 - [ ] Warning UI: anatomy per SPEC §7; e/edit c/cancel r/run-once; exact
       buffer restore on edit (PTY-tested). Deferred bughunt finding
       (2026-08-06, deferred because this item rebuilds the prompt key
@@ -61,8 +65,17 @@ Standing rules carried out of archived milestones:
       sequence (arrow keys: ESC [ A) as ESC + leftover bytes, which leak
       into the next ZLE buffer as stray characters — the new key reader
       must consume complete escape sequences
+- [ ] recency relation (rest of SPEC §5-L3): plugin-supplied structural
+      summaries of recent commands, secrets stripped in the plugin — zsh
+      plugin change, so PTY tests required. (Reordered after policy + UI,
+      2026-08-06: it had no consumer until policy existed, the M3 acceptance
+      doesn't depend on it, and its plugin protocol should be shaped by what
+      policy actually consumes)
 - [ ] eval/golden: paired counterfactual cases for every danger rule (≥30%
-      pairs); CI runs the corpus
+      pairs); CI runs the corpus. Partially covered 2026-08-06: danger.json
+      (34 command-shape cases) + policy.json (19 context-flip cases incl.
+      the flagship pair) both enforce the ≥30% pair ratio in cargo test;
+      remaining: pairs for every not-yet-paired danger rule, CI itself is M6
 - [ ] Acceptance: flagship pair behaves (dirty `git reset --hard` warns; clean
       scratch-branch reset silent); corpus green; zero side effects on cancel
 

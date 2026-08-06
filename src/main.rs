@@ -16,11 +16,11 @@ mod distance;
 mod events;
 mod layers;
 mod lexer;
+mod policy;
 mod proposal;
 mod ui;
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -85,9 +85,9 @@ static PROMPT_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// shell-side wait becomes perceptible. The process is per-command, so a blunt
 /// exit is safe: there is nothing to clean up that matters more than the
 /// user's prompt.
-fn arm_watchdog() {
-    std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(deadline_ms()));
+fn arm_watchdog(deadline_ms: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(deadline_ms));
         if !PROMPT_ACTIVE.load(Ordering::SeqCst) {
             std::process::exit(1);
         }
@@ -97,79 +97,30 @@ fn arm_watchdog() {
 }
 
 /// Test hooks exist in debug builds only (the PTY suite runs against the
-/// debug profile); release binaries have a fixed deadline and no hang hook.
-fn deadline_ms() -> u64 {
+/// debug profile); release binaries take the deadline from config (SPEC §15
+/// det_timeout_ms, validated and range-clamped in policy.rs).
+fn deadline_ms(configured: u64) -> u64 {
     #[cfg(debug_assertions)]
     if let Ok(v) = std::env::var("OOPSINPUT_TEST_DEADLINE_MS") {
         return v.parse().unwrap_or(DET_DEADLINE_MS);
     }
-    DET_DEADLINE_MS
-}
-
-/// Operating mode (SPEC §8/§15). Only the L1-relevant split exists so far:
-/// warn/confirm include L1 prompts per §8, so they resolve to Suggest until
-/// their own layers land (M3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Shadow,
-    Suggest,
-}
-
-/// Precedence: $OOPSINPUT_MODE, then the config file's `mode` key, then
-/// shadow. Unknown values collapse to shadow — the silent mode is the safe
-/// one (SPEC §15: invalid values fall back to the default).
-fn resolve_mode() -> Mode {
-    if let Ok(v) = std::env::var("OOPSINPUT_MODE") {
-        return parse_mode(&v);
-    }
-    let Some(path) = config_path() else {
-        return Mode::Shadow;
-    };
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Mode::Shadow;
-    };
-    parse_mode(config_value(&text, "mode").unwrap_or(""))
-}
-
-fn parse_mode(s: &str) -> Mode {
-    match s {
-        "suggest" | "warn" | "confirm" => Mode::Suggest,
-        _ => Mode::Shadow,
-    }
-}
-
-/// $XDG_CONFIG_HOME/oopsinput/config else ~/.config/oopsinput/config.
-fn config_path() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
-        && !xdg.is_empty()
-    {
-        return Some(PathBuf::from(xdg).join("oopsinput/config"));
-    }
-    let home = std::env::var("HOME").ok()?;
-    (!home.is_empty()).then(|| PathBuf::from(home).join(".config/oopsinput/config"))
-}
-
-/// Minimal `key = value` reader for the SPEC §15 surface: first match wins,
-/// `#` starts a comment, whitespace is trimmed. The full surface (warn-once
-/// on unknown keys) arrives with policy.rs in M3.
-fn config_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-    for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("");
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        if k.trim() == key {
-            return Some(v.trim());
-        }
-    }
-    None
+    #[cfg(not(debug_assertions))]
+    let _ = DET_DEADLINE_MS;
+    configured
 }
 
 /// Read one proposal from stdin (+ adapter flags), analyze, record a shadow
 /// event, print a Decision as JSON on stdout, signal via exit code.
 fn check(args: &[String]) -> ExitCode {
     let started = Instant::now();
-    arm_watchdog();
+    // Config first, watchdog immediately after: the read is a bounded open +
+    // capped read of one small local file — the only thing that could hang it
+    // is a hung home filesystem, the same documented residual boundary that
+    // already applies to every state write. Everything with real work in it
+    // runs under the watchdog.
+    let cfg = policy::load_config();
+    arm_watchdog(deadline_ms(cfg.det_timeout_ms));
+    policy::emit_config_warnings_once(&cfg);
 
     // Test hook (debug builds only): prove the watchdog end-to-end — a plugin
     // pointed at a hanging binary must still run the user's command.
@@ -221,11 +172,26 @@ fn check(args: &[String]) -> ExitCode {
     // pollute the latency percentiles the budgets are measured against.
     let duration_us = started.elapsed().as_micros();
 
-    // Visible intervention (suggest mode and up): ask, then act on the
-    // answer. Shadow stays silent and records what would have happened.
+    // Visible intervention (suggest mode and up): the L1 prompt. Otherwise
+    // the policy matrix decides. Its warn/confirm verdicts cannot be shown
+    // until the warning UI (next M3 item) exists, so they are recorded as
+    // observe with the policy reason preserved — that preserved reason is the
+    // shadow conversion the report reads — and without touching the
+    // intervention budget (nothing was actually shown).
     let (decision_str, reason_code, exit_code) = match &suggestion {
-        Some(s) if resolve_mode() != Mode::Shadow => typo_intervention(&proposal.buffer, s),
-        _ => ("allow", "shadow.observed", 0u8),
+        Some(s) if cfg.mode != policy::Mode::Shadow => typo_intervention(&proposal.buffer, s),
+        _ => {
+            let capped =
+                policy::cap_for_mode(policy::warranted(&danger, context.as_ref()), cfg.mode);
+            let recorded = match capped.verdict {
+                policy::Verdict::Warn | policy::Verdict::Confirm => policy::Assessment {
+                    verdict: policy::Verdict::Observe,
+                    reason: capped.reason,
+                },
+                _ => capped,
+            };
+            (recorded.verdict.as_str(), recorded.reason, 0u8)
+        }
     };
 
     let decision = Decision {
@@ -387,7 +353,7 @@ fn doctor() -> ExitCode {
     // Regression (bughunt 2026-08-06): this line once hardcoded
     // ~/.config, contradicting the mode line below whenever
     // XDG_CONFIG_HOME pointed elsewhere. Both must resolve identically.
-    match config_path() {
+    match policy::config_path() {
         None => println!("  config:     HOME is unset — cannot locate config"),
         Some(config) => {
             let config_exists = std::fs::metadata(&config).is_ok();
@@ -400,13 +366,25 @@ fn doctor() -> ExitCode {
                     "(absent — defaults in effect)"
                 }
             );
+            let cfg = policy::load_config();
             println!(
                 "  mode:       {}",
-                match resolve_mode() {
-                    Mode::Shadow => "shadow",
-                    Mode::Suggest => "suggest (L1 typo prompts)",
+                match cfg.mode {
+                    policy::Mode::Shadow => "shadow",
+                    policy::Mode::Suggest => "suggest (L1 typo prompts)",
+                    // honest until the M3 warning UI lands: these record
+                    // would-be interventions but show only L1 prompts
+                    policy::Mode::Warn => "warn (L1 prompts; visible warnings pending the M3 UI)",
+                    policy::Mode::Confirm =>
+                        "confirm (L1 prompts; visible confirmations pending the M3 UI)",
                 }
             );
+            if !cfg.warnings.is_empty() {
+                println!(
+                    "  config:     {} issue(s) — shown in detail once on next check",
+                    cfg.warnings.len()
+                );
+            }
         }
     }
 
@@ -587,29 +565,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn mode_vocabulary_is_closed_and_fails_to_shadow() {
-        assert_eq!(parse_mode("shadow"), Mode::Shadow);
-        assert_eq!(parse_mode("suggest"), Mode::Suggest);
-        // warn/confirm include L1 prompts (SPEC §8) until their layers land
-        assert_eq!(parse_mode("warn"), Mode::Suggest);
-        assert_eq!(parse_mode("confirm"), Mode::Suggest);
-        // anything else — typos, injection attempts, empty — is shadow
-        assert_eq!(parse_mode(""), Mode::Shadow);
-        assert_eq!(parse_mode("SUGGEST"), Mode::Shadow);
-        assert_eq!(parse_mode("$(rm -rf /)"), Mode::Shadow);
-    }
-
-    #[test]
-    fn config_value_reads_the_spec_15_shape() {
-        let text = "# comment\nmode = suggest   # trailing comment\nmodel = qwen3.5:4b\n";
-        assert_eq!(config_value(text, "mode"), Some("suggest"));
-        assert_eq!(config_value(text, "model"), Some("qwen3.5:4b"));
-        assert_eq!(config_value(text, "missing"), None);
-        assert_eq!(config_value("", "mode"), None);
-        // first match wins; malformed lines are skipped
-        assert_eq!(config_value("garbage\nmode=a\nmode=b", "mode"), Some("a"));
-    }
+    // Mode vocabulary and the SPEC §15 config surface are policy.rs's
+    // domain now — their tests moved there with the code.
 
     #[test]
     fn find_in_path_finds_sh() {

@@ -44,7 +44,7 @@ pub fn now_ms() -> u64 {
 
 /// State dir: $OOPSINPUT_STATE_DIR override (tests, custom setups) else
 /// $XDG_STATE_HOME/oopsinput else ~/.local/state/oopsinput.
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("OOPSINPUT_STATE_DIR")
         && !dir.is_empty()
     {
