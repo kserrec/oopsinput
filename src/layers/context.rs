@@ -29,7 +29,9 @@ pub struct GitFacts {
 
 pub struct TargetFact {
     pub exists: bool,
-    /// Read by policy (next M3 item); until then only tests consume it.
+    /// Collected as part of the fact set but not consumed by policy's
+    /// current matrix — only tests read it today. Kept because a stat
+    /// already computes it and the M5 pilot may want it as evidence.
     #[allow(dead_code)]
     pub is_dir: bool,
     pub is_symlink: bool,
@@ -198,20 +200,9 @@ fn run_capture(mut cmd: std::process::Command, timeout_ms: u64, cap: u64) -> Opt
     });
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-            // Failed, overran, or unwaitable: kill, reap, degrade. The
-            // reader is left to die with the process.
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
+    // On failure the reader is left to die with the process.
+    if !crate::proc::wait_or_kill(&mut child, deadline) {
+        return None;
     }
     while !reader.is_finished() {
         if std::time::Instant::now() >= deadline {

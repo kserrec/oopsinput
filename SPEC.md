@@ -414,6 +414,7 @@ oopsinput/
 │   ├── proposal.rs      # input types + JSON seam          (M1)
 │   ├── lexer.rs         # conservative shell lexer          (M2)
 │   ├── distance.rs      # bounded edit distance, shared by typo + context (M3)
+│   ├── proc.rs          # bounded external-helper wait/kill loop (M3)
 │   ├── layers/          # typo.rs danger.rs context.rs infer.rs  (M2–M4)
 │   ├── policy.rs        # evidence → decision + budgets     (M3)
 │   ├── ui.rs            # /dev/tty prompts + escaping       (M2)

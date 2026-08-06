@@ -200,22 +200,7 @@ fn run_bounded(mut cmd: std::process::Command, timeout_ms: u64) -> Option<String
     let mut child = cmd.spawn().ok()?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-            // Wedged or unwaitable: kill it and degrade. Reaped immediately
-            // so we never leave a zombie behind.
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    if !status.success() {
+    if !crate::proc::wait_or_kill(&mut child, deadline) {
         return None;
     }
     // Callers pipe only tiny outputs (stty's mode string), far below the pipe
@@ -362,6 +347,116 @@ fn run_warning_prompt<T: PromptTty>(tty: &mut T, lines: &[String], pausing: bool
     }
     let _ = tty.write_all(b"\r\n");
     choice
+}
+
+/// Assemble the warning's message lines (SPEC §7 anatomy: what the command
+/// does, what it hits, why the current context is unusual — the UI adds the
+/// keys). Trusted template text plus escaped untrusted fragments only.
+pub fn warning_lines(
+    reason: &str,
+    danger: &crate::layers::danger::Analysis,
+    context: Option<&crate::layers::context::Context>,
+    recency: &[crate::proposal::RecencyEntry],
+) -> Vec<String> {
+    let has = |code: &str| danger.codes.contains(&code);
+    let git = context.and_then(|c| c.git.as_ref());
+    let targets = || -> String {
+        let joined = danger
+            .targets
+            .iter()
+            .map(|t| format!("'{}'", escape_for_display(t)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if joined.is_empty() {
+            "its target".to_string()
+        } else {
+            joined
+        }
+    };
+    match reason {
+        "policy.dirty_work_at_risk" => {
+            let action = if has("git.reset_hard") {
+                "git reset --hard will discard uncommitted changes in tracked files"
+            } else {
+                "git clean -f will delete untracked files"
+            };
+            let mut facts = Vec::new();
+            if let Some(d) = git.and_then(|g| g.dirty)
+                && d > 0
+            {
+                facts.push(format!(
+                    "{d} modified tracked file{}",
+                    if d == 1 { "" } else { "s" }
+                ));
+            }
+            if git.and_then(|g| g.untracked) == Some(true) {
+                facts.push("untracked files present".to_string());
+            }
+            let mut lines = vec![
+                action.to_string(),
+                format!("right now: {}", facts.join(", ")),
+            ];
+            // "right after git diff" (SPEC §5-L3): name the previous command
+            // when its words were clean enough to survive sanitization —
+            // charset-enforced in proposal.rs, so inert on a terminal.
+            if let Some(prev) = recency.first()
+                && prev.age == 1
+                && prev.cmd != "_"
+            {
+                let mut line = format!("previous command: {}", prev.cmd);
+                if prev.sub != "_" {
+                    line.push(' ');
+                    line.push_str(&prev.sub);
+                }
+                lines.push(line);
+            }
+            lines
+        }
+        "policy.main_branch_force" => vec![
+            "force-push will rewrite the remote branch's history".to_string(),
+            "the current branch is a primary branch (main/master/trunk)".to_string(),
+        ],
+        "policy.target_context" => {
+            let t = context.map(|c| c.targets.as_slice()).unwrap_or(&[]);
+            let why = if has("fs.target_cwd") || t.iter().any(|t| t.is_cwd) {
+                "the target is the current directory itself"
+            } else if has("fs.target_parent") || t.iter().any(|t| t.is_parent) {
+                "the target is the parent of the current directory"
+            } else {
+                "the target does not exist, but a similarly-named neighbor does — typo?"
+            };
+            vec![
+                format!("recursive delete of {}", targets()),
+                why.to_string(),
+            ]
+        }
+        "policy.blockdev_write" => {
+            let dev = danger
+                .targets
+                .iter()
+                .find(|t| t.starts_with("/dev/"))
+                .map(|t| escape_for_display(t))
+                .unwrap_or_else(|| "a raw disk device".to_string());
+            vec![
+                format!("this writes directly to {dev}"),
+                "everything currently stored there becomes unrecoverable".to_string(),
+            ]
+        }
+        "policy.direct_catastrophic" => {
+            let what = if has("fs.target_home") {
+                "your entire home directory"
+            } else {
+                "the filesystem root"
+            };
+            vec![
+                format!("this recursively deletes {what}"),
+                "there is no undo".to_string(),
+            ]
+        }
+        _ => vec![format!(
+            "high-consequence command flagged by policy ({reason})"
+        )],
+    }
 }
 
 /// Neutralize text for display (SPEC §9-5): C0/C1 controls and DEL become
@@ -752,6 +847,42 @@ mod tests {
             run_warning_prompt(&mut tty, &lines(), true),
             WarnChoice::Cancel
         );
+    }
+
+    #[test]
+    fn warning_lines_name_the_facts() {
+        use crate::layers::context::{Context, GitFacts};
+        // flagship: dirty reset — counts named, no raw command text needed
+        let danger =
+            crate::layers::danger::analyze_with_home(&crate::lexer::lex("git reset --hard"), None);
+        let ctx = Context {
+            git: Some(GitFacts {
+                detached: false,
+                branch_main_like: false,
+                dirty: Some(17),
+                untracked: Some(true),
+            }),
+            targets: vec![],
+        };
+        let lines = warning_lines("policy.dirty_work_at_risk", &danger, Some(&ctx), &[]);
+        let joined = lines.join("\n");
+        assert!(joined.contains("git reset --hard"), "{joined}");
+        assert!(joined.contains("17 modified tracked files"), "{joined}");
+        assert!(joined.contains("untracked files present"), "{joined}");
+
+        // catastrophic home delete names what dies
+        let danger = crate::layers::danger::analyze_with_home(&crate::lexer::lex("rm -rf ~"), None);
+        let joined = warning_lines("policy.direct_catastrophic", &danger, None, &[]).join("\n");
+        assert!(joined.contains("home directory"), "{joined}");
+
+        // hostile target text is escaped before display (SPEC §9-5)
+        let danger = crate::layers::danger::analyze_with_home(
+            &crate::lexer::lex("rm -rf ./x\u{1b}EVIL\u{7}y"),
+            None,
+        );
+        let joined = warning_lines("policy.target_context", &danger, None, &[]).join("\n");
+        assert!(!joined.contains('\u{1b}'), "raw ESC in warning: {joined:?}");
+        assert!(joined.contains("./x^[EVIL^Gy"), "{joined}");
     }
 
     #[test]

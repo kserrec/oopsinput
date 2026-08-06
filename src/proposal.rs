@@ -180,47 +180,47 @@ fn parse_payload(mut bytes: Vec<u8>) -> Result<Payload, ReadError> {
         None => (rest, None, false),
     };
 
-    let mut names: Vec<String> = names_bytes
+    // A section whose closing separator was beyond the capped read may have
+    // its final line cut mid-entry — that line is dropped, never guessed at.
+    let names_capped = over_cap && !names_end_seen;
+    let recency_capped = over_cap && names_end_seen;
+    Ok(Payload {
+        buffer,
+        capped: false,
+        names: parse_names_section(&names_bytes, names_capped),
+        names_capped,
+        recency: parse_recency_section(recency_bytes.as_deref().unwrap_or(&[]), recency_capped),
+    })
+}
+
+fn parse_names_section(bytes: &[u8], cut: bool) -> Vec<String> {
+    let mut names: Vec<String> = bytes
         .split(|&b| b == b'\n')
         .filter(|n| !n.is_empty())
         .filter_map(|n| std::str::from_utf8(n).ok().map(str::to_string))
         .take(MAX_NAMES)
         .collect();
-    // Cap fell inside the names section (no closing separator was read): the
-    // final name may be cut mid-name — drop it rather than risk suggesting a
-    // corruption.
-    let names_capped = over_cap && !names_end_seen;
-    if names_capped {
+    if cut {
         names.pop();
     }
+    names
+}
 
-    let mut raw_recency: Vec<&[u8]> = recency_bytes
-        .as_deref()
-        .unwrap_or(&[])
-        .split(|&b| b == b'\n')
-        .collect();
-    if over_cap && names_end_seen {
-        // The cap fell inside the recency tail: the last RAW line may be cut.
-        // It must be dropped before parsing — a cut line usually fails the
-        // parse and vanishes on its own, and popping after parsing would
-        // then remove a complete entry instead (probed: the unit test below
-        // caught exactly that).
-        raw_recency.pop();
+fn parse_recency_section(bytes: &[u8], cut: bool) -> Vec<RecencyEntry> {
+    let mut raw_lines: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
+    if cut {
+        // The possibly-cut RAW line must go before parsing — a cut line
+        // usually fails the parse and vanishes on its own, and popping after
+        // parsing would then remove a complete entry instead (probed: the
+        // unit test below caught exactly that).
+        raw_lines.pop();
     }
-    let recency: Vec<RecencyEntry> = raw_recency
+    raw_lines
         .into_iter()
         .filter_map(|l| std::str::from_utf8(l).ok())
         .filter_map(parse_recency_line)
         .take(MAX_RECENCY)
-        .collect();
-
-    Ok(Payload {
-        buffer,
-        capped: false,
-        names,
-        names_capped,
-        recency,
-    })
+        .collect()
 }
 
 /// `<age> <shares> <cmd> <sub>` — strict on the numeric fields (a malformed

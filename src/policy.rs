@@ -47,7 +47,7 @@ pub struct Assessment {
     pub reason: &'static str,
 }
 
-const fn a(verdict: Verdict, reason: &'static str) -> Assessment {
+const fn assess(verdict: Verdict, reason: &'static str) -> Assessment {
     Assessment { verdict, reason }
 }
 
@@ -57,10 +57,10 @@ const fn a(verdict: Verdict, reason: &'static str) -> Assessment {
 pub fn warranted(danger: &Analysis, ctx: Option<&Context>) -> Assessment {
     if danger.codes.is_empty() {
         // Legacy string from M1 — the PTY suite and existing logs pin it.
-        return a(Verdict::Allow, "shadow.observed");
+        return assess(Verdict::Allow, "shadow.observed");
     }
     if danger.catastrophic {
-        return a(Verdict::Confirm, "policy.direct_catastrophic");
+        return assess(Verdict::Confirm, "policy.direct_catastrophic");
     }
     let has = |code: &str| danger.codes.contains(&code);
     let git = ctx.and_then(|c| c.git.as_ref());
@@ -71,27 +71,27 @@ pub fn warranted(danger: &Analysis, ctx: Option<&Context>) -> Assessment {
         return match git {
             Some(g) => match (g.dirty, g.untracked) {
                 (Some(d), u) if d > 0 || u == Some(true) => {
-                    a(Verdict::Warn, "policy.dirty_work_at_risk")
+                    assess(Verdict::Warn, "policy.dirty_work_at_risk")
                 }
-                (Some(_), Some(_)) => a(Verdict::Allow, "policy.context_clear"),
+                (Some(_), Some(_)) => assess(Verdict::Allow, "policy.context_clear"),
                 // status unavailable: no claim, no nag — fail toward silence
-                _ => a(Verdict::Observe, "policy.evidence_unavailable"),
+                _ => assess(Verdict::Observe, "policy.evidence_unavailable"),
             },
             // not in a repo: the command will fail on its own
-            None => a(Verdict::Observe, "policy.evidence_unavailable"),
+            None => assess(Verdict::Observe, "policy.evidence_unavailable"),
         };
     }
     if has("git.push_force") {
         return match git {
-            Some(g) if g.branch_main_like => a(Verdict::Warn, "policy.main_branch_force"),
-            Some(_) => a(Verdict::Allow, "policy.context_clear"),
-            None => a(Verdict::Observe, "policy.evidence_unavailable"),
+            Some(g) if g.branch_main_like => assess(Verdict::Warn, "policy.main_branch_force"),
+            Some(_) => assess(Verdict::Allow, "policy.context_clear"),
+            None => assess(Verdict::Observe, "policy.evidence_unavailable"),
         };
     }
     // Writing to a block device by name shape is warn-worthy on its own —
     // there is no benign-context read of it that L3 can establish.
     if has("fs.target_blockdev") {
-        return a(Verdict::Warn, "policy.blockdev_write");
+        return assess(Verdict::Warn, "policy.blockdev_write");
     }
     if has("fs.rm_recursive") {
         let target_flagged = has("fs.target_cwd")
@@ -100,16 +100,16 @@ pub fn warranted(danger: &Analysis, ctx: Option<&Context>) -> Assessment {
                 .iter()
                 .any(|t| t.is_cwd || t.is_parent || t.near_miss);
         if target_flagged {
-            return a(Verdict::Warn, "policy.target_context");
+            return assess(Verdict::Warn, "policy.target_context");
         }
         if !targets.is_empty() && targets.iter().all(|t| t.exists) {
-            return a(Verdict::Allow, "policy.context_clear");
+            return assess(Verdict::Allow, "policy.context_clear");
         }
-        return a(Verdict::Observe, "policy.evidence_unavailable");
+        return assess(Verdict::Observe, "policy.evidence_unavailable");
     }
     // Recognized but not yet graduated past shadow (SPEC §8): the pilot's
     // event log decides which of these earn a warn tier.
-    a(Verdict::Observe, "policy.candidate_observed")
+    assess(Verdict::Observe, "policy.candidate_observed")
 }
 
 // ---- modes (SPEC §8) ------------------------------------------------------
@@ -139,9 +139,9 @@ fn parse_mode(s: &str) -> Option<Mode> {
 pub fn cap_for_mode(assessment: Assessment, mode: Mode) -> Assessment {
     match (mode, assessment.verdict) {
         (Mode::Shadow | Mode::Suggest, Verdict::Warn | Verdict::Confirm) => {
-            a(Verdict::Observe, assessment.reason)
+            assess(Verdict::Observe, assessment.reason)
         }
-        (Mode::Warn, Verdict::Confirm) => a(Verdict::Warn, assessment.reason),
+        (Mode::Warn, Verdict::Confirm) => assess(Verdict::Warn, assessment.reason),
         _ => assessment,
     }
 }
@@ -194,13 +194,13 @@ pub fn apply_gates(
             .get(code)
             .is_some_and(|c| c.until_ms > now_ms)
     {
-        return a(Verdict::Observe, "policy.rule_cooldown");
+        return assess(Verdict::Observe, "policy.rule_cooldown");
     }
     state
         .interventions_ts_ms
         .retain(|t| now_ms.saturating_sub(*t) < HOUR_MS);
     if state.interventions_ts_ms.len() as u32 >= budget_per_hour {
-        return a(Verdict::Observe, "policy.budget_exhausted");
+        return assess(Verdict::Observe, "policy.budget_exhausted");
     }
     if commit {
         state.interventions_ts_ms.push(now_ms);
@@ -286,11 +286,16 @@ pub struct Config {
     pub warnings: Vec<String>,
 }
 
+/// Deterministic-path deadline default (SPEC §10/§15) — the single source
+/// for the 150 ms figure: the config default here, the watchdog fallback in
+/// main.rs.
+pub(crate) const DET_TIMEOUT_DEFAULT_MS: u64 = 150;
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             mode: Mode::Shadow,
-            det_timeout_ms: 150,
+            det_timeout_ms: DET_TIMEOUT_DEFAULT_MS,
             budget_per_hour: 3,
             model: None,
             model_timeout_ms: 2_000,
@@ -358,20 +363,15 @@ fn parse_config(text: &str) -> Config {
             continue;
         };
         let (k, v) = (k.trim(), v.trim());
-        match k {
-            "mode" | "model" | "model_timeout_ms" | "det_timeout_ms" | "budget_per_hour"
-            | "log_raw" => {
-                if !seen.insert(k) {
-                    continue; // first occurrence won
-                }
-            }
-            _ => {
-                // Unknown key: named by line number only — the key text is
-                // untrusted input and never reaches a terminal (SPEC §9-5).
-                cfg.warnings
-                    .push(format!("line {line_no}: unknown key, ignored"));
-                continue;
-            }
+        if !KNOWN_KEYS.contains(&k) {
+            // Unknown key: named by line number only — the key text is
+            // untrusted input and never reaches a terminal (SPEC §9-5).
+            cfg.warnings
+                .push(format!("line {line_no}: unknown key, ignored"));
+            continue;
+        }
+        if !seen.insert(k) {
+            continue; // first occurrence won
         }
         match k {
             "mode" => match parse_mode(v) {
@@ -405,11 +405,22 @@ fn parse_config(text: &str) -> Config {
                     .warnings
                     .push(format!("line {line_no}: invalid log_raw, using false")),
             },
-            _ => unreachable!("filtered above"),
+            _ => {} // KNOWN_KEYS and these arms list the same keys
         }
     }
     cfg
 }
+
+/// The SPEC §15 key set — kept beside `parse_config`, whose dispatch arms
+/// must mirror it.
+const KNOWN_KEYS: [&str; 6] = [
+    "mode",
+    "model",
+    "model_timeout_ms",
+    "det_timeout_ms",
+    "budget_per_hour",
+    "log_raw",
+];
 
 fn parse_num(
     v: &str,
@@ -527,17 +538,7 @@ mod tests {
             expect_reason: String,
         }
 
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/eval/golden/policy.json");
-        let text = std::fs::read_to_string(path).expect("read golden corpus");
-        let cases: Vec<Case> = serde_json::from_str(&text).expect("parse golden corpus");
-        assert!(!cases.is_empty());
-        let paired = cases.iter().filter(|c| c.pair.is_some()).count();
-        assert!(
-            paired * 100 >= cases.len() * 30,
-            "SPEC §11: ≥30% of golden cases must be counterfactual pairs \
-             ({paired}/{} are)",
-            cases.len()
-        );
+        let cases: Vec<Case> = crate::golden_cases("policy.json", |c: &Case| c.pair.is_some());
 
         for c in &cases {
             let d = danger_for(&c.buffer);
@@ -589,8 +590,8 @@ mod tests {
 
     #[test]
     fn mode_is_a_ceiling_and_preserves_reasons() {
-        let warn = a(Verdict::Warn, "policy.dirty_work_at_risk");
-        let confirm = a(Verdict::Confirm, "policy.direct_catastrophic");
+        let warn = assess(Verdict::Warn, "policy.dirty_work_at_risk");
+        let confirm = assess(Verdict::Confirm, "policy.direct_catastrophic");
         // shadow/suggest: nothing visible, reason survives for the report
         for m in [Mode::Shadow, Mode::Suggest] {
             let capped = cap_for_mode(warn, m);
@@ -607,14 +608,14 @@ mod tests {
             Verdict::Confirm
         );
         // allow/observe are never upgraded by any mode
-        let allow = a(Verdict::Allow, "policy.context_clear");
+        let allow = assess(Verdict::Allow, "policy.context_clear");
         assert_eq!(cap_for_mode(allow, Mode::Confirm), allow);
     }
 
     #[test]
     fn budget_exhaustion_degrades_to_observe() {
         let mut state = PolicyState::default();
-        let warn = a(Verdict::Warn, "policy.dirty_work_at_risk");
+        let warn = assess(Verdict::Warn, "policy.dirty_work_at_risk");
         let now = 10 * HOUR_MS;
         // budget 3: three commits pass, the fourth degrades
         for _ in 0..3 {
@@ -657,12 +658,12 @@ mod tests {
     #[test]
     fn catastrophic_is_exempt_from_budget_and_cooldown() {
         let mut state = PolicyState::default();
-        let confirm = a(Verdict::Confirm, "policy.direct_catastrophic");
+        let confirm = assess(Verdict::Confirm, "policy.direct_catastrophic");
         let now = HOUR_MS;
         // exhaust the budget
         for _ in 0..5 {
             apply_gates(
-                a(Verdict::Warn, "x"),
+                assess(Verdict::Warn, "x"),
                 Some("git.reset_hard"),
                 false,
                 &mut state,
@@ -690,7 +691,7 @@ mod tests {
     #[test]
     fn repeated_run_unchanged_triggers_cooldown_and_any_other_outcome_resets() {
         let mut state = PolicyState::default();
-        let warn = a(Verdict::Warn, "policy.target_context");
+        let warn = assess(Verdict::Warn, "policy.target_context");
         let now = HOUR_MS;
         for _ in 0..COOLDOWN_TRIGGER {
             record_outcome(&mut state, "fs.rm_recursive", true, now);
@@ -752,7 +753,7 @@ mod tests {
         // Until the warning UI exists, gating runs with commit=false: the
         // budget must not be consumed by interventions nobody saw.
         let mut state = PolicyState::default();
-        let warn = a(Verdict::Warn, "policy.dirty_work_at_risk");
+        let warn = assess(Verdict::Warn, "policy.dirty_work_at_risk");
         for _ in 0..10 {
             let got = apply_gates(
                 warn,

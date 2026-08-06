@@ -19,6 +19,7 @@ mod events;
 mod layers;
 mod lexer;
 mod policy;
+mod proc;
 mod proposal;
 mod ui;
 
@@ -30,10 +31,6 @@ use std::time::Instant;
 use serde::Serialize;
 
 use proposal::Proposal;
-
-/// Deterministic-path deadline (SPEC §10). The watchdog force-exits with the
-/// fail-open code if analysis ever exceeds it; config surface arrives later.
-const DET_DEADLINE_MS: u64 = 150;
 
 #[derive(Serialize)]
 struct Decision {
@@ -104,10 +101,8 @@ fn arm_watchdog(deadline_ms: u64) {
 fn deadline_ms(configured: u64) -> u64 {
     #[cfg(debug_assertions)]
     if let Ok(v) = std::env::var("OOPSINPUT_TEST_DEADLINE_MS") {
-        return v.parse().unwrap_or(DET_DEADLINE_MS);
+        return v.parse().unwrap_or(policy::DET_TIMEOUT_DEFAULT_MS);
     }
-    #[cfg(not(debug_assertions))]
-    let _ = DET_DEADLINE_MS;
     configured
 }
 
@@ -358,7 +353,7 @@ fn warning_intervention(
         return (gated.verdict.as_str(), gated.reason, 0, None);
     }
 
-    let lines = warning_lines(gated.reason, danger, context, recency);
+    let lines = ui::warning_lines(gated.reason, danger, context, recency);
     let pausing = gated.verdict == policy::Verdict::Confirm;
     PROMPT_ACTIVE.store(true, Ordering::SeqCst);
     let choice = ui::prompt_warning(&lines, pausing);
@@ -377,116 +372,6 @@ fn warning_intervention(
         exit_code,
         Some(outcome),
     )
-}
-
-/// Assemble the warning's message lines (SPEC §7 anatomy: what the command
-/// does, what it hits, why the current context is unusual — the UI adds the
-/// keys). Trusted template text plus escaped untrusted fragments only.
-fn warning_lines(
-    reason: &str,
-    danger: &layers::danger::Analysis,
-    context: Option<&layers::context::Context>,
-    recency: &[proposal::RecencyEntry],
-) -> Vec<String> {
-    let has = |code: &str| danger.codes.contains(&code);
-    let git = context.and_then(|c| c.git.as_ref());
-    let targets = || -> String {
-        let joined = danger
-            .targets
-            .iter()
-            .map(|t| format!("'{}'", ui::escape_for_display(t)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if joined.is_empty() {
-            "its target".to_string()
-        } else {
-            joined
-        }
-    };
-    match reason {
-        "policy.dirty_work_at_risk" => {
-            let action = if has("git.reset_hard") {
-                "git reset --hard will discard uncommitted changes in tracked files"
-            } else {
-                "git clean -f will delete untracked files"
-            };
-            let mut facts = Vec::new();
-            if let Some(d) = git.and_then(|g| g.dirty)
-                && d > 0
-            {
-                facts.push(format!(
-                    "{d} modified tracked file{}",
-                    if d == 1 { "" } else { "s" }
-                ));
-            }
-            if git.and_then(|g| g.untracked) == Some(true) {
-                facts.push("untracked files present".to_string());
-            }
-            let mut lines = vec![
-                action.to_string(),
-                format!("right now: {}", facts.join(", ")),
-            ];
-            // "right after git diff" (SPEC §5-L3): name the previous command
-            // when its words were clean enough to survive sanitization —
-            // charset-enforced in proposal.rs, so inert on a terminal.
-            if let Some(prev) = recency.first()
-                && prev.age == 1
-                && prev.cmd != "_"
-            {
-                let mut line = format!("previous command: {}", prev.cmd);
-                if prev.sub != "_" {
-                    line.push(' ');
-                    line.push_str(&prev.sub);
-                }
-                lines.push(line);
-            }
-            lines
-        }
-        "policy.main_branch_force" => vec![
-            "force-push will rewrite the remote branch's history".to_string(),
-            "the current branch is a primary branch (main/master/trunk)".to_string(),
-        ],
-        "policy.target_context" => {
-            let t = context.map(|c| c.targets.as_slice()).unwrap_or(&[]);
-            let why = if has("fs.target_cwd") || t.iter().any(|t| t.is_cwd) {
-                "the target is the current directory itself"
-            } else if has("fs.target_parent") || t.iter().any(|t| t.is_parent) {
-                "the target is the parent of the current directory"
-            } else {
-                "the target does not exist, but a similarly-named neighbor does — typo?"
-            };
-            vec![
-                format!("recursive delete of {}", targets()),
-                why.to_string(),
-            ]
-        }
-        "policy.blockdev_write" => {
-            let dev = danger
-                .targets
-                .iter()
-                .find(|t| t.starts_with("/dev/"))
-                .map(|t| ui::escape_for_display(t))
-                .unwrap_or_else(|| "a raw disk device".to_string());
-            vec![
-                format!("this writes directly to {dev}"),
-                "everything currently stored there becomes unrecoverable".to_string(),
-            ]
-        }
-        "policy.direct_catastrophic" => {
-            let what = if has("fs.target_home") {
-                "your entire home directory"
-            } else {
-                "the filesystem root"
-            };
-            vec![
-                format!("this recursively deletes {what}"),
-                "there is no undo".to_string(),
-            ]
-        }
-        _ => vec![format!(
-            "high-consequence command flagged by policy ({reason})"
-        )],
-    }
 }
 
 /// Deliver the replacement to the plugin: exact bytes on fd 3, terminated by
@@ -613,6 +498,29 @@ fn print_help() {
     );
 }
 
+/// Test support: load a golden corpus and enforce the SPEC §11 paired-case
+/// discipline (≥30% counterfactual pairs) — the one home for that threshold,
+/// shared by every corpus runner.
+#[cfg(test)]
+pub(crate) fn golden_cases<T: serde::de::DeserializeOwned>(
+    file: &str,
+    is_paired: impl Fn(&T) -> bool,
+) -> Vec<T> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("eval/golden")
+        .join(file);
+    let text = std::fs::read_to_string(&path).expect("read golden corpus");
+    let cases: Vec<T> = serde_json::from_str(&text).expect("parse golden corpus");
+    assert!(!cases.is_empty());
+    let paired = cases.iter().filter(|c| is_paired(c)).count();
+    assert!(
+        paired * 100 >= cases.len() * 30,
+        "SPEC §11: ≥30% of golden cases must be counterfactual pairs ({paired}/{} are)",
+        cases.len()
+    );
+    cases
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,18 +545,7 @@ mod tests {
             expect_evidence: Vec<String>,
         }
 
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/eval/golden/typo.json");
-        let text = std::fs::read_to_string(path).expect("read golden corpus");
-        let cases: Vec<Case> = serde_json::from_str(&text).expect("parse golden corpus");
-        assert!(!cases.is_empty());
-
-        let paired = cases.iter().filter(|c| c.pair.is_some()).count();
-        assert!(
-            paired * 100 >= cases.len() * 30,
-            "SPEC §11: ≥30% of golden cases must be counterfactual pairs \
-             ({paired}/{} are)",
-            cases.len()
-        );
+        let cases: Vec<Case> = golden_cases("typo.json", |c: &Case| c.pair.is_some());
 
         for c in &cases {
             let lexed = lexer::lex(&c.buffer);
@@ -701,18 +598,7 @@ mod tests {
             expect_catastrophic: bool,
         }
 
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/eval/golden/danger.json");
-        let text = std::fs::read_to_string(path).expect("read golden corpus");
-        let cases: Vec<Case> = serde_json::from_str(&text).expect("parse golden corpus");
-        assert!(!cases.is_empty());
-
-        let paired = cases.iter().filter(|c| c.pair.is_some()).count();
-        assert!(
-            paired * 100 >= cases.len() * 30,
-            "SPEC §11: ≥30% of golden cases must be counterfactual pairs \
-             ({paired}/{} are)",
-            cases.len()
-        );
+        let cases: Vec<Case> = golden_cases("danger.json", |c: &Case| c.pair.is_some());
 
         for c in &cases {
             let lexed = lexer::lex(&c.buffer);
@@ -736,39 +622,6 @@ mod tests {
 
     // Mode vocabulary and the SPEC §15 config surface are policy.rs's
     // domain now — their tests moved there with the code.
-
-    #[test]
-    fn warning_lines_name_the_facts() {
-        use layers::context::{Context, GitFacts};
-        // flagship: dirty reset — counts named, no raw command text needed
-        let danger = layers::danger::analyze_with_home(&lexer::lex("git reset --hard"), None);
-        let ctx = Context {
-            git: Some(GitFacts {
-                detached: false,
-                branch_main_like: false,
-                dirty: Some(17),
-                untracked: Some(true),
-            }),
-            targets: vec![],
-        };
-        let lines = warning_lines("policy.dirty_work_at_risk", &danger, Some(&ctx), &[]);
-        let joined = lines.join("\n");
-        assert!(joined.contains("git reset --hard"), "{joined}");
-        assert!(joined.contains("17 modified tracked files"), "{joined}");
-        assert!(joined.contains("untracked files present"), "{joined}");
-
-        // catastrophic home delete names what dies
-        let danger = layers::danger::analyze_with_home(&lexer::lex("rm -rf ~"), None);
-        let joined = warning_lines("policy.direct_catastrophic", &danger, None, &[]).join("\n");
-        assert!(joined.contains("home directory"), "{joined}");
-
-        // hostile target text is escaped before display (SPEC §9-5)
-        let danger =
-            layers::danger::analyze_with_home(&lexer::lex("rm -rf ./x\u{1b}EVIL\u{7}y"), None);
-        let joined = warning_lines("policy.target_context", &danger, None, &[]).join("\n");
-        assert!(!joined.contains('\u{1b}'), "raw ESC in warning: {joined:?}");
-        assert!(joined.contains("./x^[EVIL^Gy"), "{joined}");
-    }
 
     #[test]
     fn find_in_path_finds_sh() {
