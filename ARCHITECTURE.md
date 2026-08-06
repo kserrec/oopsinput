@@ -10,15 +10,12 @@ How it relates to the other documents:
   and SPEC disagree, SPEC wins.
 - **[PLAN.md](PLAN.md)** tracks *progress*: which milestones are done and what
   each one covered.
-- **This document** covers *how the code works right now*, in depth through
-  the M2 state: command capture in zsh, the conservative lexer, the typo
-  layer with its single-key prompt and correction channel, event logging, and
-  the test harness that proves buffers survive intact. The M3 core has since
-  landed and is summarized in §9 pending this document's next full refresh:
-  the danger layer, the deterministic half of the context layer, the policy
-  engine, and the L2+ warning UI (e/edit, c/cancel, r/run-once — live in
-  warn/confirm modes). The model layer and the recency relation remain
-  unbuilt.
+- **This document** covers *how the code works right now*. That is the whole
+  deterministic product: command capture in zsh, the lexer, all three
+  deterministic analysis layers (typo, danger, context), the policy engine,
+  both visible prompts, event logging, and the test harness that proves your
+  buffer survives intact. The optional local-model layer (L4) is designed in
+  SPEC but not built.
 
 ## 1. The pieces
 
@@ -27,11 +24,12 @@ oopsinput is three things working together:
 1. **A zsh plugin** (`zsh/oopsinput.zsh`) — a small script sourced by your
    `~/.zshrc`. It hooks the moment you press Enter, hands the typed command to
    the binary, and interprets the binary's answer. It contains no analysis
-   logic at all.
+   logic — with one deliberate exception, the recency summary described in
+   §3, which exists precisely so that raw history text never leaves the shell.
 2. **A Rust binary** (`src/`, built to a single executable named `oopsinput`)
    — spawned fresh for every command. It reads the command, analyzes it,
    decides what to do, writes one line to an event log, and exits. When it
-   decides to intervene it talks to your terminal directly (see §4.6) rather
+   decides to intervene it talks to your terminal directly (see §4.9) rather
    than through the plugin. There is no daemon, no background process, no
    state held in memory between commands.
 3. **Install/uninstall scripts** (`zsh/install.zsh`, `zsh/uninstall.zsh`) —
@@ -58,6 +56,8 @@ Prerequisites:
 - **`script`** from util-linux — the PTY tests use it to run a real
   interactive zsh inside a pseudo-terminal. Preinstalled on essentially every
   Linux distribution.
+- **git** — not just for source control: the context layer runs `git status`
+  as a bounded helper, and several tests build throwaway repositories.
 
 Build and test:
 
@@ -73,7 +73,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
   integration tests in `tests/` (including the PTY suite — see §6).
 - The `fmt`/`clippy` line must be clean before any commit (project rule).
 
-The M1 acceptance gate — thousands of scripted submissions through a real
+The volume acceptance gate — thousands of scripted submissions through a real
 interactive zsh, verifying that every command's output appears and nothing
 hangs:
 
@@ -92,8 +92,8 @@ zsh/install.zsh
 
 This installs in **suggest** mode: the typo layer may ask you a question
 (only ever about a command that could not have run anyway), and everything
-else is silently observed and recorded. See §4.5 for what modes exist and
-§4.7 for how the mode is chosen.
+else is silently observed and recorded. Danger warnings are off by default —
+see §4.8 for the modes and how one is chosen.
 
 To remove:
 
@@ -118,7 +118,7 @@ Enter is not the only way to submit a buffer. The plugin wraps all four
 `accept-and-hold`, `accept-and-infer-next-history`), and because widgets are
 keymap-independent, the same wrappers cover both Emacs and Vi modes.
 
-### What the wrapper does (`_oopsinput_handle`)
+### What the wrapper does (`_oopsinput_handle`, `zsh/oopsinput.zsh:48`)
 
 On each accepted buffer, the wrapper:
 
@@ -136,21 +136,36 @@ On each accepted buffer, the wrapper:
    unexpected collapses to `unknown`, so raw user text can never ride into
    argv. (Argv matters because `/proc/<pid>/cmdline` is world-readable —
    which is also why the buffer itself travels over stdin, never argv.)
-3. **Builds the payload and invokes the binary.** The buffer's exact bytes go
-   in first. Then, *only* when the resolution kind is `none` — the case the
-   typo layer handles — the plugin appends a NUL byte followed by every
-   command name the live shell can see that the binary cannot: alias,
-   function, builtin, and reserved-word names. (A NUL is a safe separator
-   because zsh strings can never contain one.) That name list is the typo
-   layer's candidate pool alongside the executables it finds on PATH itself.
-   Only this already-failing path pays the cost of collecting it.
+3. **Summarizes recent commands** — the *recency relation* (SPEC §5-L3), the
+   evidence that answers "did you just reference this thing?". This is
+   computed in the shell rather than in the binary, and that placement is the
+   security design: the binary never receives history text at all. Per
+   remembered command (the last five) the plugin sends only three things: how
+   many commands back it was, one bit for "shares a word with what you just
+   typed", and its first two words — each constrained to
+   `[A-Za-z0-9_-]{1,32}`, with anything else (quoted strings, URLs,
+   `--flag=value` pairs, paths with slashes) replaced by a single `_`. A
+   password or token cannot survive that shape, so there is nothing to strip.
+
+   History is read by direct event number (`$history[$((HISTCMD - age))]`).
+   Sorting all history keys instead cost about 7.5 ms per command on a
+   10,000-entry history — most of the entire latency budget — and was
+   replaced with these lookups at about 0.1 ms.
+4. **Builds the payload and invokes the binary.** The payload has three
+   sections separated by NUL bytes (a safe separator, because zsh strings can
+   never contain one): the buffer's exact bytes; the candidate name pool; and
+   the recency summaries. The middle section is filled *only* when the
+   resolution kind is `none` — the case the typo layer handles — and then it
+   carries every command name the live shell can see that the binary cannot:
+   alias, function, builtin, and reserved-word names. Only that
+   already-failing path pays the cost of collecting them.
 
    The invocation routes three streams: stdout (the decision JSON) and
    stderr are discarded, while **file descriptor 3 is captured** into a shell
    variable. Descriptor 3 is the channel the binary uses to hand back a
-   corrected command (see §4.6); nothing user-facing travels on it, because
+   corrected command (see §5.2); nothing user-facing travels on it, because
    prompts go straight to the terminal instead.
-4. **Interprets the exit code** and nothing else:
+5. **Interprets the exit code** and nothing else:
 
    | Exit code | Meaning | Plugin action |
    |---|---|---|
@@ -182,28 +197,36 @@ flag so control characters appear visibly (`^[`) — a hostile `OOPSINPUT_BIN`
 value can't smuggle terminal escape sequences to your terminal. (`(qqqq)`
 quoting is *not* sufficient for this; it leaves control bytes raw.)
 
-### Two zsh traps, regression-locked
+### Three zsh traps, regression-locked
 
-Both were real M1 bugs, now pinned by tests (see PLAN):
+All were real bugs, now pinned by tests:
 
 - `${${(z)BUFFER}[1]}` *string*-indexes (first character, not first word) when
   the split yields a single word — the plugin uses an explicit array
   assignment instead.
 - Nested `${$(whence -w ...)##*: }` doesn't strip as expected — extraction is
   done in two steps, then whitelisted.
+- Array subscript search comes in two directions, and the reverse form
+  `(Ie)` returns `0` when the element is *absent*, while the forward form
+  `(ie)` returns "length + 1". A containment test written with `(Ie)` is
+  therefore always true. That mistake made every recency entry claim it
+  shared a word with the current command until it was found by dumping the
+  real payloads through a fake binary.
 
 ## 4. The Rust side, ground-up
 
-Six modules today (SPEC §16 lists the files future milestones add):
+Ten modules. Analysis runs strictly cheapest-first, and each layer can be
+read on its own:
 
 ### 4.1 `src/main.rs` — dispatch, watchdog, the `check` path
 
 Hand-rolled subcommand dispatch (no CLI-parsing dependency; SPEC §12):
 `version`, `check`, `doctor`, `help`.
 
-`check` is the command the plugin runs. Its first act is `arm_watchdog()`:
-spawn a thread that sleeps for the deadline (150 ms, `DET_DEADLINE_MS`) and
-then force-exits the whole process with code 1. If analysis ever wedges, the
+`check` is the command the plugin runs. It reads the config file first (a
+small, capped, local read), then immediately calls `arm_watchdog()`: a thread
+that sleeps for the deadline — `det_timeout_ms`, 150 ms by default — and then
+force-exits the whole process with code 1. If analysis ever wedges, the
 process dies, the plugin sees a nonzero exit, and fails open — the user's
 prompt cannot be held hostage. A blunt `exit` is safe precisely because the
 process is per-command: there's nothing to clean up that matters more than
@@ -216,12 +239,20 @@ analysis deadline, and killing the process mid-prompt would leave the
 terminal in the wrong mode. What makes retiring safe is that everything past
 that point is bounded by construction — the prompt's own read has a timeout
 enforced by the terminal, and every external helper it runs is killed at a
-deadline (§4.6).
+deadline (§4.10).
 
-After the watchdog: read the proposal, lex it, run the typo layer, assemble
-the evidence codes, and — if the mode allows intervening and the layer found
-a candidate — prompt. Then append an event, print a `Decision` as one JSON
-line on stdout, and exit with the code the decision implies.
+The analysis sequence, in order: read the proposal, lex it, run the typo
+layer (L1), run the danger layer (L2), and — only if danger found something —
+collect context facts (L3). Then assemble the evidence codes, ask policy for
+a decision, and possibly prompt.
+
+**Which prompt wins.** A buffer can qualify for both prompts at once:
+`gti status; git reset --hard` has an unresolvable first word *and* a
+dangerous second segment. A semicolon does not short-circuit, so the reset
+runs whichever way the typo question is answered — meaning the typo prompt
+would have been actively misleading. The stronger intervention therefore
+takes precedence: a warn or confirm verdict is shown, and the typo prompt is
+only reached when policy has nothing to say.
 
 One ordering detail matters for measurement: the duration recorded in the
 event is captured *before* any prompt, so latency percentiles measure
@@ -236,25 +267,30 @@ works end-to-end; a release binary has a fixed deadline and no hang hook.
 `doctor` prints environment sanity checks: version, whether `zsh` is on PATH
 (via direct file-metadata lookup that requires the executable bit — never by
 asking a shell, per SPEC §9), which config file is in effect and whether it
-exists, the resulting mode, and whether the plugin block is present in
-`~/.zshrc`. The config line and the mode line resolve through the same
-function, so they can never contradict each other (they once did — a bug
-found by review and now pinned by `tests/doctor.rs`).
+exists, the resulting mode, how many config problems were found, and whether
+the plugin block is present in `~/.zshrc`. The config line and the mode line
+resolve through the same function, so they can never contradict each other
+(they once did — a bug found by review and now pinned by `tests/doctor.rs`).
 
 ### 4.2 `src/proposal.rs` — input parsing
 
 A `Proposal` is what arrived on stdin plus the resolution kind from argv.
 
-The stdin payload is the buffer, optionally followed by a NUL byte and the
-newline-separated candidate names described in §3. Parsing is deliberately
-defensive, because this is attacker-adjacent input in the sense that matters
-(a corrupted or hostile payload must degrade, never mislead): the whole read
-is capped at 1 MB; oversized input is truncated at a UTF-8 character
-boundary and flagged `capped` so it still gets analyzed rather than erroring
-out; the name list is count-capped; a single name that isn't valid UTF-8 is
-skipped rather than failing the whole check; and if the size cap lands
-inside the name list, only the possibly-truncated final name is dropped
-while the buffer itself stays intact.
+The stdin payload is the three NUL-separated sections described in §3.
+Parsing is deliberately defensive, because this is attacker-adjacent input in
+the sense that matters (a corrupted or hostile payload must degrade, never
+mislead): the whole read is capped at 1 MB; oversized input is truncated at a
+UTF-8 character boundary and flagged `capped` so it still gets analyzed
+rather than erroring out; the name list is count-capped; a single name that
+isn't valid UTF-8 is skipped rather than failing the whole check; and if the
+size cap lands inside a later section, only the possibly-truncated final
+entry is dropped while the buffer itself stays intact.
+
+Recency entries are **re-sanitized here**, against the same
+`[A-Za-z0-9_-]{1,32}` rule the plugin applies. That duplication is
+deliberate: the binary does not trust its adapter, so even a compromised or
+out-of-date plugin cannot push arbitrary text into a prompt or a log. A line
+whose numeric fields are malformed is dropped rather than guessed at.
 
 `ResolutionKind` is a closed enum; `parse` maps the eight known tokens and
 collapses *anything* else to `Other`, so even if the plugin-side whitelist
@@ -273,10 +309,9 @@ zsh glob qualifiers) as *opaque*: the raw text is kept, the word is flagged
 is emitted. It never expands anything and never panics (a deterministic
 fuzz smoke test hammers it with metacharacter soup). `command_words()`
 extracts the words in command position — first word of each segment,
-skipping `VAR=value` assignments and redirect targets — which is what the
-typo layer checks. The uncertainty codes flow into `check`'s decision
-evidence and the shadow event log, so shadow data can measure the
-unsupported-syntax rate (SPEC §11).
+skipping `VAR=value` assignments and redirect targets. The uncertainty codes
+flow into `check`'s decision evidence and the shadow event log, so shadow
+data can measure the unsupported-syntax rate (SPEC §11).
 
 One subtlety worth knowing before you touch this file: **word separators are
 space, tab, and newline only** (`is_shell_whitespace`), deliberately *not*
@@ -296,19 +331,24 @@ Appends one JSON line per command to `events.jsonl` in the state directory
 
 The invariants, all test-pinned:
 
-- **Structural fields only.** Timestamp, decision, reason code, resolution
-  kind, buffer byte count, word count, duration. The `Event` struct has no
-  field that *could* carry command text — the type system is the redaction.
+- **Structural fields only.** Timestamp, decision, reason code, evidence
+  codes, resolution kind, buffer byte count, word count, duration, plus
+  optional context *counts* (dirty file count, largest directory entry
+  count) and the user's outcome at a visible warning (`edited`, `cancelled`,
+  `ran_unchanged`). The `Event` struct has no field that *could* carry
+  command text — the type system is the redaction.
 - **User-only permissions**: directory `0700`, file `0600`.
 - **One write syscall per event.** The line and its trailing newline are
   joined into a single buffer before writing, because `O_APPEND` atomicity
   holds per write call — two concurrent shells appending with separate
   newline writes would interleave and corrupt the JSONL stream (a real bug
   found by review, now pinned by a 16-thread hammer test).
+- **Never written through a symlink.** If the log path is a symbolic link,
+  the append is refused rather than growing onto whatever it points at.
 - **Failures are swallowed.** Logging must never cost the user their command
   or their prompt.
 
-### 4.5 `src/layers/typo.rs` — the first analysis layer
+### 4.5 `src/layers/typo.rs` — L1, the typo layer
 
 This is layer 1 of the four in SPEC §5. It answers one question: *you typed
 a command word that doesn't exist — did you mean this other one?*
@@ -324,14 +364,13 @@ the plugin resolved), unquoted, free of expansions, free of `/`, and between
 2 and 64 characters. A single character is never corrected, because nearly
 every short name is one edit away from it.
 
-Matching is a self-written bounded **optimal string alignment** distance:
-insertion, deletion, substitution, and swapping two adjacent characters each
-cost one edit. Words of four characters or fewer allow one edit; longer
-words allow two. (`gti` → `git` is a swap, so it costs one.) Candidates come
-from two places: the names the plugin supplied, and the executables the
-layer finds by reading each PATH directory itself — never by asking a shell,
-and only counting entries that are real files with an executable bit. Hard
-caps bound the work: entries per directory, total permission checks, and
+Matching uses the shared bounded edit distance (§4.10). Words of four
+characters or fewer allow one edit; longer words allow two. (`gti` → `git`
+is a swap of two adjacent characters, so it costs one.) Candidates come from
+two places: the names the plugin supplied, and the executables the layer
+finds by reading each PATH directory itself — never by asking a shell, and
+only counting entries that are real files with an executable bit. Hard caps
+bound the work: entries per directory, total permission checks, and
 candidate name length.
 
 Three refusals protect the "never a false positive" rule:
@@ -350,9 +389,132 @@ Three refusals protect the "never a false positive" rule:
   exactly, and returns nothing at all unless the buffer's first word is
   byte-identical to the analyzed word and ends on a real boundary.
 
-### 4.6 `src/ui.rs` — prompts and the display escaper
+### 4.6 `src/layers/danger.rs` — L2, the danger layer
 
-Two responsibilities, both security-relevant.
+Recognizes high-consequence command *shapes* from curated rule tables —
+plain Rust data and `match` arms, never a scripting language, never
+execution. It reads the lexer's tokens, splits them into simple-command
+segments at every control operator, and applies one rule per recognized
+command name:
+
+- **filesystem** — recursive or forced `rm` (with the target classified as
+  `/`, the current directory, its parent, the home directory, or a block
+  device), recursive `chmod`/`chown`, forced `cp`/`mv`, truncating
+  redirections, writes to block devices by name shape.
+- **git** — `reset --hard`, `clean -f`, `push --force`, remote and local
+  branch deletion, `filter-branch`. Plain `git rebase` is deliberately
+  absent: it is routine and intentional, and flagging it would spend the
+  intervention budget on noise.
+- **system** — `dd of=`, `mkfs*`, `kill -9 -1`, broad `pkill`, service
+  stops, package removal.
+- **privilege** — `sudo`/`doas` adds `priv.sudo`, but *only* when the
+  wrapped command itself tripped a rule, so `sudo apt update` stays
+  evidence-free.
+
+The layer never intervenes on its own. It produces three things: stable
+evidence codes, a **direct-catastrophic** flag (a recursive delete aimed at
+`/` or your home directory), and the literal target words of rules that
+fired, which L3 then inspects on disk.
+
+Three honesty rules run through the whole file, and each exists because
+violating it produced a wrong answer:
+
+- **A word the shell would expand is unknowable**, so it never matches a
+  table — with the curated exception of `$HOME`/`${HOME}`, whose meaning is
+  exactly the point. When an `rm` operand is unknowable, the layer says so
+  with its own evidence code, because otherwise a *different* rule's target
+  could vouch for it downstream.
+- **Quoting is the shell's business.** `'rm' -rf /` runs rm, so quoted text
+  still matches; `'~'` is a literal file named `~`, so it doesn't.
+- **A flag cluster only counts if every letter in it is real.** To `rm`,
+  `-force` is not "recursive and force" — it is `invalid option -- 'o'`, and
+  the command never runs. Reading it as flags produced a full catastrophic
+  confirmation for a command that could not do anything, so each tool now
+  carries its own short-flag alphabet.
+
+### 4.7 `src/layers/context.rs` — L3, the context layer (deterministic half)
+
+The differentiator: the facts that separate "dangerous and intended" from
+"probably not what you meant". It runs **only when L2 marked a candidate**,
+so the common path spends no syscalls here at all.
+
+**Git facts.** It finds the repository by walking up to a `.git` (handling
+both a directory and the one-line `gitdir:` file used by worktrees), reads
+the branch and detached state straight out of `HEAD`, and gets the dirty
+file count and untracked presence by running `git status --porcelain` as a
+bounded helper. If git is missing or overruns, the facts are reported as
+*unavailable* rather than guessed — and policy treats unavailable evidence
+as a reason to stay quiet, never as "clean".
+
+That helper invocation carries a security lesson worth understanding before
+you touch it. Git executes programs named in its own configuration, and the
+repository's `.git/config` is not necessarily yours: a directory extracted
+from an archive, or a fixture repository committed inside another project,
+brings its own. Because oopsinput runs `git status` wherever you happen to
+be standing, typing `rm -rf ./build` in such a directory was enough to
+execute a stranger's program — analysis causing execution, which SPEC §9-1
+forbids outright. Every configuration key that can spawn something is now
+neutralized on the command line, where `-c` outranks repository config. The
+regression test arms the trap first (asserting that a plain `git status`
+*does* fire it) so it can never silently stop proving anything.
+
+**Target facts.** For each target the danger layer handed over: does it
+exist, is it a directory, is it a symlink, roughly how many entries does it
+hold (capped), does it resolve to the current directory or its parent
+(catching `rm -rf ../myproject` typed from inside it), and — when it does
+*not* exist — is there a similarly-named neighbor, the "near-miss" signal
+that catches `./buidl` beside `./build`.
+
+Every collector is hard-capped: bounded upward walks, bounded directory
+reads, bounded child runtime. A pathological environment degrades to honest
+"unavailable", never a hang.
+
+### 4.8 `src/policy.rs` — decisions, modes, budgets, configuration
+
+Three deliberately separate pieces:
+
+**`warranted`** is the mode-blind decision matrix: given the evidence, what
+does this *deserve*? Catastrophic deletes ask for confirmation, always.
+`git reset --hard` and `git clean -f` warn only when there is actually work
+to lose, and are silently allowed on a clean tree. `push --force` warns only
+on a main-like branch. A recursive delete warns when the target is the
+current directory, its parent, or a near-miss of a real neighbor, and is
+allowed when every target plainly exists. Everything else recognized records
+as `observe` — recognized but not yet graduated to speaking. Each arm exists
+to make a golden counterfactual pair pass; a rule with no context in which
+it stays silent does not belong here.
+
+**`cap_for_mode`** applies the mode as a *ceiling, never a floor* — and
+downgrades preserve the policy reason. That preserved reason is the whole
+shadow-mode mechanism: an event recorded as `observe` with the reason
+`policy.dirty_work_at_risk` is a hypothetical intervention, which is what
+lets the M5 pilot measure "how often would this have spoken, and would it
+have been right?" before anything is enabled for real users.
+
+The four modes (SPEC §8): **shadow** (analyze and record, never visible —
+the default), **suggest** (adds typo prompts), **warn** (adds nonblocking
+danger warnings), **confirm** (danger warnings pause for an answer).
+
+**`apply_gates`** is habituation control (SPEC §7): at most three visible
+interventions per rolling hour, and a per-rule cooldown — three consecutive
+"I meant it, run unchanged" outcomes puts that rule to sleep for a day,
+while any edit or cancel resets it. Direct-catastrophic findings are exempt
+from both. Exhausting the budget degrades to silent recording; it never
+degrades to nagging. Budget is spent only when a prompt is genuinely shown.
+
+The module also owns the full SPEC §15 **config surface**: `mode`, `model`,
+`model_timeout_ms`, `det_timeout_ms`, `budget_per_hour`, `log_raw`. Invalid
+values fall back to the documented default and say so; unknown keys are
+reported **by line number only**, never by echoing the key — config text is
+untrusted input and must not reach a terminal. Complaints are printed once
+per distinct set, tracked by a fingerprint file in the state directory.
+`$OOPSINPUT_MODE` overrides the file's mode.
+
+Cooldown and budget state persist in `policy.json` (user-only). It is read
+with a size cap and entry caps, self-heals to defaults if corrupt, and is
+never written through a symlink.
+
+### 4.9 `src/ui.rs` — prompts, message building, and the display escaper
 
 **Escaping.** `escape_for_display` is what every piece of untrusted text
 passes through before it can reach your terminal. Terminals interpret
@@ -363,14 +525,39 @@ appear as a completely different name than it is. The escaper renders all of
 that inert: control characters become visible caret notation (`^[`), and
 bidirectional-text and invisible formatting characters become visible
 `\u{...}` escapes. A 20,000-case fuzz test asserts that nothing active ever
-survives it and that escaping twice changes nothing.
+survives it and that escaping twice changes nothing. It is applied
+unconditionally — including to text that a charset check elsewhere has
+already restricted, because a rule that holds only while a distant check
+stays correct is a rule that breaks silently when that check is edited.
 
-**Prompting.** `prompt_typo` asks its question on `/dev/tty` — the terminal
-itself — rather than stdout, which carries the decision JSON and is
-discarded by the plugin. It reads a single keypress: `y` accepts, Ctrl-C
-cancels, and everything else (`n`, any other key, a ten-second timeout, a
-missing terminal, any internal failure) runs the original command, which is
-the safe outcome since that command could not have run anyway.
+**Two prompts**, both on `/dev/tty` — the terminal itself — rather than
+stdout, which carries the decision JSON and is discarded by the plugin:
+
+- `prompt_typo` asks the L1 question. `y` accepts, Ctrl-C cancels, and
+  everything else (`n`, any other key, a ten-second timeout, a missing
+  terminal, any internal failure) runs the original command, which is the
+  safe outcome since that command could not have run anyway.
+- `prompt_warning` shows the L2+ warning, whose anatomy is fixed by SPEC §7:
+  what the command does, the concrete facts, why the context is unusual,
+  then the keys. `e` restores your exact buffer to ZLE for editing, `c`
+  cancels and runs nothing, `r` runs the original unchanged once. The
+  timeout default depends on the tier: an advisory warning runs the command,
+  a pausing confirmation cancels it — running is never the default for a
+  command whose consequences are predicted to be irreversible. Any failure
+  to display fails open to running unchanged.
+
+`warning_lines` builds those message lines from evidence codes and context
+counts, with every untrusted fragment escaped and every line framed by the
+fixed `oopsinput:` prefix.
+
+**Reading a keypress** is subtler than it looks: an arrow key is not one
+byte but a short escape sequence (`ESC [ A`). Reading a single byte treated
+that as an answer and left the remaining bytes behind, where they leaked
+into the next command line as stray characters. The reader now consumes
+complete sequences (CSI, SS3, alt-chords) and ignores them, while a lone
+`ESC` still means "dismiss". Unrecognized keys are ignored rather than
+guessed at, and the whole loop is bounded so hostile input cannot hold the
+prompt open.
 
 Switching the terminal into single-keypress mode requires the `stty`
 program, because Rust's standard library exposes no terminal-mode control
@@ -381,35 +568,27 @@ call, both learned from a security review:
   it was resolved by name, any directory leading PATH could supply the
   program that ran — and since this layer fires on *mistyped* commands, any
   typo at all became the trigger.
-- **Every external helper is bounded** (`run_bounded`): a child that
-  overruns its deadline is killed and reaped, and the call reports failure.
-  This runs after the watchdog retires, so an unbounded child would hang the
-  shell with nothing left to recover it.
+- **Every external helper is bounded**: a child that overruns its deadline
+  is killed and reaped, and the call reports failure. This runs after the
+  watchdog retires, so an unbounded child would hang the shell with nothing
+  left to recover it.
 
 The saved terminal settings are restored on every exit path by a guard
 value, so no path out of the prompt leaves your terminal in raw mode.
 
-### 4.7 Modes and configuration
+### 4.10 The two shared helpers
 
-SPEC §8 defines four modes: **shadow** (analyze and record, never visible),
-**suggest** (adds typo prompts), **warn**, and **confirm** (both belong to
-later milestones). Because warn and confirm include typo prompts, all three
-of suggest/warn/confirm currently behave as suggest.
+- **`src/distance.rs`** — the bounded **optimal string alignment** distance:
+  insertion, deletion, substitution, and swapping two adjacent characters
+  each cost one edit, and the computation abandons early once the distance
+  provably exceeds the budget. Shared by the typo layer's candidate search
+  and the context layer's near-miss check, so "how close is close?" has one
+  answer.
+- **`src/proc.rs`** — the single wait-or-kill loop every bounded helper uses.
+  Having one copy is the point: "no path outlives the deadline" is a claim
+  that should be provable by reading one function.
 
-The mode is resolved in this order: the `OOPSINPUT_MODE` environment
-variable, then a `mode = ...` line in the config file, then shadow. The
-config file lives at `$XDG_CONFIG_HOME/oopsinput/config` if that variable is
-set, otherwise `~/.config/oopsinput/config`. Any unrecognized value resolves
-to shadow — the silent mode is the safe default. The config reader is a
-handful of lines (`key = value`, `#` starts a comment); the fuller surface
-in SPEC §15 arrives with the policy work in M3.
-
-`zsh/install.zsh` writes `mode = suggest` on a fresh install, with
-user-only permissions, and never touches a config that already exists —
-including a path occupied by a symlink, which it leaves alone rather than
-writing through.
-
-### 4.8 Dependencies
+### 4.11 Dependencies
 
 Exactly two: `serde` and `serde_json` (JSON is a correctness/security surface
 with real spec depth). Everything else — CLI dispatch, PATH lookup, the edit
@@ -417,36 +596,35 @@ distance, the lexer, config parsing, and eventually the HTTP client — is
 self-written per the policy in SPEC §12. Adding a dependency requires
 updating SPEC §12 first.
 
-## 5. Two Enters, end to end
+## 5. Three Enters, end to end
 
-### 5.1 The common path: a command that resolves
+### 5.1 The common path: an ordinary command
 
 You type `git status` and press Enter:
 
-1. ZLE runs the wrapped `accept-line`, which calls
-   `_oopsinput_handle accept-line` (`zsh/oopsinput.zsh:45`).
+1. ZLE runs the wrapped `accept-line`, which calls `_oopsinput_handle`
+   (`zsh/oopsinput.zsh:48`).
 2. The buffer is non-empty, not a continuation line, not recursive — so the
    plugin resolves `git` via `whence -w` → `command`. Because that is not
-   `none`, no candidate names are collected.
-3. It pipes the exact bytes `git status` to
-   `~/.local/bin/oopsinput check --res command`, capturing descriptor 3.
-4. The binary arms the watchdog (`src/main.rs:87`), reads the payload into a
-   `Proposal` (`src/proposal.rs:85`), lexes it for structure and uncertainty
-   evidence (`src/lexer.rs`), and skips the typo layer immediately — the
-   resolution kind is not `none` (`src/layers/typo.rs:49`). Decision:
-   `allow` / `shadow.observed`.
-5. It appends `{"ts_ms":…,"decision":"allow","reason_code":"shadow.observed",
-   "evidence":[],"res_kind":"command","cmd_expands":false,"buffer_bytes":10,
-   "word_count":2,"duration_us":…}` to
-   `~/.local/state/oopsinput/events.jsonl` (`src/events.rs:57`), prints the
-   decision JSON on stdout (discarded by the plugin), exits 0.
+   `none`, no candidate names are collected; five recency summaries are.
+3. It pipes the payload to `~/.local/bin/oopsinput check --res command`,
+   capturing descriptor 3.
+4. The binary reads config, arms the watchdog (`src/main.rs:87`), reads the
+   payload into a `Proposal` (`src/proposal.rs:107`), lexes it, skips the
+   typo layer immediately (the resolution kind is not `none`), and runs the
+   danger layer (`src/layers/danger.rs:60`), which finds nothing. Because
+   there is no candidate, the context layer never runs. Decision: `allow` /
+   `shadow.observed`.
+5. It appends one structural line to `~/.local/state/oopsinput/events.jsonl`
+   (`src/events.rs:69`), prints the decision JSON on stdout (discarded by the
+   plugin), and exits 0.
 6. The plugin sees exit 0, restores `BUFFER=$original`, and delegates to the
    real `accept-line`. zsh executes `git status` exactly as typed.
 
-Measured cost of that round trip on the dev machine, release build,
-including process spawn: **p50 3.6 ms, p95 4.4 ms** — against a 25 ms p95
-budget (SPEC §10). If steps 3–5 fail *in any way* — binary missing, crash,
-watchdog fired, weird exit code — step 6 still happens identically.
+Measured on the dev machine, release build, including process spawn:
+**p50 2.4 ms, p95 4.4 ms** — against a 25 ms p95 budget (SPEC §10). If steps
+3–5 fail *in any way* — binary missing, crash, watchdog fired, weird exit
+code — step 6 still happens identically.
 
 ### 5.2 The typo path: a command that doesn't resolve
 
@@ -454,70 +632,113 @@ You type `gti status` and press Enter, in suggest mode:
 
 1–2. As above, except `whence -w` reports `none`.
 
-3. Because the kind is `none`, the plugin appends a NUL and every alias,
-   function, builtin, and reserved-word name to the payload, then invokes
-   the binary the same way.
-4. The binary lexes, then runs the typo layer
-   (`src/layers/typo.rs:38`). The word `gti` is the first token, literal,
-   and 3 characters, so it qualifies. Scanning the supplied names and PATH
-   finds `git` at distance 1 (one adjacent swap). No exact match for `gti`
-   exists, so nothing suppresses the result. Evidence:
-   `typo.candidate_d1`.
-5. The mode is not shadow, so the binary builds the corrected buffer first
-   (`src/layers/typo.rs:159`) — `git status`, with every byte after the
+3. Because the kind is `none`, the plugin fills the candidate section with
+   every alias, function, builtin, and reserved-word name.
+4. The binary runs the typo layer (`src/layers/typo.rs:39`). The word `gti`
+   is the first token, literal, and 3 characters, so it qualifies. Scanning
+   the supplied names and PATH finds `git` at distance 1. No exact match for
+   `gti` exists, so nothing suppresses the result. Evidence:
+   `typo.candidate_d1`. The danger layer finds nothing, so policy has nothing
+   stronger to say and the typo prompt proceeds.
+5. The binary builds the corrected buffer *first*
+   (`src/layers/typo.rs:160`) — `git status`, with every byte after the
    command word preserved. Only if that succeeds does it mark the prompt
    active, retiring the watchdog, and ask on `/dev/tty`:
    `oopsinput: 'gti' not found — did you mean 'git'? [y/n]`
 6. You press `y`. The binary writes `git status` plus one NUL byte to
-   descriptor 3 (`src/main.rs:309`), records the outcome as
-   `replace` / `typo.accepted`, and exits **10**.
-7. The plugin sees exit 10, confirms the trailing NUL is present, strips it,
-   sets `BUFFER` to the corrected text, and delegates. zsh runs `git status`.
+   descriptor 3 (`src/main.rs:387`), records `replace` / `typo.accepted`,
+   and exits **10**.
+7. The plugin sees exit 10, confirms the trailing NUL, strips it, sets
+   `BUFFER` to the corrected text, and delegates. zsh runs `git status`.
 
-Pressing `n` instead produces exit 0 and your original `gti status` runs and
-fails naturally; Ctrl-C produces exit 12 and nothing runs at all. Measured
-cost of the analysis on this path (release, including spawn, with a
-2,000-name pool and a full PATH scan): **p50 16.3 ms, p95 19.5 ms** against
-a 75 ms p95 budget. The prompt itself is unbounded by design — it waits for
-a person.
+Pressing `n` produces exit 0 and your original `gti status` runs and fails
+naturally; Ctrl-C produces exit 12 and nothing runs. Measured on this path
+(release, including spawn, with a 2,000-name pool and a full PATH scan):
+**p50 16.3 ms, p95 19.5 ms** against a 75 ms p95 budget.
+
+### 5.3 The warning path: the flagship pair
+
+This is the behavior the product exists for, and it is a *pair* — the same
+command, two contexts, two different answers. Both halves are proven by PTY
+tests. In `warn` mode you type `git reset --hard`:
+
+**Half one — 17 modified files.**
+
+1–3. As the common path; `git` resolves, so no candidate names.
+4. The danger layer matches the `reset --hard` rule and emits
+   `git.reset_hard`. Because there is now a candidate, the context layer runs
+   (`src/layers/context.rs:75`): it finds the repository, reads `HEAD`, and
+   runs the hardened `git status`, which reports 17 dirty files.
+5. Policy (`src/policy.rs:57`) sees a work-loss command with work to lose and
+   returns `warn` / `policy.dirty_work_at_risk`. The mode is `warn`, so the
+   ceiling doesn't lower it. The gates pass (budget available, rule not in
+   cooldown).
+6. `warning_intervention` (`src/main.rs:329`) marks the prompt active and
+   displays:
+
+   ```
+   oopsinput: git reset --hard will discard uncommitted changes in tracked files
+   oopsinput: right now: 17 modified tracked files
+   oopsinput: previous command: git diff
+   oopsinput: [e]dit  [c]ancel  [r]un unchanged
+   ```
+
+7. You press `c`. The binary records the outcome `cancelled`, saves the
+   updated cooldown state, and exits **12**. The plugin clears the buffer.
+   Nothing runs; your 17 files are untouched. (`e` would exit 11 and hand the
+   exact command back to ZLE for editing; `r` would exit 0 and run it.)
+
+**Half two — a clean tree.** Steps 1–4 are identical, but `git status`
+reports nothing dirty. Policy returns `allow` / `policy.context_clear`, no
+prompt is shown at all, and the command runs in silence. The event log still
+records the reason, which is what makes the decision auditable later.
+
+Measured on the candidate path (release, including both our spawn and git's):
+**p50 15.0 ms, p95 18.1 ms**, against the same 75 ms p95 budget.
 
 ## 6. How it's tested
 
 The testing philosophy: **buffer exactness and fail-open behavior are the
 product**, so the highest-value tests drive a real interactive zsh, not mocks.
+164 tests across five suites today.
 
 - **Unit tests** live inside each `src/` module (`#[cfg(test)] mod tests`):
-  the closed resolution vocabulary, payload parsing edge cases, concurrent
-  log appends, structural-only serialization, executable-bit PATH lookup,
-  the edit-distance function, the typo layer's refusal rules, byte-exact
-  replacement construction, the display escaper (including its fuzz test),
-  the prompt's key protocol against a scripted fake terminal, and the
-  bounded external-helper runner.
+  the closed resolution vocabulary, payload parsing edge cases (including the
+  recency section's re-sanitization and cap handling), concurrent log
+  appends, structural-only serialization, the danger layer's rule tables and
+  refusals, the context layer's git and target facts, the policy matrix,
+  budget and cooldown behavior, config validation, the display escaper
+  (including its fuzz test), both prompts' key protocols against a scripted
+  fake terminal, and the bounded external-helper runner.
 - **`tests/pty.rs`** — the PTY integration suite. Each test builds an
   isolated `ZDOTDIR` (a throwaway home for zsh config) whose `.zshrc` loads
   the plugin against the freshly-built debug binary, then runs a genuine
   interactive zsh inside a pseudo-terminal via util-linux
   `script -qec "zsh -i" /dev/null`, feeds it keystrokes, and asserts on what
-  the terminal displayed. Covered: ordinary passthrough, unicode/quoting
+  the terminal displayed. Covered: ordinary passthrough, unicode and quoting
   survival, PS2 multiline continuation, missing binary fails open, hostile
-  escape sequences in the load diagnostic are neutralized, hanging binary is
-  killed by the watchdog within deadline, secrets never reach the event log,
-  resolution kinds are extracted correctly (including the single-word
-  regression), double-sourcing is harmless, and Vi keymap accepts work.
-  M2 added the full typo flow through a real shell: `y` runs the correction
-  with arguments preserved byte-for-byte, `n` runs the original, Ctrl-C runs
-  nothing, a command word that resolves never prompts, and the installed
-  config file alone (no environment override) is enough to enable prompts.
+  escape sequences in the load diagnostic are neutralized, a hanging binary
+  is killed by the watchdog within deadline, secrets never reach the event
+  log, resolution kinds are extracted correctly, double-sourcing is harmless,
+  Vi keymap accepts work; the full typo flow (`y` runs the correction with
+  arguments preserved byte-for-byte, `n` runs the original, Ctrl-C runs
+  nothing, resolving words never prompt, the config file alone enables
+  prompts); and the full warning flow (both halves of the flagship pair, edit
+  restoring the exact buffer to a live ZLE, run-once executing unchanged,
+  cancel leaving the dirty bytes untouched *on disk*, warnings outranking the
+  typo prompt, arrow keys leaving no stray bytes, and recency overlap
+  counting shared targets but not shared flags).
 
   Some of these need a **staged** runner (`Session::run_staged`) that waits
   for expected text to appear on the terminal before sending the next keys.
   That is not a convenience: a Ctrl-C byte sent before the binary switches
   the terminal into single-key mode becomes an interrupt signal instead of a
   keypress, which is also why a real user's Ctrl-C is safe — they cannot
-  press it before the prompt exists.
-- **`tests/uninstall.rs`** — pinned audit finding: `uninstall.zsh` against a
-  `~/.zshrc` with damaged marker blocks must refuse to edit, never
-  delete-to-end-of-file.
+  press it before the prompt exists. The runner is bounded: a marker that
+  never appears fails with the terminal transcript instead of hanging the
+  suite.
+- **`tests/uninstall.rs`** — `uninstall.zsh` against a `~/.zshrc` with
+  damaged marker blocks must refuse to edit, never delete-to-end-of-file.
 - **`tests/install.rs`** — the installed defaults: a fresh install writes
   `mode = suggest` with user-only permissions, an existing config is left
   byte-identical, a symlink at the config path is not written through, and
@@ -527,22 +748,24 @@ product**, so the highest-value tests drive a real interactive zsh, not mocks.
 - **`scripts/pty-gate.zsh`** — the volume acceptance gate: N unique
   submissions (default 10,000) through a PTY shell; every output must appear,
   nothing may hang. M1's run: 10,000/10,000, zero altered buffers, in 128 s.
-- **`eval/golden/`** — the golden corpus (SPEC §11). `typo.json` holds 20
-  cases today: a command buffer, a resolution kind, a candidate name list,
-  and the expected suggestion plus exact evidence codes. Half are
+- **`eval/golden/`** — the golden corpus (SPEC §11), three files run as
+  ordinary tests: `typo.json` (20 cases), `danger.json` (41 cases, command
+  shapes) and `policy.json` (19 cases, context flips — the same command in
+  a dirty versus clean repository). Each case is a command plus a context
+  fixture plus the exact expected evidence and decision. A large share are
   **counterfactual pairs** — the identical command in a context where
-  nothing should be suggested — and the runner asserts that at least 30% of
-  cases are paired, so the discipline can't quietly erode. Project rule:
-  every rule ships with a case where the same command is silently allowed,
-  so the tool can't decay into a blanket dangerous-command blocker. Cases
-  run hermetically (candidates come only from the fixture, never the
-  developer's real PATH) and go through the same evidence-assembly function
-  the binary uses, so they pin real behavior rather than a parallel
-  implementation.
+  nothing should happen — and every corpus runner asserts at least 30% are
+  paired, so the discipline can't quietly erode. Project rule: every danger
+  rule ships with a case where the same command is silently allowed, so the
+  tool can't decay into a blanket dangerous-command blocker. Cases run
+  hermetically (candidates and `$HOME` come from the fixture, never the
+  developer's machine) and go through the same functions the binary uses.
 
-Testing rules that bind every change: each layer lands with tests in the same
-commit; bug fixes ship a regression fixture; anything touching the zsh plugin
-gets PTY tests; fixtures never contain real shell history or personal data.
+Testing rules that bind every change: tests are derived from failure modes
+that were actually proven, never written as ritual; each layer lands with
+tests in the same commit; bug fixes ship a regression fixture; anything
+touching the zsh plugin gets PTY tests; fixtures never contain real shell
+history or personal data.
 
 ## 7. Decisions and constraints (why it's shaped this way)
 
@@ -557,15 +780,26 @@ Short versions — SPEC has the full arguments:
   before doing anything else, and zsh's job control independently returns the
   prompt if the process is stopped or killed (verified by test).
 - **Never execute what you analyze** (SPEC §9.1). No shell invocation during
-  analysis, ever — even `doctor`'s PATH lookup and the typo layer's PATH
-  scan walk the filesystem themselves. The one external program the code
-  runs at all is `stty`, and it obeys the same rule set: absolute path,
-  fixed arguments, no shell, hard timeout.
+  analysis, ever — even `doctor`'s PATH lookup and the typo layer's PATH scan
+  walk the filesystem themselves. Two external programs are run at all,
+  `stty` and `git status`, and both obey the same rules: absolute path, fixed
+  arguments, no shell, hard timeout. A helper's *own configuration* counts as
+  untrusted input too — the repository you are standing in can tell git to
+  execute something, and every such key is neutralized explicitly.
+- **Evidence and decisions are separate things.** Layers produce typed
+  evidence codes; policy alone turns evidence into a verdict; the mode alone
+  decides whether a verdict becomes visible. That separation is what makes
+  shadow mode meaningful — the decision is fully computed and recorded even
+  when nothing is shown.
 - **The correction channel is treated like the event log** (SPEC §9.2).
   Descriptor 3 is the only place binary output becomes an executed command,
   so it gets exact bytes, no interpretation, an integrity sentinel, and
   pinned tests. Any doubt anywhere in that chain produces no replacement at
   all rather than a best guess.
+- **Sanitize at the source, then distrust it anyway.** The recency summary is
+  built in the shell so raw history never crosses the boundary, and the
+  binary re-checks the same restriction on arrival, because an adapter can be
+  compromised or simply out of date.
 - **Sync only, lean style** (CLAUDE.md). No async runtime, plain data +
   free functions, no `unwrap` outside tests, no `unsafe` without discussion.
 - **Shadow first** (SPEC §8). Nothing becomes visible to users until logged
@@ -581,68 +815,42 @@ Short versions — SPEC has the full arguments:
 
 Honest about what today's code does *not* do:
 
-- **Danger warnings are opt-in.** The default modes (shadow, suggest) never
-  show L2+ warnings — the policy verdict is recorded as shadow data instead.
-  Visible warnings/confirmations require `mode = warn` or `confirm`, and no
-  rule category is enabled that way by default until the M5 pilot supplies
-  evidence (SPEC §8 graduation). The model layer (L4) is unbuilt.
-- **Only the first line of a multi-line command is analyzed.**
-  Continuation lines typed at the `PS2` prompt pass through untouched.
+- **Danger warnings are off by default.** The default modes (shadow, and the
+  installed default suggest) never show them — the verdict is recorded as
+  shadow data instead. Visible warnings require `mode = warn` or `confirm`,
+  and no category is enabled by default until the pilot supplies evidence
+  (SPEC §8 graduation). This is deliberate sequencing, not an oversight.
+- **The rule tables are curated, not exhaustive.** They recognize the command
+  shapes we chose; an unusual tool or an unfamiliar flag spelling is simply
+  not recognized. The layer fails toward silence.
+- **Rules match shapes, not semantics.** There is no model of how many
+  arguments a command requires, so a malformed command can still produce
+  evidence (recorded, never shown at today's tiers).
+- **The local-model layer (L4) is unbuilt.** No network of any kind today.
+- **Only the first line of a multi-line command is analyzed.** Continuation
+  lines typed at the `PS2` prompt pass through untouched.
 - **Linux and interactive zsh only.** The `/dev/fd/3` mechanism works on the
   BSDs too, but nothing else is tested there, and there is no bash adapter.
 - **The candidate scan is bounded, not exhaustive.** Directory entries and
   permission checks are capped, so on a pathological PATH the layer may miss
-  a candidate. It fails toward silence, which is the safe direction.
+  a candidate — again failing toward silence.
+- **Git-helper hardening is a curated key list.** We disable the git
+  configuration keys that can execute programs; a future git release could
+  add a new one. The structural fix — reading the index ourselves and never
+  spawning git — is a v2 candidate, recorded in PLAN.
 
 ## 9. Where things stand
 
-See [PLAN.md](PLAN.md) — M0 (skeleton), M1 (zsh capture + shadow
-passthrough), and M2 (lexer + typo layer, the first user-visible value) are
-complete. M3 is underway; landed 2026-08-06, documented so far only here and
-in their module headers:
+See **[PLAN.md](PLAN.md)** for milestone-by-milestone status and what comes
+next; completed milestones are archived verbatim in
+[PLAN-ARCHIVE.md](PLAN-ARCHIVE.md), including the findings from each
+refactor, bug-hunt, and security-audit pass.
 
-- **`src/layers/danger.rs`** (L2) — curated rule tables recognizing
-  high-consequence command shapes (recursive/forced deletes with target
-  classification, git history rewrites, block-device writes, service stops,
-  package removal, sudo escalation). Emits stable evidence codes plus a
-  direct-catastrophic flag (recursive delete of `/` or home); never
-  intervenes on its own. It also hands the literal targets of fired rules to
-  L3.
-- **`src/layers/context.rs`** (L3, deterministic half) — fresh facts
-  collected only when L2 marked a candidate: git branch/detached/dirty/
-  untracked (dirty counts via `git status` as a bounded external helper —
-  absolute path, fixed argv, hard timeout), and per-target stats (exists,
-  symlink, capped entry count, canonicalized cwd/parent detection, near-miss
-  siblings). Unavailable evidence is reported as unavailable, never guessed.
-- **`src/distance.rs`** — the bounded edit distance, moved out of the typo
-  layer so context's near-miss check shares one implementation.
-- **`src/policy.rs`** — the decision engine: `warranted` (the mode-blind
-  evidence → decision matrix pinned by `eval/golden/policy.json`),
-  `cap_for_mode` (the mode is a ceiling; downgrades preserve the policy
-  reason, which is what makes shadow data reportable), the intervention
-  budget and per-rule cooldown (built and tested; consumed once the warning
-  UI can show something), and the full SPEC §15 config surface with
-  warn-once diagnostics. The watchdog deadline now comes from
-  `det_timeout_ms`.
-
-- **The L2+ warning UI** (in `src/ui.rs` and `src/main.rs`) — the SPEC §7
-  warning anatomy on /dev/tty with e/edit (exit 11, exact buffer restored to
-  ZLE), c/cancel (exit 12, nothing runs), r/run-once. Warnings are advisory
-  (timeout runs the command); confirmations pause (timeout cancels).
-  Outcomes are recorded in the event log and feed the per-rule cooldown; the
-  intervention budget is spent only when a prompt is actually shown. The
-  prompt key reader now consumes complete escape sequences, fixing the
-  stray-bytes-after-arrow-keys bug (bughunt 2026-08-06).
-
-- **The recency relation** (plugin + `src/proposal.rs`) — the plugin
-  computes structural summaries of the last 5 commands *in the shell*, so no
-  raw history text ever crosses to the binary: per entry only an age, a
-  shares-a-word bit, and the first two words sanitized to
-  `[A-Za-z0-9_-]{1,32}` (anything else becomes `_`). They ride a third
-  NUL-separated payload section, are re-sanitized on parse, and surface as
-  `recency.target_overlap` evidence plus the "previous command: git diff"
-  line in warnings.
-
-M3 is complete. Files SPEC §16 lists for later milestones (`model.rs`,
-`layers/infer.rs`) don't exist yet by design — modules are created when
-their milestone starts.
+In short: the deterministic product is complete and tested — capture, lexing,
+all three deterministic layers, policy, and both prompts. What remains before
+a first release is the optional local-model layer, a shadow-mode pilot on
+real usage to decide which rule categories have earned the right to speak,
+and release engineering (continuous integration, `SECURITY.md`, a `report`
+command, and a clean-machine install test). Files SPEC §16 lists for later
+milestones (`model.rs`, `layers/infer.rs`) don't exist yet by design —
+modules are created when their milestone starts.
