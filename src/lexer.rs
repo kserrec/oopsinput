@@ -88,7 +88,7 @@ pub fn command_words(lexed: &Lexed) -> Vec<&Word> {
 }
 
 /// `NAME=...` / `NAME+=...` shape. Quoted words are never assignments.
-fn is_assignment(w: &Word) -> bool {
+pub(crate) fn is_assignment(w: &Word) -> bool {
     if w.quoted {
         return false;
     }

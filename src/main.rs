@@ -196,11 +196,18 @@ fn check(args: &[String]) -> ExitCode {
     // resolves to nothing. Distance is structural, never the names.
     let suggestion = layers::typo::analyze(proposal.res_kind, &lexed, &proposal.names);
 
+    // L2 danger layer (SPEC §5-L2): deterministic candidate marking. It never
+    // intervenes on its own — policy (M3) will consume it; until then its
+    // codes feed the shadow event log so the pilot can rank rules on real
+    // usage before any of them go live.
+    let danger = layers::danger::analyze(&lexed);
+
     let evidence = build_evidence(
         lexed.uncertainty,
         proposal.capped,
         proposal.names_capped,
         suggestion.as_ref(),
+        &danger,
     );
 
     // Analysis-only duration: the prompt below waits on a human and must not
@@ -244,13 +251,14 @@ fn check(args: &[String]) -> ExitCode {
 }
 
 /// Assemble the decision's evidence codes in stable order: lexer uncertainty
-/// (first-seen), input caps, then typo findings. The golden corpus pins this
-/// exact assembly — static strings only, never raw text.
+/// (first-seen), input caps, typo findings, then danger findings. The golden
+/// corpus pins this exact assembly — static strings only, never raw text.
 fn build_evidence(
     lexer_uncertainty: Vec<&'static str>,
     capped: bool,
     names_capped: bool,
     suggestion: Option<&layers::typo::Suggestion>,
+    danger: &layers::danger::Analysis,
 ) -> Vec<&'static str> {
     let mut evidence = lexer_uncertainty;
     if capped {
@@ -265,6 +273,10 @@ fn build_evidence(
         } else {
             "typo.candidate_d2"
         });
+    }
+    evidence.extend(danger.codes.iter().copied());
+    if danger.catastrophic {
+        evidence.push("danger.direct_catastrophic");
     }
     evidence
 }
@@ -455,7 +467,14 @@ mod tests {
                 "case '{}': wrong candidate",
                 c.name
             );
-            let evidence = build_evidence(lexed.uncertainty, false, false, suggestion.as_ref());
+            let danger = layers::danger::analyze_with_home(&lexed, None);
+            let evidence = build_evidence(
+                lexed.uncertainty,
+                false,
+                false,
+                suggestion.as_ref(),
+                &danger,
+            );
             assert_eq!(
                 evidence,
                 c.expect_evidence
@@ -463,6 +482,58 @@ mod tests {
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
                 "case '{}': wrong evidence",
+                c.name
+            );
+        }
+    }
+
+    /// SPEC §11 golden corpus, L2 slice: buffer → expected danger codes and
+    /// direct-catastrophic flag. Hermetic — "/home/u" stands in for $HOME.
+    /// Pairs here are command-shape counterfactuals (same command family,
+    /// benign variant, no evidence). The context-flip pairs (same command,
+    /// clean-vs-dirty repo) land with policy + L3 in M3, where context can
+    /// actually change the outcome.
+    #[test]
+    fn golden_danger_corpus() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            #[serde(default)]
+            pair: Option<String>,
+            buffer: String,
+            expect_evidence: Vec<String>,
+            #[serde(default)]
+            expect_catastrophic: bool,
+        }
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/eval/golden/danger.json");
+        let text = std::fs::read_to_string(path).expect("read golden corpus");
+        let cases: Vec<Case> = serde_json::from_str(&text).expect("parse golden corpus");
+        assert!(!cases.is_empty());
+
+        let paired = cases.iter().filter(|c| c.pair.is_some()).count();
+        assert!(
+            paired * 100 >= cases.len() * 30,
+            "SPEC §11: ≥30% of golden cases must be counterfactual pairs \
+             ({paired}/{} are)",
+            cases.len()
+        );
+
+        for c in &cases {
+            let lexed = lexer::lex(&c.buffer);
+            let analysis = layers::danger::analyze_with_home(&lexed, Some("/home/u"));
+            assert_eq!(
+                analysis.codes,
+                c.expect_evidence
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                "case '{}': wrong danger codes",
+                c.name
+            );
+            assert_eq!(
+                analysis.catastrophic, c.expect_catastrophic,
+                "case '{}': wrong catastrophic flag",
                 c.name
             );
         }

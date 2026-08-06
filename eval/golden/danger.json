@@ -1,0 +1,211 @@
+[
+  {
+    "name": "rm-rf-root",
+    "pair": "rm-root",
+    "buffer": "rm -rf /",
+    "expect_evidence": ["fs.rm_recursive", "fs.rm_force", "fs.target_root"],
+    "expect_catastrophic": true
+  },
+  {
+    "name": "rm-rf-scratch-counterfactual",
+    "pair": "rm-root",
+    "buffer": "rm -rf ./build",
+    "expect_evidence": ["fs.rm_recursive", "fs.rm_force"]
+  },
+  {
+    "name": "rm-rf-home-tilde",
+    "pair": "rm-home",
+    "buffer": "rm -rf ~",
+    "expect_evidence": ["fs.rm_recursive", "fs.rm_force", "fs.target_home"],
+    "expect_catastrophic": true
+  },
+  {
+    "name": "rm-rf-home-dollar",
+    "pair": "rm-home",
+    "buffer": "rm -rf \"$HOME\"",
+    "expect_evidence": ["fs.rm_recursive", "fs.rm_force", "fs.target_home"],
+    "expect_catastrophic": true
+  },
+  {
+    "name": "rm-rf-home-subdir-counterfactual",
+    "pair": "rm-home",
+    "buffer": "rm -rf ~/old-project",
+    "expect_evidence": ["fs.rm_recursive", "fs.rm_force"]
+  },
+  {
+    "name": "git-reset-hard",
+    "pair": "git-reset",
+    "buffer": "git reset --hard",
+    "expect_evidence": ["git.reset_hard"]
+  },
+  {
+    "name": "git-reset-soft-counterfactual",
+    "pair": "git-reset",
+    "buffer": "git reset --soft HEAD~1",
+    "expect_evidence": []
+  },
+  {
+    "name": "git-clean-force",
+    "pair": "git-clean",
+    "buffer": "git clean -fdx",
+    "expect_evidence": ["git.clean_force"]
+  },
+  {
+    "name": "git-clean-dry-run-counterfactual",
+    "pair": "git-clean",
+    "buffer": "git clean -n",
+    "expect_evidence": []
+  },
+  {
+    "name": "git-push-force",
+    "pair": "git-push",
+    "buffer": "git push --force origin main",
+    "expect_evidence": ["git.push_force"]
+  },
+  {
+    "name": "git-push-plain-counterfactual",
+    "pair": "git-push",
+    "buffer": "git push origin main",
+    "expect_evidence": []
+  },
+  {
+    "name": "git-push-delete-refspec",
+    "buffer": "git push origin :feature",
+    "expect_evidence": ["git.push_delete"]
+  },
+  {
+    "name": "git-branch-force-delete",
+    "pair": "git-branch",
+    "buffer": "git branch -D feature-x",
+    "expect_evidence": ["git.branch_delete_force"]
+  },
+  {
+    "name": "git-branch-safe-delete-counterfactual",
+    "pair": "git-branch",
+    "buffer": "git branch -d feature-x",
+    "expect_evidence": []
+  },
+  {
+    "name": "git-filter-branch",
+    "buffer": "git filter-branch --tree-filter 'rm -f secrets.txt' HEAD",
+    "expect_evidence": ["git.filter_branch"]
+  },
+  {
+    "name": "sudo-rm-rf-home",
+    "pair": "sudo",
+    "buffer": "sudo rm -rf ~",
+    "expect_evidence": ["fs.rm_recursive", "fs.rm_force", "fs.target_home", "priv.sudo"],
+    "expect_catastrophic": true
+  },
+  {
+    "name": "sudo-benign-counterfactual",
+    "pair": "sudo",
+    "buffer": "sudo apt update",
+    "expect_evidence": []
+  },
+  {
+    "name": "dd-to-blockdev",
+    "pair": "dd",
+    "buffer": "sudo dd if=arch.iso of=/dev/sdb bs=4M",
+    "expect_evidence": ["system.dd_of", "fs.target_blockdev", "priv.sudo"]
+  },
+  {
+    "name": "dd-to-file-counterfactual",
+    "pair": "dd",
+    "buffer": "dd if=/dev/sda of=backup.img",
+    "expect_evidence": ["system.dd_of"]
+  },
+  {
+    "name": "mkfs-blockdev",
+    "buffer": "sudo mkfs.ext4 /dev/nvme0n1p2",
+    "expect_evidence": ["system.mkfs", "fs.target_blockdev", "priv.sudo"]
+  },
+  {
+    "name": "kill-all",
+    "pair": "kill",
+    "buffer": "kill -9 -1",
+    "expect_evidence": ["system.kill_all"]
+  },
+  {
+    "name": "kill-one-counterfactual",
+    "pair": "kill",
+    "buffer": "kill -9 43210",
+    "expect_evidence": []
+  },
+  {
+    "name": "pkill-broad",
+    "pair": "pkill",
+    "buffer": "pkill -9 sh",
+    "expect_evidence": ["system.pkill_broad"]
+  },
+  {
+    "name": "pkill-specific-counterfactual",
+    "pair": "pkill",
+    "buffer": "pkill my-worker-daemon",
+    "expect_evidence": []
+  },
+  {
+    "name": "systemctl-stop",
+    "pair": "service",
+    "buffer": "sudo systemctl stop nginx",
+    "expect_evidence": ["system.service_stop", "priv.sudo"]
+  },
+  {
+    "name": "systemctl-status-counterfactual",
+    "pair": "service",
+    "buffer": "sudo systemctl status nginx",
+    "expect_evidence": []
+  },
+  {
+    "name": "apt-remove",
+    "pair": "pkg",
+    "buffer": "sudo apt remove golang",
+    "expect_evidence": ["system.pkg_remove", "priv.sudo"]
+  },
+  {
+    "name": "apt-install-counterfactual",
+    "pair": "pkg",
+    "buffer": "sudo apt install golang",
+    "expect_evidence": []
+  },
+  {
+    "name": "pacman-remove",
+    "buffer": "sudo pacman -Rns some-package",
+    "expect_evidence": ["system.pkg_remove", "priv.sudo"]
+  },
+  {
+    "name": "redirect-truncate",
+    "pair": "redirect",
+    "buffer": "echo results > results.csv",
+    "expect_evidence": ["fs.redirect_truncate"]
+  },
+  {
+    "name": "redirect-append-counterfactual",
+    "pair": "redirect",
+    "buffer": "echo results >> results.csv",
+    "expect_evidence": []
+  },
+  {
+    "name": "redirect-devnull-counterfactual",
+    "pair": "redirect",
+    "buffer": "make 2>/dev/null",
+    "expect_evidence": []
+  },
+  {
+    "name": "chmod-recursive-root",
+    "pair": "chmod",
+    "buffer": "chmod -R 777 /",
+    "expect_evidence": ["fs.chmod_recursive", "fs.target_root"]
+  },
+  {
+    "name": "chmod-plain-counterfactual",
+    "pair": "chmod",
+    "buffer": "chmod 644 notes.txt",
+    "expect_evidence": []
+  },
+  {
+    "name": "compound-command-second-segment",
+    "buffer": "make && rm -rf ./build",
+    "expect_evidence": ["fs.rm_recursive", "fs.rm_force"]
+  }
+]

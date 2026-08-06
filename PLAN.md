@@ -34,7 +34,12 @@ sign-off. Same review also added the test-derivation rule to CLAUDE.md
 
 ## M3 — Danger + context layers, policy, warning UI
 
-- [ ] layers/danger.rs: rule tables per SPEC §5-L2 (fs, git, system, privilege)
+- [x] layers/danger.rs: rule tables per SPEC §5-L2 (fs, git, system, privilege)
+      — ✅ 2026-08-06: candidate marking + direct-catastrophic flag (recursive
+      delete of / or ~); codes feed the shadow event log now, policy consumes
+      them next. priv.sudo fires only when the wrapped command tripped a rule.
+      Golden corpus eval/golden/danger.json (command-shape pairs; the
+      context-flip pairs arrive with policy + L3 below)
 - [ ] layers/context.rs: git facts, target facts, recency relation, near-miss
       targets — all hard-capped syscall collectors
 - [ ] policy.rs: evidence → decision matrix; direct-catastrophic subset;
