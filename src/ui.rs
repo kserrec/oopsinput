@@ -88,19 +88,73 @@ impl Drop for SttyRestore {
     }
 }
 
-/// Run `stty` against our tty (as its stdin). Returns trimmed stdout on
-/// success, None on any failure.
+/// Absolute paths we accept for `stty`, in order. SECURITY (audit
+/// 2026-08-06): resolving `stty` through $PATH executed an attacker's binary
+/// whenever an untrusted directory preceded the system ones — `.` on PATH, or
+/// the common dev setup where a tool like direnv puts a repo's `./bin` on
+/// PATH. Any typo then ran that repo's `stty`. The typo layer fires on
+/// *unresolvable* commands, so the trigger is any typo and the name is fixed
+/// and predictable — that is strictly more than a poisoned PATH normally
+/// buys. Never resolve this by name.
+const STTY_PATHS: [&str; 2] = ["/bin/stty", "/usr/bin/stty"];
+
+fn stty_path() -> Option<&'static str> {
+    STTY_PATHS
+        .into_iter()
+        .find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file()))
+}
+
+/// Hard timeout for an `stty` child (SPEC §9-1: external helpers run with
+/// fixed argv, no shell, hard timeout). Generous — stty is a few
+/// milliseconds of work; this only ever fires on a wedged system.
+const STTY_TIMEOUT_MS: u64 = 2_000;
+
+/// Run `stty` against our tty (as its stdin), bounded. Returns trimmed stdout
+/// on success, None on any failure or timeout.
+///
+/// SECURITY (audit 2026-08-06): this call happens after the watchdog retires,
+/// so an unbounded child hung the user's shell indefinitely with nothing to
+/// recover it. Everything past the retirement point must be bounded by
+/// construction; that is what makes retiring safe.
 fn stty(tty: &File, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("stty")
-        .args(args)
+    let mut cmd = std::process::Command::new(stty_path()?);
+    cmd.args(args)
         .stdin(tty.try_clone().ok()?)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .stderr(std::process::Stdio::null());
+    run_bounded(cmd, STTY_TIMEOUT_MS)
+}
+
+/// Spawn a child, wait at most `timeout_ms`, and return its trimmed stdout.
+/// A child that overruns is killed and reaped, and the call reports failure —
+/// no path through this function can block longer than the timeout.
+fn run_bounded(mut cmd: std::process::Command, timeout_ms: u64) -> Option<String> {
+    let mut child = cmd.spawn().ok()?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            // Wedged or unwaitable: kill it and degrade. Reaped immediately
+            // so we never leave a zombie behind.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    // Callers pipe only tiny outputs (stty's mode string), far below the pipe
+    // buffer, so reading after exit cannot deadlock.
+    let mut out = String::new();
+    child.stdout.as_mut()?.read_to_string(&mut out).ok()?;
+    Some(out.trim().to_string())
 }
 
 /// The prompt proper, generic over the terminal handle so the key protocol is
@@ -249,6 +303,65 @@ mod tests {
             // Idempotent: escaping escaped text changes nothing.
             assert_eq!(escape_for_display(&escaped), escaped);
         }
+    }
+
+    // ---- external helper invocation (audit 2026-08-06) ----
+
+    #[test]
+    fn stty_is_never_resolved_through_path() {
+        // Regression: resolving by name executed an attacker's `stty` when an
+        // untrusted directory preceded the system ones on PATH (`.` on PATH,
+        // or a repo's ./bin added by direnv). Any typo triggered it.
+        for p in STTY_PATHS {
+            assert!(
+                p.starts_with('/'),
+                "stty must be an absolute path, got {p:?}"
+            );
+        }
+        // And one of them must actually exist, or prompts silently degrade.
+        assert!(
+            stty_path().is_some(),
+            "no stty found at any absolute path: {STTY_PATHS:?}"
+        );
+    }
+
+    #[test]
+    fn a_wedged_helper_is_killed_at_the_deadline() {
+        // Regression: the prompt path runs after the watchdog retires, so an
+        // unbounded external child hung the user's shell indefinitely with
+        // nothing left to recover it (SPEC §9-1 requires a hard timeout).
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "sleep 30"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+
+        let started = std::time::Instant::now();
+        let out = run_bounded(cmd, 300);
+        let elapsed = started.elapsed();
+
+        assert!(out.is_none(), "a wedged helper must report failure");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "run_bounded blocked for {elapsed:?} — the deadline did not fire"
+        );
+    }
+
+    #[test]
+    fn a_healthy_helper_still_returns_its_output() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "printf 'mode-string\\n'"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        assert_eq!(run_bounded(cmd, 2_000).as_deref(), Some("mode-string"));
+    }
+
+    #[test]
+    fn a_failing_helper_reports_failure() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "exit 1"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        assert!(run_bounded(cmd, 2_000).is_none());
     }
 
     // ---- prompt key protocol ----

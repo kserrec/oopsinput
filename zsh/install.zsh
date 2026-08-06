@@ -45,7 +45,10 @@ fi
 # run). Never touches an existing config; user-only perms (SPEC §9-4).
 CONFIG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/oopsinput
 CONFIG=$CONFIG_DIR/config
-if [[ -f $CONFIG ]]; then
+# -e misses a dangling symlink, and `>` would follow it and create the target
+# somewhere else entirely (audit 2026-08-06). -L catches every symlink,
+# dangling included: anything already at this path is left untouched.
+if [[ -e $CONFIG || -L $CONFIG ]]; then
     print "config already present: $CONFIG — leaving it as is"
 else
     mkdir -p $CONFIG_DIR

@@ -101,6 +101,24 @@ fn existing_config_is_never_touched() {
 }
 
 #[test]
+fn dangling_config_symlink_is_left_alone() {
+    // Regression (audit 2026-08-06): the guard used -f, which is false for a
+    // dangling symlink, so `>` followed the link and created the config's
+    // content at the link's target — a file the installer never inspected.
+    let h = FakeHome::new();
+    std::fs::create_dir_all(h.config_path().parent().unwrap()).unwrap();
+    let elsewhere = h.dir.join("elsewhere.txt");
+    std::os::unix::fs::symlink(&elsewhere, h.config_path()).unwrap();
+
+    assert!(h.run_install(), "install must still succeed");
+    assert!(
+        !elsewhere.exists(),
+        "installer wrote through a dangling symlink to {}",
+        elsewhere.display()
+    );
+}
+
+#[test]
 fn install_is_idempotent() {
     let h = FakeHome::new();
     assert!(h.run_install());

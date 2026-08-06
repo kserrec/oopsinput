@@ -129,7 +129,15 @@ original, Ctrl-C cancels; resolving words never prompt.
       transitive deps like serde_json's `zmij`) on every push
 - [ ] SECURITY.md (audit 2026-08-05): security posture, the accepted
       same-user trust boundary, what the tool does/doesn't defend against,
-      vulnerability-report contact
+      vulnerability-report contact. Must state precisely (audit 2026-08-06,
+      learned from the `stty` finding): "same user" does NOT imply every
+      directory on $PATH is trusted — the typo layer fires on *unresolvable*
+      commands, so any helper resolved by name turns any typo into execution
+      of a predictable name from whatever directory leads $PATH (`.`, or a
+      repo's ./bin added by direnv). Every external helper: absolute path,
+      fixed argv, hard timeout. Also record: install.zsh leaves any existing
+      path (dangling symlinks included) untouched rather than writing
+      through it.
 - [ ] `oopsinput doctor` covers: plugin installed, widgets wrapped, config
       valid, model reachable (optional), state perms
 - [ ] Clean-machine test: fresh user → install → shadow → report → uninstall

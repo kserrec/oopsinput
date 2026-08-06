@@ -229,11 +229,16 @@ impl Search {
 /// spliced verbatim into an executed buffer. zsh accepts alias names like
 /// `'foo bar'` (bughunt 2026-08-06): suggesting one would run command `foo`
 /// with argument `bar` — a different parse than the prompt promised. Reject
-/// any name carrying whitespace or a shell metacharacter.
+/// any name carrying whitespace, a shell metacharacter, or a control
+/// character — filenames on PATH may contain raw control bytes (audit
+/// 2026-08-06), and a name we cannot render faithfully is one we should not
+/// offer to run.
 fn is_plausible_command_name(name: &str) -> bool {
     !name.is_empty()
         && !name.chars().any(|c| {
-            crate::lexer::is_shell_whitespace(c) || "\r'\"\\$`&|;<>(){}*?[]#~!=".contains(c)
+            crate::lexer::is_shell_whitespace(c)
+                || c.is_control()
+                || "'\"\\$`&|;<>(){}*?[]#~!=".contains(c)
         })
 }
 
@@ -487,7 +492,22 @@ mod tests {
         // zsh accepts alias names like 'foo bar'; splicing one into the
         // buffer would run command `foo` with argument `bar` — a different
         // parse than the prompt promised (bughunt 2026-08-06).
-        for name in ["foo bar", "foo'x", "a$b", "a\"b", "a;b", "a*", "a=b", ""] {
+        // Control bytes included: filenames on PATH can carry them (audit
+        // 2026-08-06), and a name we can't render faithfully is one we must
+        // not offer to run.
+        for name in [
+            "foo bar",
+            "foo'x",
+            "a$b",
+            "a\"b",
+            "a;b",
+            "a*",
+            "a=b",
+            "",
+            "gi\u{1b}[2Kt",
+            "a\u{7}b",
+            "a\rb",
+        ] {
             let names = vec![name.to_string()];
             assert!(
                 best_candidate("fooxbar", "", &names).is_none(),
