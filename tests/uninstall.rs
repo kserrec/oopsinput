@@ -3,6 +3,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("zsh/uninstall.zsh")
@@ -10,11 +13,8 @@ fn script() -> PathBuf {
 
 /// Run uninstall.zsh against a fake HOME containing the given .zshrc.
 fn run_uninstall(zshrc: &str) -> (bool, String) {
-    let home = std::env::temp_dir().join(format!(
-        "oopsinput-uninst-{}-{zshrc_len}",
-        std::process::id(),
-        zshrc_len = zshrc.len()
-    ));
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let home = std::env::temp_dir().join(format!("oopsinput-uninst-{}-{id}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join(".zshrc"), zshrc).unwrap();
 

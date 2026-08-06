@@ -26,6 +26,12 @@ Standing rules carried out of archived milestones:
   (space/tab/newline only) governs every decision about where a word starts
   or ends (bughunt 2026-08-06).
 
+Open question for Kyle (structure review 2026-08-06): SPEC §16's repository
+tree omits `scripts/` (pty-gate.zsh), which exists and is documented in
+ARCHITECTURE.md. Adding the one line is a SPEC edit, so it waits for his
+sign-off. Same review also added the test-derivation rule to CLAUDE.md
+(tests come from proven failure modes, never ritual).
+
 ## M3 — Danger + context layers, policy, warning UI
 
 - [ ] layers/danger.rs: rule tables per SPEC §5-L2 (fs, git, system, privilege)

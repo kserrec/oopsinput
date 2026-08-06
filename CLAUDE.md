@@ -49,6 +49,13 @@ distance, config parsing, CLI dispatch).
 
 ## Testing rules
 
+- Tests are derived from failure modes, never written as ritual. Build the
+  feature first, then hunt for the ways it can actually go wrong; when
+  reasonably possible, prove a suspected failure is real (probe it, watch it
+  happen) before writing the test that pins it — and note the probe in the
+  test comment. The only other source of tests is surprise: something broke
+  that we didn't predict, now found and proven (bug fix ⇒ fixture, below).
+  No speculative tests for failures nobody has named.
 - Every layer lands with unit tests + golden cases in the same commit.
 - Every danger rule ships with a counterfactual pair (same command, context
   where it's silently allowed) — CI enforces the ≥30% pair ratio.
