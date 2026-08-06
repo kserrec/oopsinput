@@ -153,7 +153,11 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       interventions from shadow data. The mechanism it reads (built in M3):
       a mode downgrade preserves the policy reason, so an event recorded as
       `observe` with reason `policy.*` is an intervention that *would* have
-      fired — count those, don't recompute them
+      fired — count those, don't recompute them. **Latency bucketing** (noted
+      during the M4 bughunt): an event's duration_us includes model
+      consultation time when one happened; report must split model-consulted
+      events (any `model.*` evidence code) from deterministic ones so the
+      SPEC §10 percentiles stay honest, and report model warm/cold separately
 - [ ] `oopsinput purge`; retention pruning
 - [ ] Author pilot: ≥1,000 natural commands in shadow+suggest; review top
       candidates + random allow sample; findings → regression fixtures.

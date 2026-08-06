@@ -462,11 +462,21 @@ pub fn warning_lines(
         // model output — untrusted, escaped, and labeled as the model's so
         // the user can weigh it accordingly (honest claims, SPEC §2-10).
         "policy.model_mismatch" => {
-            let mut lines = vec![format!(
-                "high-consequence command targeting {}, and the local model \
-                 sees a probable mismatch with what you meant",
-                targets()
-            )];
+            // The gate's flagship class (git work-loss commands) has no
+            // filesystem targets — the target clause only appears when
+            // there is a real target to name (bughunt 2026-08-06).
+            let what = if danger.targets.is_empty() {
+                "high-consequence command, and the local model sees a \
+                 probable mismatch with what you meant"
+                    .to_string()
+            } else {
+                format!(
+                    "high-consequence command targeting {}, and the local \
+                     model sees a probable mismatch with what you meant",
+                    targets()
+                )
+            };
+            let mut lines = vec![what];
             if let Some(m) = model {
                 lines.push(format!("model: {}", escape_for_display(&m.reason)));
             }
@@ -919,6 +929,42 @@ mod tests {
         let joined = warning_lines("policy.target_context", &danger, None, &[], None).join("\n");
         assert!(!joined.contains('\u{1b}'), "raw ESC in warning: {joined:?}");
         assert!(joined.contains("./x^[EVIL^Gy"), "{joined}");
+    }
+
+    #[test]
+    fn model_warning_without_targets_reads_cleanly() {
+        // Regression (bughunt 2026-08-06, probed: this test failed with
+        // "high-consequence command targeting its target" before the fix):
+        // the flagship gate-eligible class — git reset --hard, no
+        // filesystem targets — hit the targets() placeholder and rendered
+        // a degenerate first line. No targets ⇒ no target clause.
+        use crate::layers::infer::{MismatchKind, ModelAssessment, ModelEvidence};
+        let danger =
+            crate::layers::danger::analyze_with_home(&crate::lexer::lex("git reset --hard"), None);
+        assert!(danger.targets.is_empty(), "probe premise: no targets");
+        let ev = ModelEvidence {
+            assessment: ModelAssessment::ProbableMismatch,
+            kind: MismatchKind::Target,
+            reason: "x".into(),
+        };
+        let joined =
+            warning_lines("policy.model_mismatch", &danger, None, &[], Some(&ev)).join("\n");
+        assert!(
+            !joined.contains("its target"),
+            "degenerate target clause: {joined}"
+        );
+        assert!(joined.contains("high-consequence command"), "{joined}");
+
+        // ...and with a real target the clause names it, as before.
+        let danger = crate::layers::danger::analyze_with_home(
+            &crate::lexer::lex("dd if=x of=backup.img"),
+            None,
+        );
+        if !danger.targets.is_empty() {
+            let joined =
+                warning_lines("policy.model_mismatch", &danger, None, &[], Some(&ev)).join("\n");
+            assert!(joined.contains("backup.img"), "{joined}");
+        }
     }
 
     #[test]

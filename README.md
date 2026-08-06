@@ -17,8 +17,12 @@ You press Enter. In a few milliseconds, oopsinput checks what you typed:
   nothing. Silence. That's the point: the same command is fine in one context
   and a mistake in another, so oopsinput judges the context, not just the
   command.
-- **Not built.** The optional local-model check for the rare command that is
-  genuinely ambiguous after all the deterministic checks have run.
+- **Built, opt-in, and not in the default config.** The optional local-model
+  check for the rare command that is genuinely ambiguous after all the
+  deterministic checks have run (measured: 0.27% of real commands). It was
+  evaluated against local models and did not earn a default seat — it stays
+  off unless you configure a model, and even then it can only ever add a
+  warning, never clear or block a command.
 
 "Off by default" is deliberate sequencing, not a half-finished feature. The
 danger rules work and are tested, but until they've been measured against a
@@ -32,10 +36,12 @@ consent to, never silently rewrites a command, and never blocks you — every
 prompt has a "run it anyway" key. If anything inside it fails, your command
 runs untouched.
 
-Local-only: no telemetry, and today **no network access of any kind**. (The
-design reserves one future exception: a loopback call to an optional local
-model via [Ollama](https://ollama.com) for genuinely ambiguous commands. That
-is not built, and it will be opt-in when it is.)
+Local-only: no telemetry, and with the default config **no network access of
+any kind**. The one exception is opt-in: configure a model and the rare
+genuinely-ambiguous command is checked with a local model via
+[Ollama](https://ollama.com), over loopback only — and only after verifying
+the process on that port belongs to you or a system service, so another
+account on a shared machine can't impersonate it.
 
 ## Status
 
@@ -44,10 +50,11 @@ is not built, and it will be opt-in when it is.)
 Built and working: command capture that provably never alters your buffer, a
 conservative command lexer, the typo layer with its single-key prompt, the
 danger and context layers, the policy engine with its intervention budget,
-the warning interface (edit / cancel / run-once), and local event recording.
-Not built: the optional local-model layer. Not yet done: the shadow-mode
-pilot that decides which warnings earn the right to appear by default, and
-release engineering (CI, `SECURITY.md`, the `report` command).
+the warning interface (edit / cancel / run-once), local event recording, and
+the opt-in local-model layer (loopback Ollama, advisory-only, fully tested
+against a misbehaving model). Not yet done: the shadow-mode pilot that
+decides which warnings earn the right to appear by default, and release
+engineering (CI, `SECURITY.md`, the `report` command).
 
 See [SPEC.md](SPEC.md) for the full design, [PLAN.md](PLAN.md) for
 milestone-by-milestone progress, and
@@ -57,10 +64,11 @@ what today's code does not do.
 ## Design in one breath
 
 A zsh widget captures the buffer at Enter → a single Rust binary (no daemon)
-runs the analysis layers — typo, danger, context, and eventually optional
-local-model inference — → a deterministic policy decides: allow silently,
-suggest, warn, or ask. The three deterministic layers are built; the model
-layer is not. Shadow mode (observe, never interrupt) is the default for
+runs the analysis layers — typo, danger, context, and (when a model is
+configured) optional local-model inference — → a deterministic policy
+decides: allow silently, suggest, warn, or ask. All four layers are built;
+the model layer is advisory-only and off unless you opt in. Shadow mode
+(observe, never interrupt) is the default for
 everything until logged data says a category has earned the right to speak;
 typo suggestions are the one exception, enabled from the start because they
 only ever fire on a command that couldn't have run anyway.
