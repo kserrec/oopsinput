@@ -953,9 +953,10 @@ Honest about what today's code does *not* do:
   configured (the default), `check` never touches the network. With one, the
   model is consulted on ambiguous danger candidates only, its answer can at
   most raise a Warn, and every failure falls back to the deterministic
-  verdict silently. Whether the model *earns* a place in the default config
-  is decided by the paired-corpus comparison (M4's remaining evaluation
-  work), not by wiring.
+  verdict silently. The paired-corpus comparison (eval/model-comparison-
+  2026-08-06.md) decided the model does NOT join the default config: zero
+  categories improved, and reference-class local models miss the latency
+  budget on this hardware by ~35×.
 - **Only the first line of a multi-line command is analyzed.** Continuation
   lines typed at the `PS2` prompt pass through untouched.
 - **Linux and interactive zsh only.** The `/dev/fd/3` mechanism works on the

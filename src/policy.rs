@@ -1086,6 +1086,119 @@ mod tests {
         assert_ne!(a1, b);
     }
 
+    /// M4 item 5 evaluation harness — not a CI test (needs live Ollama on
+    /// 127.0.0.1:11434). Run by hand:
+    ///
+    ///   cargo test model_paired_comparison -- --ignored --nocapture
+    ///
+    /// Model name from OOPSINPUT_EVAL_MODEL (default qwen3:1.7b), 60 s per
+    /// case. Replays every gate-eligible golden case (the ambiguous observe
+    /// cases — the only ones a live run would consult) against the real
+    /// model and reports what apply_model_evidence would have done. Results
+    /// and the SPEC §11 default-config decision are recorded in
+    /// eval/model-comparison-2026-08-06.md.
+    #[test]
+    #[ignore = "live-model evaluation harness, run by hand (see eval/)"]
+    fn model_paired_comparison() {
+        use crate::proposal::{Proposal, ResolutionKind};
+
+        #[derive(serde::Deserialize)]
+        struct GitFix {
+            #[serde(default)]
+            detached: bool,
+            #[serde(default)]
+            main_like: bool,
+            dirty: Option<u32>,
+            untracked: Option<bool>,
+        }
+        #[derive(serde::Deserialize)]
+        struct TargetFix {
+            exists: bool,
+            #[serde(default)]
+            is_cwd: bool,
+            #[serde(default)]
+            is_parent: bool,
+            #[serde(default)]
+            near_miss: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            #[serde(default)]
+            pair: Option<String>,
+            buffer: String,
+            git: Option<GitFix>,
+            #[serde(default)]
+            targets: Vec<TargetFix>,
+            expect_verdict: String,
+            expect_reason: String,
+        }
+
+        let model =
+            std::env::var("OOPSINPUT_EVAL_MODEL").unwrap_or_else(|_| "qwen3:1.7b".to_string());
+        let cases: Vec<Case> = crate::golden_cases("policy.json", |c: &Case| c.pair.is_some());
+        println!("== paired-corpus comparison, model = {model} ==");
+        let mut eligible = 0u32;
+        let mut changed = 0u32;
+        for c in &cases {
+            let lexed = crate::lexer::lex(&c.buffer);
+            let d = danger::analyze_with_home(&lexed, Some("/home/u"));
+            let context = Context {
+                git: c.git.as_ref().map(|g| GitFacts {
+                    detached: g.detached,
+                    branch_main_like: g.main_like,
+                    dirty: g.dirty,
+                    untracked: g.untracked,
+                }),
+                targets: c
+                    .targets
+                    .iter()
+                    .map(|t| target(t.exists, t.is_cwd, t.is_parent, t.near_miss))
+                    .collect(),
+            };
+            let w = warranted(&d, Some(&context));
+            assert_eq!(w.verdict.as_str(), c.expect_verdict, "case {}", c.name);
+            if !l4_gate(&d, w) {
+                continue;
+            }
+            eligible += 1;
+            let p = Proposal {
+                buffer: c.buffer.clone(),
+                res_kind: ResolutionKind::Command,
+                capped: false,
+                names: vec![],
+                names_capped: false,
+                recency: vec![],
+            };
+            let got = crate::layers::infer::consult(&model, 60_000, &p, &d, Some(&context));
+            let after = apply_model_evidence(w, Some(&got));
+            let delta = if after == w {
+                "unchanged".to_string()
+            } else {
+                changed += 1;
+                format!("CHANGED -> {}/{}", after.verdict.as_str(), after.reason)
+            };
+            let code = primary_code(&d).unwrap_or("-");
+            match &got {
+                Consult::Evidence(e) => println!(
+                    "  {:42} [{code}] expected {}, model {} ({:?}) — {delta}\n      reason: {}",
+                    c.name,
+                    c.expect_reason,
+                    e.assessment.evidence_code(),
+                    e.kind,
+                    e.reason.replace(['\n', '\r'], " ")
+                ),
+                Consult::Unavailable(u) => {
+                    println!("  {:42} [{code}] model UNAVAILABLE ({u})", c.name)
+                }
+            }
+        }
+        println!(
+            "== {eligible} gate-eligible cases, {changed} verdicts would change \
+             (every change on this corpus is a raised intervention) =="
+        );
+    }
+
     // ---- L4 gate + advisory evidence (M4) ----------------------------------
 
     use crate::layers::infer::{Consult, MismatchKind, ModelAssessment, ModelEvidence};

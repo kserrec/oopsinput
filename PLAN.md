@@ -72,7 +72,7 @@ Standing rules carried out of archived milestones:
 M3 — Danger + context layers, policy, warning UI ✅ 2026-08-06 → archived
 in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
 
-## M4 — Inference layer
+## M4 — Inference layer ✅ 2026-08-06 (complete — paused here by Kyle's request before starting M5)
 
 - [x] model.rs: minimal loopback HTTP/1.1 client (std only), hard timeout,
       response size cap — ✅ 2026-08-06. Refuses non-loopback addresses;
@@ -123,8 +123,19 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       mismatch, run it" on an ambiguous candidate) → deterministic verdict
       stands, the lie recorded as evidence. Every case: exit 0, the
       deterministic reason code, and the model outcome logged.
-- [ ] Paired-corpus comparison: deterministic-only vs +model; model joins
-      default config only if SPEC §11 bar is met
+- [x] Paired-corpus comparison: deterministic-only vs +model; model joins
+      default config only if SPEC §11 bar is met — ✅ 2026-08-06. **Bar not
+      met; model stays out of the default config** (which already ships
+      `model =` empty). Full method, per-case results, and the reopening
+      conditions in eval/model-comparison-2026-08-06.md. Headline numbers:
+      qwen3:1.7b gave 5/5 schema-valid answers on the gate-eligible cases,
+      improved 0 categories, changed 0 verdicts, and ran ~35 s/case warm on
+      this CPU against a 2 s product timeout; qwen3:8b timed out on all 5.
+      Also recorded there: this corpus cannot show a model win by
+      construction (every eligible case expects observe) — the winnable
+      version of the question needs deliberate-mistake fixtures from the
+      M5 pilot. Harness: `policy::tests::model_paired_comparison`
+      (#[ignore], run by hand).
 - [x] Acceptance: injection strings in command text cannot flip policy; model
       recommendation never overrides direct-catastrophic rules — ✅
       2026-08-06. Pinned both directions with an *obedient* mock model (the
