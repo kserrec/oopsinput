@@ -56,7 +56,13 @@ clear on GitHub/crates.io/npm/PyPI/domains; `noops`, `oopsh`, `oopsys`,
       config `mode` key > shadow, closed vocabulary; PTY tests cover
       y/n/Ctrl-C end-to-end incl. event outcomes typo.accepted / declined /
       cancelled)
-- [ ] `suggest` mode enabled by default post-install
+- [x] `suggest` mode enabled by default post-install (2026-08-06: install.zsh
+      writes `mode = suggest` to $XDG_CONFIG_HOME/oopsinput/config (or
+      ~/.config) with 0700/0600 perms, never touching an existing config;
+      uninstall message covers config removal; tests/install.rs covers fresh
+      default + perms, existing-config untouched, idempotency; PTY test
+      proves the exact installed config artifact enables prompts through the
+      real config path)
 - [ ] Acceptance: golden typo cases pass; command words that resolve NEVER
       prompt; p95 within budget
 

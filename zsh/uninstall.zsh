@@ -33,5 +33,5 @@ if [[ -x $BIN ]]; then
 fi
 
 print "done — open a new terminal for a clean shell."
-print "shadow data (if any) remains in ~/.local/state/oopsinput — delete it with:"
-print "  rm -r ~/.local/state/oopsinput"
+print "shadow data and config (if any) remain — delete them with:"
+print "  rm -r ~/.local/state/oopsinput ~/.config/oopsinput"

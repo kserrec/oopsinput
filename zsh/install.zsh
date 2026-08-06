@@ -5,7 +5,9 @@ set -eu
 
 SCRIPT_DIR=${0:A:h}
 REPO_ROOT=${SCRIPT_DIR:h}
-BIN_SRC=$REPO_ROOT/target/release/oopsinput
+# OOPSINPUT_BIN_SRC is a test seam (the test suite installs a stand-in
+# binary); users just build release and run this.
+BIN_SRC=${OOPSINPUT_BIN_SRC:-$REPO_ROOT/target/release/oopsinput}
 BIN_DST=$HOME/.local/bin/oopsinput
 ZSHRC=$HOME/.zshrc
 MARK_BEGIN="# >>> oopsinput >>>"
@@ -38,4 +40,23 @@ else
     print "added plugin block to $ZSHRC"
 fi
 
-print "done — open a new terminal (or: source $ZSHRC). Mode: shadow (observe only)."
+# Default config (SPEC §8: new installs run shadow + suggest — typo prompts
+# are safe from day one because they only fire on commands that could not
+# run). Never touches an existing config; user-only perms (SPEC §9-4).
+CONFIG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/oopsinput
+CONFIG=$CONFIG_DIR/config
+if [[ -f $CONFIG ]]; then
+    print "config already present: $CONFIG — leaving it as is"
+else
+    mkdir -p $CONFIG_DIR
+    chmod 700 $CONFIG_DIR
+    {
+        print "# oopsinput config (see SPEC.md §15 for the full surface)"
+        print "mode = suggest   # shadow | suggest | warn | confirm"
+    } > $CONFIG
+    chmod 600 $CONFIG
+    print "wrote default config: $CONFIG (mode = suggest)"
+fi
+
+print "done — open a new terminal (or: source $ZSHRC)."
+print "mode: suggest — typo prompts for commands that don't resolve; everything else is shadow-recorded only."

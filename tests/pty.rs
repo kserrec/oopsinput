@@ -358,6 +358,38 @@ fn suggest_mode_y_runs_the_correction_exactly() {
 }
 
 #[test]
+fn config_file_mode_suggest_enables_prompts() {
+    // The exact artifact install.zsh writes must turn prompts on through the
+    // real config path (no env override involved).
+    let s = Session::new(None, &[]);
+    let confdir = s.dir.join("config/oopsinput");
+    std::fs::create_dir_all(&confdir).unwrap();
+    std::fs::write(
+        confdir.join("config"),
+        "# oopsinput config (see SPEC.md §15 for the full surface)\nmode = suggest   # shadow | suggest | warn | confirm\n",
+    )
+    .unwrap();
+
+    let out = s.run_staged(&[
+        (
+            "PTYTEST%",
+            0,
+            "alias oopspecialf='echo CONFIGRAN-$((5+6))'\recho marker-f1\r",
+        ),
+        ("marker-f1", 0, "oopspecialfq\r"),
+        ("[y/n]", 0, "yecho marker-f2\r"),
+    ]);
+    assert!(
+        out.contains("CONFIGRAN-11"),
+        "config-file suggest mode did not prompt/correct:\n{out}"
+    );
+    assert!(
+        out.contains("marker-f2"),
+        "session did not continue:\n{out}"
+    );
+}
+
+#[test]
 fn suggest_mode_n_runs_the_original_unchanged() {
     let s = Session::new(None, &[("OOPSINPUT_MODE", "suggest")]);
     let out = s.run_staged(&[
