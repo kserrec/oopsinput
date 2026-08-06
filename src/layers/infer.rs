@@ -107,6 +107,16 @@ pub enum Consult {
     Unavailable(&'static str),
 }
 
+impl Consult {
+    /// The validated evidence, if this consultation produced any.
+    pub fn evidence(&self) -> Option<&ModelEvidence> {
+        match self {
+            Consult::Evidence(e) => Some(e),
+            Consult::Unavailable(_) => None,
+        }
+    }
+}
+
 /// SPEC §5-L4: ≤240-char reason. Counted in characters, not bytes.
 const REASON_MAX_CHARS: usize = 240;
 

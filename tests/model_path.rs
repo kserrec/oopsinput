@@ -93,10 +93,10 @@ fn evidence_codes(decision: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A one-shot mock Ollama: reads the full request, waits `delay`, answers
-/// with `content` as the chat message. Returns the port and a
+/// The one-shot server core: accept one connection, read the full request,
+/// wait `delay`, write `response` verbatim. Returns the port and a
 /// was-connected flag.
-fn mock_ollama(content: &'static str, delay: Duration) -> (u16, Arc<AtomicBool>) {
+fn mock_server(response: Vec<u8>, delay: Duration) -> (u16, Arc<AtomicBool>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let connected = Arc::new(AtomicBool::new(false));
@@ -106,35 +106,38 @@ fn mock_ollama(content: &'static str, delay: Duration) -> (u16, Arc<AtomicBool>)
             flag.store(true, Ordering::SeqCst);
             read_full_request(&mut s);
             std::thread::sleep(delay);
-            let body = serde_json::json!({
-                "model": "mock",
-                "message": { "role": "assistant", "content": content },
-                "done": true,
-            })
-            .to_string();
-            let _ = write!(
-                s,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
+            let _ = s.write_all(&response);
         }
     });
     (port, connected)
 }
 
+/// A well-formed chat response carrying `content` as the message, with
+/// HTTP framing.
+fn chat_http(content: &str) -> Vec<u8> {
+    let body = serde_json::json!({
+        "model": "mock",
+        "message": { "role": "assistant", "content": content },
+        "done": true,
+    })
+    .to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .into_bytes()
+}
+
+/// A mock Ollama answering `content` as its chat message after `delay`.
+fn mock_ollama(content: &str, delay: Duration) -> (u16, Arc<AtomicBool>) {
+    mock_server(chat_http(content), delay)
+}
+
 /// Like `mock_ollama`, but the response is arbitrary raw bytes — for
 /// answers that are not well-formed chat responses at all.
 fn mock_ollama_raw(response: Vec<u8>) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        if let Ok((mut s, _)) = listener.accept() {
-            read_full_request(&mut s);
-            let _ = s.write_all(&response);
-        }
-    });
-    port
+    mock_server(response, Duration::ZERO).0
 }
 
 fn read_full_request(s: &mut TcpStream) {

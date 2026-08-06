@@ -175,25 +175,8 @@ fn check(args: &[String]) -> ExitCode {
     // common path stays syscall-free.
     let context = (!danger.codes.is_empty()).then(|| layers::context::collect(&danger.targets));
 
-    // L4 inference layer (SPEC §5-L4, M4): consulted only when a model is
-    // configured (default: none) AND the candidate gate opens — danger
-    // marked it, context left it genuinely ambiguous, and it is not
-    // direct-catastrophic. The watchdog extension goes up before the first
-    // socket call; consult() itself is bounded strictly tighter.
     let warranted = policy::warranted(&danger, context.as_ref());
-    let consulted = match &cfg.model {
-        Some(name) if policy::l4_gate(&danger, warranted) => {
-            MODEL_EXTENSION_MS.store(cfg.model_timeout_ms + 1_000, Ordering::SeqCst);
-            Some(layers::infer::consult(
-                name,
-                cfg.model_timeout_ms,
-                &proposal,
-                &danger,
-                context.as_ref(),
-            ))
-        }
-        _ => None,
-    };
+    let consulted = consult_model_if_gated(&cfg, warranted, &proposal, &danger, context.as_ref());
 
     let evidence = build_evidence(
         lexed.uncertainty,
@@ -225,7 +208,9 @@ fn check(args: &[String]) -> ExitCode {
             &danger,
             context.as_ref(),
             &proposal.recency,
-            model_evidence(consulted.as_ref()),
+            consulted
+                .as_ref()
+                .and_then(layers::infer::Consult::evidence),
             &cfg,
         ),
         _ => match &suggestion {
@@ -354,15 +339,30 @@ fn build_evidence(
     evidence
 }
 
-/// The validated model evidence, if this run produced any — for the warning
-/// UI, which shows the model's (escaped) reason alongside the facts.
-fn model_evidence(
-    consulted: Option<&layers::infer::Consult>,
-) -> Option<&layers::infer::ModelEvidence> {
-    match consulted {
-        Some(layers::infer::Consult::Evidence(e)) => Some(e),
-        _ => None,
+/// L4 inference layer (SPEC §5-L4): consult only when a model is configured
+/// (default: none) AND the candidate gate opens — danger marked it, context
+/// left it genuinely ambiguous, and it is not direct-catastrophic. Owns the
+/// watchdog's one-shot deadline extension, armed before the first socket
+/// call; consult() itself is bounded strictly tighter.
+fn consult_model_if_gated(
+    cfg: &policy::Config,
+    warranted: policy::Assessment,
+    proposal: &Proposal,
+    danger: &layers::danger::Analysis,
+    context: Option<&layers::context::Context>,
+) -> Option<layers::infer::Consult> {
+    let name = cfg.model.as_ref()?;
+    if !policy::l4_gate(danger, warranted) {
+        return None;
     }
+    MODEL_EXTENSION_MS.store(cfg.model_timeout_ms + 1_000, Ordering::SeqCst);
+    Some(layers::infer::consult(
+        name,
+        cfg.model_timeout_ms,
+        proposal,
+        danger,
+        context,
+    ))
 }
 
 /// The L1 prompt flow. Returns (decision, reason_code, exit code) — exit 10

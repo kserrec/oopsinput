@@ -634,60 +634,68 @@ mod tests {
         Context { git, targets }
     }
 
+    // Golden-corpus fixture shapes (eval/golden/policy.json), shared by the
+    // corpus test and the M4 model-comparison harness.
+    #[derive(serde::Deserialize)]
+    struct GitFix {
+        #[serde(default)]
+        detached: bool,
+        #[serde(default)]
+        main_like: bool,
+        dirty: Option<u32>,
+        untracked: Option<bool>,
+    }
+    #[derive(serde::Deserialize)]
+    struct TargetFix {
+        exists: bool,
+        #[serde(default)]
+        is_cwd: bool,
+        #[serde(default)]
+        is_parent: bool,
+        #[serde(default)]
+        near_miss: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        #[serde(default)]
+        pair: Option<String>,
+        buffer: String,
+        git: Option<GitFix>,
+        #[serde(default)]
+        targets: Vec<TargetFix>,
+        expect_verdict: String,
+        expect_reason: String,
+    }
+
+    impl Case {
+        fn context(&self) -> Context {
+            ctx(
+                self.git.as_ref().map(|g| GitFacts {
+                    detached: g.detached,
+                    branch_main_like: g.main_like,
+                    dirty: g.dirty,
+                    untracked: g.untracked,
+                }),
+                self.targets
+                    .iter()
+                    .map(|t| target(t.exists, t.is_cwd, t.is_parent, t.near_miss))
+                    .collect(),
+            )
+        }
+    }
+
     /// SPEC §11 golden corpus, policy slice: buffer + context fixture →
     /// expected verdict and reason. These are the context-flip counterfactual
     /// pairs the danger corpus could not express: same command, different
     /// context, different decision.
     #[test]
     fn golden_policy_corpus() {
-        #[derive(serde::Deserialize)]
-        struct GitFix {
-            #[serde(default)]
-            detached: bool,
-            #[serde(default)]
-            main_like: bool,
-            dirty: Option<u32>,
-            untracked: Option<bool>,
-        }
-        #[derive(serde::Deserialize)]
-        struct TargetFix {
-            exists: bool,
-            #[serde(default)]
-            is_cwd: bool,
-            #[serde(default)]
-            is_parent: bool,
-            #[serde(default)]
-            near_miss: bool,
-        }
-        #[derive(serde::Deserialize)]
-        struct Case {
-            name: String,
-            #[serde(default)]
-            pair: Option<String>,
-            buffer: String,
-            git: Option<GitFix>,
-            #[serde(default)]
-            targets: Vec<TargetFix>,
-            expect_verdict: String,
-            expect_reason: String,
-        }
-
         let cases: Vec<Case> = crate::golden_cases("policy.json", |c: &Case| c.pair.is_some());
 
         for c in &cases {
             let d = danger_for(&c.buffer);
-            let context = ctx(
-                c.git.as_ref().map(|g| GitFacts {
-                    detached: g.detached,
-                    branch_main_like: g.main_like,
-                    dirty: g.dirty,
-                    untracked: g.untracked,
-                }),
-                c.targets
-                    .iter()
-                    .map(|t| target(t.exists, t.is_cwd, t.is_parent, t.near_miss))
-                    .collect(),
-            );
+            let context = c.context();
             let got = warranted(&d, Some(&context));
             assert_eq!(
                 got.verdict.as_str(),
@@ -1102,38 +1110,6 @@ mod tests {
     fn model_paired_comparison() {
         use crate::proposal::{Proposal, ResolutionKind};
 
-        #[derive(serde::Deserialize)]
-        struct GitFix {
-            #[serde(default)]
-            detached: bool,
-            #[serde(default)]
-            main_like: bool,
-            dirty: Option<u32>,
-            untracked: Option<bool>,
-        }
-        #[derive(serde::Deserialize)]
-        struct TargetFix {
-            exists: bool,
-            #[serde(default)]
-            is_cwd: bool,
-            #[serde(default)]
-            is_parent: bool,
-            #[serde(default)]
-            near_miss: bool,
-        }
-        #[derive(serde::Deserialize)]
-        struct Case {
-            name: String,
-            #[serde(default)]
-            pair: Option<String>,
-            buffer: String,
-            git: Option<GitFix>,
-            #[serde(default)]
-            targets: Vec<TargetFix>,
-            expect_verdict: String,
-            expect_reason: String,
-        }
-
         let model =
             std::env::var("OOPSINPUT_EVAL_MODEL").unwrap_or_else(|_| "qwen3:1.7b".to_string());
         let cases: Vec<Case> = crate::golden_cases("policy.json", |c: &Case| c.pair.is_some());
@@ -1141,21 +1117,8 @@ mod tests {
         let mut eligible = 0u32;
         let mut changed = 0u32;
         for c in &cases {
-            let lexed = crate::lexer::lex(&c.buffer);
-            let d = danger::analyze_with_home(&lexed, Some("/home/u"));
-            let context = Context {
-                git: c.git.as_ref().map(|g| GitFacts {
-                    detached: g.detached,
-                    branch_main_like: g.main_like,
-                    dirty: g.dirty,
-                    untracked: g.untracked,
-                }),
-                targets: c
-                    .targets
-                    .iter()
-                    .map(|t| target(t.exists, t.is_cwd, t.is_parent, t.near_miss))
-                    .collect(),
-            };
+            let d = danger_for(&c.buffer);
+            let context = c.context();
             let w = warranted(&d, Some(&context));
             assert_eq!(w.verdict.as_str(), c.expect_verdict, "case {}", c.name);
             if !l4_gate(&d, w) {
