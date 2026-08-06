@@ -82,7 +82,19 @@ scripts/pty-gate.zsh
 ```
 
 (Default 10,000 submissions; pass a number for a quicker run, e.g.
-`scripts/pty-gate.zsh 500`.)
+`scripts/pty-gate.zsh 500`. It also enforces a coarse per-submission time
+ceiling, which is the only check covering plugin-side cost.)
+
+The performance gate — the SPEC §10 latency budgets, actually enforced
+against a release build:
+
+```
+scripts/perf-gate.zsh
+```
+
+Neither gate runs under `cargo test`: they need a release build and real
+process spawns, and keeping them separate keeps the test suite fast. Run
+them before claiming a performance number.
 
 To install on your own machine:
 
@@ -700,7 +712,7 @@ Measured on the candidate path (release, including both our spawn and git's):
 
 The testing philosophy: **buffer exactness and fail-open behavior are the
 product**, so the highest-value tests drive a real interactive zsh, not mocks.
-164 tests across five suites today.
+165 tests across five suites today, plus two gates that run separately.
 
 - **Unit tests** live inside each `src/` module (`#[cfg(test)] mod tests`):
   the closed resolution vocabulary, payload parsing edge cases (including the
@@ -748,6 +760,16 @@ product**, so the highest-value tests drive a real interactive zsh, not mocks.
 - **`scripts/pty-gate.zsh`** — the volume acceptance gate: N unique
   submissions (default 10,000) through a PTY shell; every output must appear,
   nothing may hang. M1's run: 10,000/10,000, zero altered buffers, in 128 s.
+  It also fails if the average round trip exceeds a coarse per-submission
+  ceiling (override with `OOPSINPUT_GATE_MS`) — deliberately loose, because
+  it includes zsh startup and the submitted command's own execution, but it
+  is the only check that sees *plugin-side* cost at all.
+- **`scripts/perf-gate.zsh`** — the SPEC §10 latency budgets enforced against
+  a release build, common and candidate paths, exiting nonzero when a
+  percentile is over budget. It exists because a change that cost ~7.5 ms per
+  command once shipped and was caught by a hand-run probe rather than by any
+  test (test-audit 2026-08-06). It writes to a temporary state directory, so
+  running it never pollutes the shadow-mode event log the pilot depends on.
 - **`eval/golden/`** — the golden corpus (SPEC §11), three files run as
   ordinary tests: `typo.json` (20 cases), `danger.json` (41 cases, command
   shapes) and `policy.json` (19 cases, context flips — the same command in

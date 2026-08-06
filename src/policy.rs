@@ -245,9 +245,18 @@ const MAX_COOLDOWN_ENTRIES: usize = 256;
 const MAX_INTERVENTION_STAMPS: usize = 1_024;
 
 pub fn load_state() -> PolicyState {
-    let Some(dir) = crate::events::state_dir() else {
-        return PolicyState::default();
-    };
+    match crate::events::state_dir() {
+        Some(dir) => load_state_from(&dir),
+        None => PolicyState::default(),
+    }
+}
+
+/// The whole loader with the state directory explicit — the seam tests run
+/// through, matching `events::append_to` (a test that re-implements the caps
+/// in its own body proves nothing about this function; test-audit
+/// 2026-08-06 proved exactly that, by deleting the caps below and watching
+/// the old test pass anyway).
+pub(crate) fn load_state_from(dir: &std::path::Path) -> PolicyState {
     let Ok(f) = std::fs::File::open(dir.join("policy.json")) else {
         return PolicyState::default();
     };
@@ -872,18 +881,55 @@ mod tests {
     #[test]
     fn bloated_state_is_dropped_rather_than_carried_forever() {
         // Audit 2026-08-06: a corrupt or bloated state file must not cost
-        // more work on every command. Caps apply on load.
+        // more work on every command, so both caps apply on load.
+        //
+        // This test reads the file through the real loader on purpose. Its
+        // first version re-implemented the capping in its own body and
+        // asserted on its own copy — test-audit 2026-08-06 deleted both caps
+        // from `load_state_from` and the test still passed, proving it tested
+        // nothing. Any rewrite must keep going through the loader.
+        let dir = std::env::temp_dir().join(format!("oopsinput-bloat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
         let mut state = PolicyState::default();
         for i in 0..(MAX_COOLDOWN_ENTRIES + 10) {
             record_outcome(&mut state, &format!("junk.rule_{i}"), true, 1);
         }
-        let json = serde_json::to_string(&state).unwrap();
-        let mut reloaded: PolicyState = serde_json::from_str(&json).unwrap();
-        assert!(reloaded.cooldowns.len() > MAX_COOLDOWN_ENTRIES);
-        if reloaded.cooldowns.len() > MAX_COOLDOWN_ENTRIES {
-            reloaded.cooldowns.clear();
-        }
-        assert!(reloaded.cooldowns.is_empty());
+        state.interventions_ts_ms = (0..(MAX_INTERVENTION_STAMPS as u64 + 10)).collect();
+        std::fs::write(
+            dir.join("policy.json"),
+            serde_json::to_string(&state).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_state_from(&dir);
+        assert!(
+            loaded.cooldowns.is_empty(),
+            "an over-cap cooldown map must be dropped on load, got {}",
+            loaded.cooldowns.len()
+        );
+        assert!(
+            loaded.interventions_ts_ms.is_empty(),
+            "an over-cap timestamp list must be dropped on load, got {}",
+            loaded.interventions_ts_ms.len()
+        );
+
+        // ...and a normal-sized file survives the trip intact.
+        let mut small = PolicyState::default();
+        record_outcome(&mut small, "git.reset_hard", true, 5);
+        std::fs::write(
+            dir.join("policy.json"),
+            serde_json::to_string(&small).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_state_from(&dir);
+        assert_eq!(
+            loaded.cooldowns["git.reset_hard"].consecutive_run_unchanged, 1,
+            "a normal state file must round-trip through the loader"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -623,6 +623,53 @@ mod tests {
     // Mode vocabulary and the SPEC §15 config surface are policy.rs's
     // domain now — their tests moved there with the code.
 
+    /// CLAUDE.md: "Every danger rule ships with a counterfactual pair (same
+    /// command, context where it's silently allowed)." The ≥30% pair ratio
+    /// checks the corpus in aggregate, so it cannot notice a *new* rule that
+    /// arrives with no cases at all — test-audit 2026-08-06 added a `shred`
+    /// rule to the danger layer and watched all 164 tests pass anyway. This
+    /// closes that hole: every evidence code the layer can emit must appear
+    /// in the corpus, and the emittable set is read from the source itself,
+    /// so a rule added without a case fails here instead of shipping unseen.
+    #[test]
+    fn every_danger_rule_appears_in_the_golden_corpus() {
+        let src =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/layers/danger.rs"))
+                .expect("read danger layer source");
+
+        // The codes the rules emit: `.note("code")` before the test module.
+        let rules_only = src.split("mod tests").next().unwrap_or(&src);
+        let mut emitted: Vec<&str> = Vec::new();
+        for (idx, _) in rules_only.match_indices(".note(\"") {
+            let rest = &rules_only[idx + ".note(\"".len()..];
+            if let Some(end) = rest.find('"')
+                && !emitted.contains(&&rest[..end])
+            {
+                emitted.push(&rest[..end]);
+            }
+        }
+        assert!(
+            emitted.len() > 10,
+            "scan found only {} codes — the extraction broke, not the corpus",
+            emitted.len()
+        );
+
+        let corpus = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/eval/golden/danger.json"
+        ))
+        .expect("read danger corpus");
+        let uncovered: Vec<&&str> = emitted
+            .iter()
+            .filter(|code| !corpus.contains(**code))
+            .collect();
+        assert!(
+            uncovered.is_empty(),
+            "danger rules with no golden case: {uncovered:?} — every rule needs \
+             a case, and a counterfactual pair per CLAUDE.md"
+        );
+    }
+
     #[test]
     fn find_in_path_finds_sh() {
         // /bin/sh exists on any Linux we support.

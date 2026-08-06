@@ -424,7 +424,7 @@ oopsinput/
 │   ├── oopsinput.zsh    # widget wrapper plugin
 │   ├── install.zsh
 │   └── uninstall.zsh
-├── scripts/             # dev/acceptance tooling (pty-gate.zsh)
+├── scripts/             # acceptance gates (pty-gate.zsh, perf-gate.zsh)
 ├── eval/golden/         # paired JSON cases
 └── tests/               # integration + PTY tests
 ```

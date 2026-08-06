@@ -554,6 +554,13 @@ mod tests {
     fn fuzz_smoke_no_active_character_survives() {
         // SPEC §9-5 fuzz target: byte soup heavy in escape machinery; every
         // output char must be inert, output stays bounded, nothing panics.
+        //
+        // Know its reach before trusting it (test-audit 2026-08-06): "inert"
+        // here means `needs_escape`, so this test proves `escape_for_display`
+        // agrees with that predicate — not that the predicate is right.
+        // Deleting the bidi-override range from `needs_escape` leaves this
+        // test green; the hand-written cases below are what catch that, and
+        // a new dangerous character class needs a case there, not more fuzz.
         let alphabet: Vec<char> =
             "ab0;:m[]()\u{1b}\u{7}\u{8}\u{9b}\u{9d}\r\n\t\u{0}\u{7f}\u{202E}\u{202A}\u{2066}\u{200B}\u{FEFF}\u{061C}注€y"
                 .chars()

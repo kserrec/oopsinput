@@ -41,6 +41,22 @@ Standing rules carried out of archived milestones:
 - **Word boundaries follow the shell, not Unicode**: `lexer::is_shell_whitespace`
   (space/tab/newline only) governs every decision about where a word starts
   or ends (bughunt 2026-08-06).
+- **Open product bug for /bughunt (found by test-audit 2026-08-06, proven,
+  NOT yet fixed):** the intervention budget is lost under parallel shells.
+  `warning_intervention` does load_state → apply_gates(commit) → save_state
+  with no locking, so two shells that finish warnings in the same instant
+  both read the same counts and the second save overwrites the first —
+  simulated: two spends recorded, one survives. Effect: the user can be shown
+  more than `budget_per_hour` warnings, and a cooldown can be lost. The event
+  log already solved the same class with a single atomic append; this file
+  needs the equivalent (write-temp-then-rename, or an advisory lock). No test
+  covers concurrent policy-state access — that is why it hid.
+- **Performance is gated, but only on the binary side** (test-audit
+  2026-08-06): `scripts/perf-gate.zsh` enforces SPEC §10 budgets for the
+  common and candidate paths, and `scripts/pty-gate.zsh` now enforces a
+  coarse per-submission ceiling that covers the plugin. Neither measures
+  fine-grained plugin work against history size — the exact shape of the
+  ~7.5 ms recency regression. Wire both gates into M6's CI item.
 - **Deferred finding (bughunt 2026-08-06):** danger's shape tables don't
   model per-tool *arity* — `mv -f a` (missing destination) still emits
   `fs.force_overwrite` evidence though mv itself errors. Deferral reason:
