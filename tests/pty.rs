@@ -57,10 +57,10 @@ impl Session {
         Session { dir }
     }
 
-    /// Feed keystroke lines to the interactive shell, return everything the
-    /// terminal displayed. `exit` is appended automatically.
-    fn run(&self, lines: &[&str]) -> String {
-        let mut child = Command::new("script")
+    /// Interactive zsh under a PTY (util-linux `script`) with this session's
+    /// isolated ZDOTDIR.
+    fn spawn_zsh(&self) -> std::process::Child {
+        Command::new("script")
             .args(["-qec", "zsh -i", "/dev/null"])
             .env("ZDOTDIR", &self.dir)
             .env("TERM", "xterm")
@@ -69,7 +69,18 @@ impl Session {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn script+zsh");
+            .expect("spawn script+zsh")
+    }
+
+    /// The session's event log; panics if no event was written.
+    fn events_log(&self) -> String {
+        std::fs::read_to_string(self.dir.join("state/events.jsonl")).expect("event log written")
+    }
+
+    /// Feed keystroke lines to the interactive shell, return everything the
+    /// terminal displayed. `exit` is appended automatically.
+    fn run(&self, lines: &[&str]) -> String {
+        let mut child = self.spawn_zsh();
 
         {
             let stdin = child.stdin.as_mut().unwrap();
@@ -91,16 +102,7 @@ impl Session {
     /// appended automatically.
     fn run_staged(&self, stages: &[(&str, u64, &str)]) -> String {
         use std::io::Read;
-        let mut child = Command::new("script")
-            .args(["-qec", "zsh -i", "/dev/null"])
-            .env("ZDOTDIR", &self.dir)
-            .env("TERM", "xterm")
-            .env_remove("OOPSINPUT_BIN")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn script+zsh");
+        let mut child = self.spawn_zsh();
 
         let mut stdin = child.stdin.take().unwrap();
         let mut stdout = child.stdout.take().unwrap();
@@ -229,7 +231,7 @@ fn events_are_recorded_and_structural_only() {
     let out = s.run(&[secret, "echo pty-ev-ok"]);
     assert!(out.contains("pty-ev-ok"), "commands did not run:\n{out}");
 
-    let log = std::fs::read_to_string(s.dir.join("state/events.jsonl")).expect("event log written");
+    let log = s.events_log();
     let lines: Vec<&str> = log.lines().collect();
     assert!(lines.len() >= 2, "expected >=2 events, got:\n{log}");
     assert!(
@@ -261,7 +263,7 @@ fn resolution_kinds_are_correctly_extracted() {
     ]);
     assert!(out.contains("pty-res-ok"), "commands did not run:\n{out}");
 
-    let log = std::fs::read_to_string(s.dir.join("state/events.jsonl")).expect("event log written");
+    let log = s.events_log();
     assert_eq!(
         log.matches("\"res_kind\":\"alias\"").count(),
         2,
@@ -303,7 +305,7 @@ fn typo_near_alias_records_candidate_evidence() {
         "alias itself did not run:\n{out}"
     );
 
-    let log = std::fs::read_to_string(s.dir.join("state/events.jsonl")).expect("event log written");
+    let log = s.events_log();
     assert_eq!(
         log.matches("typo.candidate_d1").count(),
         1,
@@ -350,7 +352,7 @@ fn suggest_mode_y_runs_the_correction_exactly() {
         "session did not continue:\n{out}"
     );
 
-    let log = std::fs::read_to_string(s.dir.join("state/events.jsonl")).expect("event log written");
+    let log = s.events_log();
     assert!(
         log.contains("\"decision\":\"replace\"") && log.contains("typo.accepted"),
         "accepted outcome not recorded:\n{log}"
@@ -434,7 +436,7 @@ fn suggest_mode_n_runs_the_original_unchanged() {
         "session did not continue:\n{out}"
     );
 
-    let log = std::fs::read_to_string(s.dir.join("state/events.jsonl")).expect("event log written");
+    let log = s.events_log();
     assert!(
         log.contains("typo.declined"),
         "declined outcome not recorded:\n{log}"
@@ -466,7 +468,7 @@ fn suggest_mode_ctrl_c_cancels_running_nothing() {
         "session did not continue:\n{out}"
     );
 
-    let log = std::fs::read_to_string(s.dir.join("state/events.jsonl")).expect("event log written");
+    let log = s.events_log();
     assert!(
         log.contains("\"decision\":\"cancel\"") && log.contains("typo.cancelled"),
         "cancelled outcome not recorded:\n{log}"

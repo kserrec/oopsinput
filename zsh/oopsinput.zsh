@@ -73,26 +73,25 @@ _oopsinput_handle() {
         esac
     fi
 
+    # When the command word resolves to nothing — L1 typo territory — the
+    # payload also carries the candidate pool (every name only the live shell
+    # can see: aliases, functions, builtins, reserved words) after a NUL
+    # separator; zsh strings can never contain NUL, so the separator is
+    # collision-free. Only that already-failing path pays the cost.
+    [[ $kind == none ]] && zmodload zsh/parameter 2>/dev/null
+
     # fd 3 is the replacement channel (SPEC §6): the binary's fd 3 is routed
     # into $captured; its stdout (decision JSON) and stderr are discarded.
     # Prompts reach the terminal via /dev/tty, not through these streams.
     local captured rc
-    if [[ $kind == none ]]; then
-        # Command word resolves to nothing — L1 typo territory. Ship the
-        # candidate pool (every name only the live shell can see: aliases,
-        # functions, builtins, reserved words) after a NUL separator; zsh
-        # strings can never contain NUL, so the separator is collision-free.
-        # Only this already-failing path pays the cost.
-        zmodload zsh/parameter 2>/dev/null
-        captured=$( { print -rn -- "$original"$'\0'
+    captured=$( {
+        print -rn -- "$original"
+        if [[ $kind == none ]]; then
+            print -rn -- $'\0'
             print -rl -- ${(k)aliases} ${(k)functions} ${(k)builtins} ${(k)reswords}
-        } | "$_OOPSINPUT_BIN" check --res "$kind" 3>&1 >/dev/null 2>&1 )
-        rc=$?
-    else
-        captured=$( print -rn -- "$original" |
-            "$_OOPSINPUT_BIN" check --res "$kind" 3>&1 >/dev/null 2>&1 )
-        rc=$?
-    fi
+        fi
+    } | "$_OOPSINPUT_BIN" check --res "$kind" 3>&1 >/dev/null 2>&1 )
+    rc=$?
 
     case $rc in
         10)

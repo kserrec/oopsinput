@@ -95,6 +95,16 @@ fn arm_watchdog() {
     });
 }
 
+/// Test hooks exist in debug builds only (the PTY suite runs against the
+/// debug profile); release binaries have a fixed deadline and no hang hook.
+fn deadline_ms() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Ok(v) = std::env::var("OOPSINPUT_TEST_DEADLINE_MS") {
+        return v.parse().unwrap_or(DET_DEADLINE_MS);
+    }
+    DET_DEADLINE_MS
+}
+
 /// Operating mode (SPEC §8/§15). Only the L1-relevant split exists so far:
 /// warn/confirm include L1 prompts per §8, so they resolve to Suggest until
 /// their own layers land (M3).
@@ -152,16 +162,6 @@ fn config_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
         }
     }
     None
-}
-
-/// Test hooks exist in debug builds only (the PTY suite runs against the
-/// debug profile); release binaries have a fixed deadline and no hang hook.
-fn deadline_ms() -> u64 {
-    #[cfg(debug_assertions)]
-    if let Ok(v) = std::env::var("OOPSINPUT_TEST_DEADLINE_MS") {
-        return v.parse().unwrap_or(DET_DEADLINE_MS);
-    }
-    DET_DEADLINE_MS
 }
 
 /// Read one proposal from stdin (+ adapter flags), analyze, record a shadow
