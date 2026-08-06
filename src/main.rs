@@ -334,22 +334,20 @@ fn warning_intervention(
     cfg: &policy::Config,
 ) -> (&'static str, &'static str, u8, Option<&'static str>) {
     let rule = policy::primary_code(danger);
-    let mut state = policy::load_state();
+    let history = policy::load_history();
     let gated = policy::apply_gates(
         assessment,
         rule,
         danger.catastrophic,
-        &mut state,
+        &history,
         events::now_ms(),
         cfg.budget_per_hour,
-        true, // the prompt below is real: this intervention spends budget
     );
     if !matches!(
         gated.verdict,
         policy::Verdict::Warn | policy::Verdict::Confirm
     ) {
         // budget exhausted or rule in cooldown: degrade to shadow recording
-        policy::save_state(&state);
         return (gated.verdict.as_str(), gated.reason, 0, None);
     }
 
@@ -362,10 +360,11 @@ fn warning_intervention(
         ui::WarnChoice::Cancel => ("cancelled", false, 12),
         ui::WarnChoice::RunOnce => ("ran_unchanged", true, 0),
     };
+    // Recorded only now, because only a prompt the user actually saw spends
+    // budget — and one atomic append keeps concurrent shells honest.
     if let Some(code) = rule {
-        policy::record_outcome(&mut state, code, ran_unchanged, events::now_ms());
+        policy::record_outcome(code, ran_unchanged, events::now_ms());
     }
-    policy::save_state(&state);
     (
         gated.verdict.as_str(),
         gated.reason,
@@ -672,8 +671,15 @@ mod tests {
 
     #[test]
     fn find_in_path_finds_sh() {
-        // /bin/sh exists on any Linux we support.
-        assert!(find_in_path("sh").is_some());
+        // Smoke test for the thin env wrapper: `find_in_path` must read $PATH
+        // and hand it to the (hermetically tested) lookup below. Its premise
+        // is environmental, so it says so when it fails rather than looking
+        // like a product bug (test-audit 2026-08-06).
+        assert!(
+            find_in_path("sh").is_some(),
+            "no `sh` on $PATH — this asserts the environment, not the code; \
+             the real lookup logic is pinned by find_in_path_requires_executable_bit"
+        );
     }
 
     #[test]

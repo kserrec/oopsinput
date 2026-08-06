@@ -376,6 +376,10 @@ uncertainty, not as safety.
 - `~/.local/state/oopsinput/events.jsonl` — append-only structural events:
   timestamp, decision, evidence codes, layer, timings, outcome, keyed
   fingerprints. No raw commands, no paths, no goal text by default.
+- `~/.local/state/oopsinput/policy.jsonl` — append-only habituation state:
+  one line per *shown* intervention (timestamp, rule code, what the user
+  did), read tail-first to compute the budget and per-rule cooldown. Append-
+  only so concurrent shells cannot lose each other's writes.
 - `~/.local/state/oopsinput/key` — local random fingerprint key, 0600.
 - `oopsinput report` — rates, latencies, top evidence codes, hypothetical
   interventions from shadow data.

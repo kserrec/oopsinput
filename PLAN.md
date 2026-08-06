@@ -41,16 +41,16 @@ Standing rules carried out of archived milestones:
 - **Word boundaries follow the shell, not Unicode**: `lexer::is_shell_whitespace`
   (space/tab/newline only) governs every decision about where a word starts
   or ends (bughunt 2026-08-06).
-- **Open product bug for /bughunt (found by test-audit 2026-08-06, proven,
-  NOT yet fixed):** the intervention budget is lost under parallel shells.
-  `warning_intervention` does load_state → apply_gates(commit) → save_state
-  with no locking, so two shells that finish warnings in the same instant
-  both read the same counts and the second save overwrites the first —
-  simulated: two spends recorded, one survives. Effect: the user can be shown
-  more than `budget_per_hour` warnings, and a cooldown can be lost. The event
-  log already solved the same class with a single atomic append; this file
-  needs the equivalent (write-temp-then-rename, or an advisory lock). No test
-  covers concurrent policy-state access — that is why it hid.
+- **Habituation state is append-only, and must stay that way** (fixed
+  2026-08-06 from a test-audit finding): the budget and cooldown once lived
+  in a JSON blob that was loaded, modified and written back, so two shells
+  finishing warnings in the same instant each recorded a spend and the second
+  write dropped the first — the hourly cap under-counted and a cooldown could
+  vanish. `policy.jsonl` now takes one atomic append per shown intervention
+  and the gates are a pure read over its tail, which removes the race by
+  construction rather than by locking. Pinned by an 8-thread test that fails
+  against the old read-modify-write shape. Any future per-command state gets
+  the same treatment; the event log had already proven the pattern.
 - **Performance is gated, but only on the binary side** (test-audit
   2026-08-06): `scripts/perf-gate.zsh` enforces SPEC §10 budgets for the
   common and candidate paths, and `scripts/pty-gate.zsh` now enforces a

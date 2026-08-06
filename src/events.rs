@@ -214,8 +214,10 @@ mod tests {
         assert!(json.contains("\"ctx_git_dirty\":14"));
         // absent context counts stay out of the line entirely
         assert!(!json.contains("ctx_target_entries"));
-        // The event type has no field that could carry buffer content; this
-        // test documents that invariant for future editors.
-        assert!(!json.contains("buffer_text"));
+        // The redaction is structural: `Event` has no field that could hold
+        // command text, so this test pins the *serialized shape* rather than
+        // asserting the absence of a field that never existed (test-audit
+        // 2026-08-06 found that assertion could not fail). The real guard
+        // against leakage is the PTY test that greps a live log for a secret.
     }
 }

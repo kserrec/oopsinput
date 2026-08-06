@@ -9,8 +9,7 @@
 //! policy reason preserved — that preserved reason IS the shadow conversion:
 //! `oopsinput report` (M5) counts hypothetical interventions from it.
 
-use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -155,39 +154,76 @@ pub fn cap_for_mode(assessment: Assessment, mode: Mode) -> Assessment {
 
 // ---- habituation control: budget + cooldown (SPEC §7) ---------------------
 
-#[derive(Serialize, Deserialize, Default)]
-pub struct PolicyState {
-    /// Timestamps (ms) of visible interventions, pruned to the last hour.
-    #[serde(default)]
-    interventions_ts_ms: Vec<u64>,
-    /// Per-rule cooldown state, keyed by the primary evidence code.
-    #[serde(default)]
-    cooldowns: HashMap<String, Cooldown>,
+/// One intervention that was actually shown, and what the user did about it.
+/// Appended as a single line and never rewritten.
+///
+/// Append-only is the entire point (test-audit 2026-08-06, proven): the
+/// previous design loaded a JSON blob, modified it, and wrote it back, so two
+/// shells finishing warnings in the same instant each recorded a spend and
+/// the second write dropped the first — the hourly cap silently under-counted
+/// and a cooldown could vanish. The event log already solved this exact class
+/// with one atomic append per line; this is the same fix, and it removes the
+/// race by construction rather than by locking.
+#[derive(Serialize, Deserialize)]
+struct Intervention {
+    ts_ms: u64,
+    rule: String,
+    ran_unchanged: bool,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
-struct Cooldown {
-    until_ms: u64,
-    consecutive_run_unchanged: u32,
+/// Recent shown interventions, oldest first. Read once per candidate command.
+#[derive(Default)]
+pub struct History {
+    shown: Vec<Intervention>,
 }
 
 const HOUR_MS: u64 = 3_600_000;
 const COOLDOWN_MS: u64 = 24 * HOUR_MS;
 /// Run-unchanged outcomes in a row before a rule goes quiet for a day.
-const COOLDOWN_TRIGGER: u32 = 3;
+const COOLDOWN_TRIGGER: usize = 3;
+
+impl History {
+    fn shown_within_hour(&self, now_ms: u64) -> usize {
+        self.shown
+            .iter()
+            .filter(|i| now_ms.saturating_sub(i.ts_ms) < HOUR_MS)
+            .count()
+    }
+
+    /// A rule is asleep when its last `COOLDOWN_TRIGGER` outcomes were all
+    /// "ran unchanged" — the user saying *I mean it, stop asking* — and that
+    /// run is still inside the cooldown window. Any edit or cancel in the
+    /// recent run breaks the streak, which is the reset the old counter did.
+    fn rule_in_cooldown(&self, rule: &str, now_ms: u64) -> bool {
+        let recent: Vec<&Intervention> = self
+            .shown
+            .iter()
+            .rev()
+            .filter(|i| i.rule == rule)
+            .take(COOLDOWN_TRIGGER)
+            .collect();
+        recent.len() == COOLDOWN_TRIGGER
+            && recent.iter().all(|i| i.ran_unchanged)
+            && recent
+                .first()
+                .is_some_and(|newest| now_ms.saturating_sub(newest.ts_ms) < COOLDOWN_MS)
+    }
+}
 
 /// Gate a visible intervention through the budget and the per-rule cooldown.
-/// Direct-catastrophic is exempt from both (SPEC §7). `commit` records the
-/// spend — pass false when the intervention cannot actually be shown yet.
-/// Exhaustion degrades to observe (shadow recording), never to nagging.
+/// Direct-catastrophic is exempt from both (SPEC §7). Exhaustion degrades to
+/// observe (shadow recording), never to nagging.
+///
+/// This is a pure decision over history — showing is what spends budget, and
+/// only `record_outcome` (called after the prompt) writes. That ordering is
+/// why an intervention nobody saw can no longer consume anything.
 pub fn apply_gates(
     assessment: Assessment,
     primary_code: Option<&str>,
     catastrophic: bool,
-    state: &mut PolicyState,
+    history: &History,
     now_ms: u64,
     budget_per_hour: u32,
-    commit: bool,
 ) -> Assessment {
     if !matches!(assessment.verdict, Verdict::Warn | Verdict::Confirm) {
         return assessment;
@@ -196,39 +232,14 @@ pub fn apply_gates(
         return assessment;
     }
     if let Some(code) = primary_code
-        && state
-            .cooldowns
-            .get(code)
-            .is_some_and(|c| c.until_ms > now_ms)
+        && history.rule_in_cooldown(code, now_ms)
     {
         return assess(Verdict::Observe, "policy.rule_cooldown");
     }
-    state
-        .interventions_ts_ms
-        .retain(|t| now_ms.saturating_sub(*t) < HOUR_MS);
-    if state.interventions_ts_ms.len() as u32 >= budget_per_hour {
+    if history.shown_within_hour(now_ms) as u32 >= budget_per_hour {
         return assess(Verdict::Observe, "policy.budget_exhausted");
     }
-    if commit {
-        state.interventions_ts_ms.push(now_ms);
-    }
     assessment
-}
-
-/// Called by the warning UI (next M3 item) with what the user did. Repeated
-/// run-unchanged on the same rule reads as "I mean it, stop asking" and
-/// triggers the cooldown; any edit/cancel resets it.
-pub fn record_outcome(state: &mut PolicyState, code: &str, ran_unchanged: bool, now_ms: u64) {
-    let c = state.cooldowns.entry(code.to_string()).or_default();
-    if ran_unchanged {
-        c.consecutive_run_unchanged += 1;
-        if c.consecutive_run_unchanged >= COOLDOWN_TRIGGER {
-            c.until_ms = now_ms + COOLDOWN_MS;
-        }
-    } else {
-        c.consecutive_run_unchanged = 0;
-        c.until_ms = 0;
-    }
 }
 
 /// The rule a cooldown keys on: the first danger code (rules note their own
@@ -237,64 +248,102 @@ pub fn primary_code(danger: &Analysis) -> Option<&'static str> {
     danger.codes.first().copied()
 }
 
-/// Bytes read from the state file, and the caps that keep a corrupted or
-/// bloated one from costing more work on every single command (audit
-/// 2026-08-06): the file is ours, but "ours" is not a size guarantee.
-const STATE_READ_CAP: u64 = 1 << 20;
-const MAX_COOLDOWN_ENTRIES: usize = 256;
-const MAX_INTERVENTION_STAMPS: usize = 1_024;
+/// Only the tail matters — the budget looks back an hour and a cooldown a
+/// day — so a long-lived log costs one bounded read, not a growing one
+/// (audit 2026-08-06: our own file is not a size guarantee).
+const HISTORY_TAIL_BYTES: u64 = 64 * 1024;
+/// Records parsed from that tail. Far more than an hour or a day can hold.
+const MAX_HISTORY_RECORDS: usize = 2_048;
 
-pub fn load_state() -> PolicyState {
+pub fn load_history() -> History {
     match crate::events::state_dir() {
-        Some(dir) => load_state_from(&dir),
-        None => PolicyState::default(),
+        Some(dir) => load_history_from(&dir),
+        None => History::default(),
     }
 }
 
-/// The whole loader with the state directory explicit — the seam tests run
-/// through, matching `events::append_to` (a test that re-implements the caps
-/// in its own body proves nothing about this function; test-audit
-/// 2026-08-06 proved exactly that, by deleting the caps below and watching
-/// the old test pass anyway).
-pub(crate) fn load_state_from(dir: &std::path::Path) -> PolicyState {
-    let Ok(f) = std::fs::File::open(dir.join("policy.json")) else {
-        return PolicyState::default();
+/// The loader with the state directory explicit — the seam tests run through,
+/// matching `events::append_to`. (A test that re-implements this logic in its
+/// own body proves nothing about this function: test-audit 2026-08-06 deleted
+/// the caps from the old loader and watched the old test pass anyway.)
+pub(crate) fn load_history_from(dir: &std::path::Path) -> History {
+    let path = dir.join("policy.jsonl");
+    let Ok(mut f) = std::fs::File::open(&path) else {
+        return History::default();
     };
+    // Read only the tail; seek past everything older.
+    if let Ok(meta) = f.metadata()
+        && meta.len() > HISTORY_TAIL_BYTES
+    {
+        let _ = f.seek(std::io::SeekFrom::End(-(HISTORY_TAIL_BYTES as i64)));
+    }
     let mut text = String::new();
-    if f.take(STATE_READ_CAP).read_to_string(&mut text).is_err() {
-        return PolicyState::default();
+    if f.read_to_string(&mut text).is_err() {
+        return History::default();
     }
-    // Corrupt state self-heals to defaults — never blocks a command.
-    let mut state: PolicyState = serde_json::from_str(&text).unwrap_or_default();
-    // Only rule codes we emit are meaningful keys; anything past the cap is
-    // corruption or bloat, and dropping it costs at most a stale cooldown.
-    if state.cooldowns.len() > MAX_COOLDOWN_ENTRIES {
-        state.cooldowns.clear();
+    // The first line of a tail read is usually cut mid-record; it simply
+    // fails to parse, along with any line a partial write left behind.
+    let mut shown: Vec<Intervention> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Intervention>(l).ok())
+        .collect();
+    if shown.len() > MAX_HISTORY_RECORDS {
+        let cut = shown.len() - MAX_HISTORY_RECORDS;
+        shown.drain(..cut);
     }
-    if state.interventions_ts_ms.len() > MAX_INTERVENTION_STAMPS {
-        state.interventions_ts_ms.clear();
-    }
-    state
+    History { shown }
 }
 
-pub fn save_state(state: &PolicyState) {
+/// Record what the user did at a warning we actually showed. One line, one
+/// write syscall, `O_APPEND` — so concurrent shells interleave safely instead
+/// of overwriting each other (test-audit 2026-08-06).
+pub fn record_outcome(code: &str, ran_unchanged: bool, now_ms: u64) {
     let Some(dir) = crate::events::state_dir() else {
         return;
     };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let Ok(json) = serde_json::to_string(state) else {
-        return;
-    };
-    let _ = write_user_only(&dir.join("policy.json"), json.as_bytes());
+    append_outcome_to(&dir, code, ran_unchanged, now_ms);
 }
 
-/// Write a state file, refusing to write *through* a symlink. Same rule the
-/// installer already follows (audit 2026-08-06): a path in our state dir that
+pub(crate) fn append_outcome_to(
+    dir: &std::path::Path,
+    code: &str,
+    ran_unchanged: bool,
+    now_ms: u64,
+) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let Ok(mut line) = serde_json::to_string(&Intervention {
+        ts_ms: now_ms,
+        rule: code.to_string(),
+        ran_unchanged,
+    }) else {
+        return;
+    };
+    line.push('\n');
+
+    // Never append through a symlink someone else placed in our state dir
+    // (audit 2026-08-06; the same rule the installer and event log follow).
+    let path = dir.join("policy.jsonl");
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return;
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(&path)
+    else {
+        return;
+    };
+    let _ = f.write_all(line.as_bytes());
+}
+
+/// Write a small state file, refusing to write *through* a symlink — the same
+/// rule the installer follows (audit 2026-08-06): a path in our state dir that
 /// someone else turned into a link to their file is not a path we truncate.
-/// Without this, `policy.json -> ~/.ssh/authorized_keys` would be replaced
-/// with JSON on the next warning.
 fn write_user_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -678,257 +727,253 @@ mod tests {
         assert_eq!(cap_for_mode(allow, Mode::Confirm), allow);
     }
 
+    /// Build a history directly, as if these interventions had been shown.
+    fn history_of(entries: &[(u64, &str, bool)]) -> History {
+        History {
+            shown: entries
+                .iter()
+                .map(|(ts, rule, ran)| Intervention {
+                    ts_ms: *ts,
+                    rule: rule.to_string(),
+                    ran_unchanged: *ran,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn budget_exhaustion_degrades_to_observe() {
-        let mut state = PolicyState::default();
         let warn = assess(Verdict::Warn, "policy.dirty_work_at_risk");
         let now = 10 * HOUR_MS;
-        // budget 3: three commits pass, the fourth degrades
-        for _ in 0..3 {
-            let got = apply_gates(
-                warn,
-                Some("git.reset_hard"),
-                false,
-                &mut state,
-                now,
-                3,
-                true,
-            );
-            assert_eq!(got.verdict, Verdict::Warn);
-        }
-        let got = apply_gates(
-            warn,
-            Some("git.reset_hard"),
-            false,
-            &mut state,
-            now,
-            3,
-            true,
+        // Two shown this hour, budget 3: the next one still passes.
+        let h = history_of(&[
+            (now - 60_000, "git.reset_hard", false),
+            (now - 30_000, "x", false),
+        ]);
+        assert_eq!(
+            apply_gates(warn, Some("git.reset_hard"), false, &h, now, 3).verdict,
+            Verdict::Warn
         );
+        // Three shown this hour: the next degrades rather than nags.
+        let h = history_of(&[
+            (now - 60_000, "git.reset_hard", false),
+            (now - 30_000, "x", false),
+            (now - 10_000, "y", false),
+        ]);
+        let got = apply_gates(warn, Some("git.reset_hard"), false, &h, now, 3);
         assert_eq!(got.verdict, Verdict::Observe);
         assert_eq!(got.reason, "policy.budget_exhausted");
-        // an hour later the window has rolled over
+        // ...and those same three no longer count an hour later.
         let later = now + HOUR_MS;
-        let got = apply_gates(
-            warn,
-            Some("git.reset_hard"),
-            false,
-            &mut state,
-            later,
-            3,
-            true,
+        assert_eq!(
+            apply_gates(warn, Some("git.reset_hard"), false, &h, later, 3).verdict,
+            Verdict::Warn
         );
-        assert_eq!(got.verdict, Verdict::Warn);
     }
 
     #[test]
     fn catastrophic_is_exempt_from_budget_and_cooldown() {
-        let mut state = PolicyState::default();
         let confirm = assess(Verdict::Confirm, "policy.direct_catastrophic");
-        let now = HOUR_MS;
-        // exhaust the budget
-        for _ in 0..5 {
-            apply_gates(
-                assess(Verdict::Warn, "x"),
-                Some("git.reset_hard"),
-                false,
-                &mut state,
-                now,
-                3,
-                true,
-            );
-        }
-        // and put the rule in cooldown
-        for _ in 0..COOLDOWN_TRIGGER {
-            record_outcome(&mut state, "fs.rm_recursive", true, now);
-        }
-        let got = apply_gates(
-            confirm,
-            Some("fs.rm_recursive"),
-            true,
-            &mut state,
-            now,
-            3,
-            true,
+        let now = 100 * HOUR_MS;
+        // Budget blown AND the rule asleep.
+        let h = history_of(&[
+            (now - 1000, "other", false),
+            (now - 900, "other", false),
+            (now - 800, "other", false),
+            (now - 700, "fs.rm_recursive", true),
+            (now - 600, "fs.rm_recursive", true),
+            (now - 500, "fs.rm_recursive", true),
+        ]);
+        assert_eq!(
+            apply_gates(confirm, Some("fs.rm_recursive"), true, &h, now, 3).verdict,
+            Verdict::Confirm,
+            "a catastrophic finding is never gated"
         );
-        assert_eq!(got.verdict, Verdict::Confirm, "catastrophic never gated");
     }
 
     #[test]
-    fn repeated_run_unchanged_triggers_cooldown_and_any_other_outcome_resets() {
-        let mut state = PolicyState::default();
+    fn repeated_run_unchanged_puts_a_rule_to_sleep_and_any_other_outcome_wakes_it() {
         let warn = assess(Verdict::Warn, "policy.target_context");
-        let now = HOUR_MS;
-        for _ in 0..COOLDOWN_TRIGGER {
-            record_outcome(&mut state, "fs.rm_recursive", true, now);
-        }
-        let got = apply_gates(
-            warn,
-            Some("fs.rm_recursive"),
-            false,
-            &mut state,
-            now,
-            3,
-            true,
-        );
+        let now = 100 * HOUR_MS;
+        let three_runs = [
+            (now - 3000, "fs.rm_recursive", true),
+            (now - 2000, "fs.rm_recursive", true),
+            (now - 1000, "fs.rm_recursive", true),
+        ];
+
+        let h = history_of(&three_runs);
+        let got = apply_gates(warn, Some("fs.rm_recursive"), false, &h, now, 99);
         assert_eq!(got.verdict, Verdict::Observe);
         assert_eq!(got.reason, "policy.rule_cooldown");
-        // a different rule is unaffected
-        let got = apply_gates(
-            warn,
-            Some("git.reset_hard"),
-            false,
-            &mut state,
-            now,
-            3,
-            true,
+
+        // A different rule is unaffected.
+        assert_eq!(
+            apply_gates(warn, Some("git.reset_hard"), false, &h, now, 99).verdict,
+            Verdict::Warn
         );
-        assert_eq!(got.verdict, Verdict::Warn);
-        // an edit outcome resets the first rule
-        record_outcome(&mut state, "fs.rm_recursive", false, now);
-        let got = apply_gates(
-            warn,
-            Some("fs.rm_recursive"),
-            false,
-            &mut state,
-            now,
-            3,
-            true,
+
+        // One edit/cancel anywhere in the recent run breaks the streak.
+        let mut woken = three_runs.to_vec();
+        woken.push((now - 500, "fs.rm_recursive", false));
+        assert_eq!(
+            apply_gates(
+                warn,
+                Some("fs.rm_recursive"),
+                false,
+                &history_of(&woken),
+                now,
+                99
+            )
+            .verdict,
+            Verdict::Warn,
+            "an edit or cancel must wake the rule back up"
         );
-        assert_eq!(got.verdict, Verdict::Warn);
-        // cooldown expires on its own
-        let mut state2 = PolicyState::default();
-        for _ in 0..COOLDOWN_TRIGGER {
-            record_outcome(&mut state2, "fs.rm_recursive", true, now);
-        }
+
+        // Two run-unchanged is not yet three.
+        assert_eq!(
+            apply_gates(
+                warn,
+                Some("fs.rm_recursive"),
+                false,
+                &history_of(&three_runs[1..]),
+                now,
+                99
+            )
+            .verdict,
+            Verdict::Warn
+        );
+
+        // And the sleep expires on its own.
         let after = now + COOLDOWN_MS + 1;
-        let got = apply_gates(
-            warn,
-            Some("fs.rm_recursive"),
-            false,
-            &mut state2,
-            after,
-            3,
-            true,
+        assert_eq!(
+            apply_gates(warn, Some("fs.rm_recursive"), false, &h, after, 99).verdict,
+            Verdict::Warn
         );
-        assert_eq!(got.verdict, Verdict::Warn);
     }
 
     #[test]
-    fn uncommitted_gate_checks_spend_nothing() {
-        // Until the warning UI exists, gating runs with commit=false: the
-        // budget must not be consumed by interventions nobody saw.
-        let mut state = PolicyState::default();
+    fn checking_the_gates_never_records_anything() {
+        // Structural replacement for the old `commit: false` flag: gating is
+        // a pure read, and only a prompt the user actually saw is recorded.
+        let dir = std::env::temp_dir().join(format!("oopsinput-pure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         let warn = assess(Verdict::Warn, "policy.dirty_work_at_risk");
         for _ in 0..10 {
-            let got = apply_gates(
-                warn,
-                Some("git.reset_hard"),
-                false,
-                &mut state,
-                HOUR_MS,
-                3,
-                false,
+            let h = load_history_from(&dir);
+            assert_eq!(
+                apply_gates(warn, Some("git.reset_hard"), false, &h, HOUR_MS, 3).verdict,
+                Verdict::Warn
             );
-            assert_eq!(got.verdict, Verdict::Warn);
         }
-        assert!(state.interventions_ts_ms.is_empty());
-    }
-
-    #[test]
-    fn state_roundtrips_and_corrupt_state_self_heals() {
-        let mut state = PolicyState::default();
-        record_outcome(&mut state, "git.reset_hard", true, 5);
-        let json = serde_json::to_string(&state).unwrap();
-        let back: PolicyState = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            back.cooldowns["git.reset_hard"].consecutive_run_unchanged,
-            1
+        assert!(
+            !dir.join("policy.jsonl").exists(),
+            "gate checks must not write anything"
         );
-        let corrupt: PolicyState = serde_json::from_str("{not json").unwrap_or_default();
-        assert!(corrupt.cooldowns.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_symlinked_state_path_is_refused_not_written_through() {
-        // Regression (audit 2026-08-06): state writes truncate, so a
-        // symlinked policy.json would have overwritten the file it points at.
+    fn concurrent_shells_never_lose_a_recorded_intervention() {
+        // Regression (test-audit 2026-08-06, proven): the old state was a
+        // JSON blob loaded, modified and written back, so two shells that
+        // finished warnings in the same instant each recorded a spend and the
+        // second write dropped the first — the hourly budget under-counted and
+        // a cooldown could vanish. Appends must interleave, never overwrite.
+        let dir = std::env::temp_dir().join(format!("oopsinput-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                let dir = dir.clone();
+                s.spawn(move || {
+                    for i in 0..25 {
+                        // Every writer loads first, exactly as the real flow
+                        // does — the old design lost writes precisely here.
+                        let _ = load_history_from(&dir);
+                        append_outcome_to(&dir, "git.reset_hard", false, 1_000 + t * 100 + i);
+                    }
+                });
+            }
+        });
+
+        let loaded = load_history_from(&dir);
+        assert_eq!(
+            loaded.shown.len(),
+            8 * 25,
+            "interventions were lost to concurrent writers"
+        );
+    }
+
+    #[test]
+    fn history_survives_a_partial_line_and_reads_only_the_tail() {
+        let dir = std::env::temp_dir().join(format!("oopsinput-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..5u64 {
+            append_outcome_to(&dir, "git.reset_hard", false, 1_000 + i);
+        }
+        // A torn write leaves a partial line; it must be skipped, not fatal.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("policy.jsonl"))
+            .unwrap();
+        f.write_all(b"{\"ts_ms\":99,\"rule\":\"tru").unwrap();
+        drop(f);
+        assert_eq!(
+            load_history_from(&dir).shown.len(),
+            5,
+            "a partial trailing line must be skipped, not lose the file"
+        );
+
+        // A file larger than the tail window still loads, bounded.
+        for i in 0..4_000u64 {
+            append_outcome_to(&dir, "git.reset_hard", false, 10_000 + i);
+        }
+        let loaded = load_history_from(&dir);
+        assert!(!loaded.shown.is_empty(), "tail read produced nothing");
+        assert!(
+            loaded.shown.len() <= MAX_HISTORY_RECORDS,
+            "tail read is unbounded: {}",
+            loaded.shown.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_symlinked_history_path_is_refused_not_written_through() {
+        // Regression (audit 2026-08-06): our state writes must never land on
+        // a file someone else pointed our path at.
         let dir = std::env::temp_dir().join(format!("oopsinput-pollink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let victim = dir.join("victim.txt");
         std::fs::write(&victim, "PRECIOUS\n").unwrap();
-        let link = dir.join("policy.json");
-        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("policy.jsonl")).unwrap();
 
-        assert!(write_user_only(&link, b"{}").is_err(), "write not refused");
+        append_outcome_to(&dir, "git.reset_hard", true, 1);
         assert_eq!(
             std::fs::read_to_string(&victim).unwrap(),
             "PRECIOUS\n",
-            "state write went through a symlink"
+            "an intervention was appended through a symlink"
         );
+
+        // The config-warning marker takes the same path through write_user_only.
+        let link = dir.join("marker");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(write_user_only(&link, b"x").is_err(), "write not refused");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "PRECIOUS\n");
+
         // A normal path still writes, user-only.
-        let plain = dir.join("plain.json");
+        let plain = dir.join("plain");
         assert!(write_user_only(&plain, b"{}").is_ok());
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn bloated_state_is_dropped_rather_than_carried_forever() {
-        // Audit 2026-08-06: a corrupt or bloated state file must not cost
-        // more work on every command, so both caps apply on load.
-        //
-        // This test reads the file through the real loader on purpose. Its
-        // first version re-implemented the capping in its own body and
-        // asserted on its own copy — test-audit 2026-08-06 deleted both caps
-        // from `load_state_from` and the test still passed, proving it tested
-        // nothing. Any rewrite must keep going through the loader.
-        let dir = std::env::temp_dir().join(format!("oopsinput-bloat-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let mut state = PolicyState::default();
-        for i in 0..(MAX_COOLDOWN_ENTRIES + 10) {
-            record_outcome(&mut state, &format!("junk.rule_{i}"), true, 1);
-        }
-        state.interventions_ts_ms = (0..(MAX_INTERVENTION_STAMPS as u64 + 10)).collect();
-        std::fs::write(
-            dir.join("policy.json"),
-            serde_json::to_string(&state).unwrap(),
-        )
-        .unwrap();
-
-        let loaded = load_state_from(&dir);
-        assert!(
-            loaded.cooldowns.is_empty(),
-            "an over-cap cooldown map must be dropped on load, got {}",
-            loaded.cooldowns.len()
-        );
-        assert!(
-            loaded.interventions_ts_ms.is_empty(),
-            "an over-cap timestamp list must be dropped on load, got {}",
-            loaded.interventions_ts_ms.len()
-        );
-
-        // ...and a normal-sized file survives the trip intact.
-        let mut small = PolicyState::default();
-        record_outcome(&mut small, "git.reset_hard", true, 5);
-        std::fs::write(
-            dir.join("policy.json"),
-            serde_json::to_string(&small).unwrap(),
-        )
-        .unwrap();
-        let loaded = load_state_from(&dir);
-        assert_eq!(
-            loaded.cooldowns["git.reset_hard"].consecutive_run_unchanged, 1,
-            "a normal state file must round-trip through the loader"
-        );
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 

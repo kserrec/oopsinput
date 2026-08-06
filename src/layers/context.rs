@@ -358,8 +358,21 @@ mod tests {
     #[test]
     fn no_repo_means_no_git_facts() {
         let dir = tmp("norepo");
-        // Guard against the temp dir itself sitting under some repo: this
-        // asserts on the walk from a dir whose ancestors are /tmp-ish.
+        // The premise is that no ancestor of the temp dir is a repository.
+        // Check it explicitly, so an unusual machine reports *that* instead
+        // of looking like a walk-up bug (test-audit 2026-08-06).
+        let mut probe = dir.clone();
+        loop {
+            assert!(
+                !probe.join(".git").exists(),
+                "premise broken: {} is inside a git repository, so this test \
+                 cannot say anything about the no-repo case",
+                dir.display()
+            );
+            if !probe.pop() {
+                break;
+            }
+        }
         let ctx = collect_at(&dir, &[], None);
         assert!(ctx.git.is_none());
         let _ = fs::remove_dir_all(&dir);

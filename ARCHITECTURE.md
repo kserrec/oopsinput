@@ -510,9 +510,14 @@ danger warnings), **confirm** (danger warnings pause for an answer).
 **`apply_gates`** is habituation control (SPEC §7): at most three visible
 interventions per rolling hour, and a per-rule cooldown — three consecutive
 "I meant it, run unchanged" outcomes puts that rule to sleep for a day,
-while any edit or cancel resets it. Direct-catastrophic findings are exempt
+while any edit or cancel wakes it. Direct-catastrophic findings are exempt
 from both. Exhausting the budget degrades to silent recording; it never
-degrades to nagging. Budget is spent only when a prompt is genuinely shown.
+degrades to nagging.
+
+It is a *pure read* over history: checking the gates writes nothing, and only
+a prompt the user actually saw is recorded afterwards. That ordering is what
+makes "an intervention nobody saw cannot spend budget" structural rather than
+a flag somebody has to remember to pass.
 
 The module also owns the full SPEC §15 **config surface**: `mode`, `model`,
 `model_timeout_ms`, `det_timeout_ms`, `budget_per_hour`, `log_raw`. Invalid
@@ -522,9 +527,21 @@ untrusted input and must not reach a terminal. Complaints are printed once
 per distinct set, tracked by a fingerprint file in the state directory.
 `$OOPSINPUT_MODE` overrides the file's mode.
 
-Cooldown and budget state persist in `policy.json` (user-only). It is read
-with a size cap and entry caps, self-heals to defaults if corrupt, and is
-never written through a symlink.
+Cooldown and budget state live in `policy.jsonl` (user-only): one appended
+line per shown intervention, recording when it happened, which rule, and what
+the user did. Reading takes only the tail — the budget looks back an hour and
+a cooldown a day — so a long-lived file costs a bounded read; a torn or
+partial line simply fails to parse and is skipped, and the path is never
+written through a symlink.
+
+**Append-only is load-bearing, not a style choice.** The first version was a
+JSON blob loaded, modified and written back, which meant two shells finishing
+warnings in the same instant each recorded a spend and the second write
+dropped the first: the hourly cap silently under-counted and a cooldown could
+disappear. The event log had already solved that exact problem with one
+atomic append per line, and this is the same fix — the race is gone by
+construction rather than held off by a lock. An 8-thread test fails if anyone
+reintroduces read-modify-write here.
 
 ### 4.9 `src/ui.rs` — prompts, message building, and the display escaper
 
