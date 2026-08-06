@@ -40,11 +40,22 @@ clear on GitHub/crates.io/npm/PyPI/domains; `noops`, `oopsh`, `oopsys`,
       real-tty PTY tests via debug-only `__prompt-typo-test` seam; caller
       contract: neutralize watchdog before prompting — enforced at wiring,
       next item)
-- [ ] `y` runs correction / `n` runs original / Ctrl-C cancels; replacement
+- [x] `y` runs correction / `n` runs original / Ctrl-C cancels; replacement
       returns on fd 3, never argv/stdout — **security-critical channel** (audit
       2026-08-05): the one path where binary output becomes an executed
       command; same rigor as the event log (exact bytes, no interpretation,
-      pinned tests)
+      pinned tests) (2026-08-06: replacement_buffer() swaps only the command
+      word with pinned byte-exactness tests, refuses on any boundary
+      disagreement; fd 3 reopened via /dev/fd/3 (no-unsafe rule) and routed
+      to the plugin through `3>&1` capture; exact bytes + one NUL sentinel —
+      survives $()'s newline stripping and doubles as truncation guard,
+      plugin runs replacement only with sentinel intact, else fails open;
+      exit 10 only after a complete successful write; watchdog retires via
+      PROMPT_ACTIVE once a prompt is on screen (PTY-tested past the
+      deadline); minimal SPEC §15 mode gate landed early: $OOPSINPUT_MODE >
+      config `mode` key > shadow, closed vocabulary; PTY tests cover
+      y/n/Ctrl-C end-to-end incl. event outcomes typo.accepted / declined /
+      cancelled)
 - [ ] `suggest` mode enabled by default post-install
 - [ ] Acceptance: golden typo cases pass; command words that resolve NEVER
       prompt; p95 within budget

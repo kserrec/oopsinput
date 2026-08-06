@@ -42,6 +42,12 @@ impl Session {
             "export OOPSINPUT_STATE_DIR={:?}\n",
             dir.join("state")
         ));
+        // Isolate config resolution: the developer's real ~/.config must
+        // never leak a mode into tests. Tests opt into modes via extra_env.
+        zshrc.push_str(&format!(
+            "export XDG_CONFIG_HOME={:?}\n",
+            dir.join("config")
+        ));
         for (k, v) in extra_env {
             zshrc.push_str(&format!("export {k}={v}\n"));
         }
@@ -76,6 +82,47 @@ impl Session {
 
         let out = child.wait_with_output().expect("collect output");
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Interactive variant: each stage waits until the cumulative terminal
+    /// output contains a marker, optionally pauses, then sends raw bytes.
+    /// Needed wherever timing matters — e.g. a 0x03 sent before the binary's
+    /// terminal mode switch would become SIGINT instead of a key. `exit` is
+    /// appended automatically.
+    fn run_staged(&self, stages: &[(&str, u64, &str)]) -> String {
+        use std::io::Read;
+        let mut child = Command::new("script")
+            .args(["-qec", "zsh -i", "/dev/null"])
+            .env("ZDOTDIR", &self.dir)
+            .env("TERM", "xterm")
+            .env_remove("OOPSINPUT_BIN")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn script+zsh");
+
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut seen: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        for (wait_for, delay_ms, send) in stages {
+            while !String::from_utf8_lossy(&seen).contains(wait_for) {
+                match stdout.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => seen.extend_from_slice(&chunk[..n]),
+                }
+            }
+            if *delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(*delay_ms));
+            }
+            let _ = stdin.write_all(send.as_bytes());
+        }
+        let _ = stdin.write_all(b"exit\r");
+        drop(stdin);
+        let _ = stdout.read_to_end(&mut seen);
+        let _ = child.wait();
+        String::from_utf8_lossy(&seen).into_owned()
     }
 }
 
@@ -265,6 +312,109 @@ fn typo_near_alias_records_candidate_evidence() {
     assert!(
         !log.contains("oopspecial"),
         "typed word or candidate name leaked into the log:\n{log}"
+    );
+}
+
+#[test]
+fn suggest_mode_y_runs_the_correction_exactly() {
+    // Full L1 flow: typo near an alias → prompt → y → corrected buffer runs
+    // with every other byte (the --flag argument) preserved. The 300 ms pause
+    // before answering sits past the 150 ms analysis deadline, proving the
+    // watchdog retires while a prompt is on screen.
+    // Executed markers use $((...)) so the echoed command line (which shows
+    // the source text) can never satisfy an assertion about executed output.
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "suggest")]);
+    let out = s.run_staged(&[
+        (
+            "PTYTEST%",
+            0,
+            "alias oopspecialx='echo CORRECTED-$((2+3))'\recho marker-y1\r",
+        ),
+        ("marker-y1", 0, "oopspecialxq --flag\r"),
+        ("[y/n]", 300, "yecho marker-y2\r"),
+    ]);
+    assert!(
+        out.contains("did you mean 'oopspecialx'?"),
+        "prompt missing or wrong candidate:\n{out}"
+    );
+    assert!(
+        out.contains("CORRECTED-5 --flag"),
+        "corrected command did not run with args preserved:\n{out}"
+    );
+    assert!(
+        !out.contains("command not found"),
+        "original typo ran despite y:\n{out}"
+    );
+    assert!(
+        out.contains("marker-y2"),
+        "session did not continue:\n{out}"
+    );
+
+    let log = std::fs::read_to_string(s.dir.join("state/events.jsonl")).expect("event log written");
+    assert!(
+        log.contains("\"decision\":\"replace\"") && log.contains("typo.accepted"),
+        "accepted outcome not recorded:\n{log}"
+    );
+}
+
+#[test]
+fn suggest_mode_n_runs_the_original_unchanged() {
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "suggest")]);
+    let out = s.run_staged(&[
+        (
+            "PTYTEST%",
+            0,
+            "alias oopspecialn='echo WRONG-$((3+4))'\recho marker-n1\r",
+        ),
+        ("marker-n1", 0, "oopspecialnq\r"),
+        ("[y/n]", 0, "necho marker-n2\r"),
+    ]);
+    assert!(
+        out.contains("command not found: oopspecialnq"),
+        "original did not run after n:\n{out}"
+    );
+    assert!(!out.contains("WRONG-7"), "correction ran despite n:\n{out}");
+    assert!(
+        out.contains("marker-n2"),
+        "session did not continue:\n{out}"
+    );
+
+    let log = std::fs::read_to_string(s.dir.join("state/events.jsonl")).expect("event log written");
+    assert!(
+        log.contains("typo.declined"),
+        "declined outcome not recorded:\n{log}"
+    );
+}
+
+#[test]
+fn suggest_mode_ctrl_c_cancels_running_nothing() {
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "suggest")]);
+    let out = s.run_staged(&[
+        (
+            "PTYTEST%",
+            0,
+            "alias oopspecialc='echo WRONG-$((4+5))'\recho marker-c1\r",
+        ),
+        ("marker-c1", 0, "oopspecialcq\r"),
+        ("[y/n]", 0, "\u{3}echo marker-c2\r"),
+    ]);
+    assert!(
+        !out.contains("command not found"),
+        "original ran despite cancel:\n{out}"
+    );
+    assert!(
+        !out.contains("WRONG-9"),
+        "correction ran despite cancel:\n{out}"
+    );
+    assert!(
+        out.contains("marker-c2"),
+        "session did not continue:\n{out}"
+    );
+
+    let log = std::fs::read_to_string(s.dir.join("state/events.jsonl")).expect("event log written");
+    assert!(
+        log.contains("\"decision\":\"cancel\"") && log.contains("typo.cancelled"),
+        "cancelled outcome not recorded:\n{log}"
     );
 }
 

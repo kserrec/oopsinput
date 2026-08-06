@@ -16,12 +16,12 @@ mod events;
 mod layers;
 mod lexer;
 mod proposal;
-// TEMP allow: ui.rs lands one milestone item ahead of its caller — the y/n +
-// fd-3 wiring (next M2 item) consumes it; remove the allow there.
-#[allow(dead_code)]
 mod ui;
 
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -75,6 +75,11 @@ fn main() -> ExitCode {
     }
 }
 
+/// Set once analysis is over and a prompt is on screen: the user is in
+/// control, so the analysis deadline no longer applies (ui.rs caller
+/// contract). The prompt bounds itself via the terminal-level read timeout.
+static PROMPT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// If analysis wedges for any reason, exit with the fail-open code before the
 /// shell-side wait becomes perceptible. The process is per-command, so a blunt
 /// exit is safe: there is nothing to clean up that matters more than the
@@ -82,8 +87,71 @@ fn main() -> ExitCode {
 fn arm_watchdog() {
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_millis(deadline_ms()));
-        std::process::exit(1);
+        if !PROMPT_ACTIVE.load(Ordering::SeqCst) {
+            std::process::exit(1);
+        }
+        // Prompt on screen: the watchdog retires. Post-prompt work is a
+        // single fd write and exit.
     });
+}
+
+/// Operating mode (SPEC §8/§15). Only the L1-relevant split exists so far:
+/// warn/confirm include L1 prompts per §8, so they resolve to Suggest until
+/// their own layers land (M3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Shadow,
+    Suggest,
+}
+
+/// Precedence: $OOPSINPUT_MODE, then the config file's `mode` key, then
+/// shadow. Unknown values collapse to shadow — the silent mode is the safe
+/// one (SPEC §15: invalid values fall back to the default).
+fn resolve_mode() -> Mode {
+    if let Ok(v) = std::env::var("OOPSINPUT_MODE") {
+        return parse_mode(&v);
+    }
+    let Some(path) = config_path() else {
+        return Mode::Shadow;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Mode::Shadow;
+    };
+    parse_mode(config_value(&text, "mode").unwrap_or(""))
+}
+
+fn parse_mode(s: &str) -> Mode {
+    match s {
+        "suggest" | "warn" | "confirm" => Mode::Suggest,
+        _ => Mode::Shadow,
+    }
+}
+
+/// $XDG_CONFIG_HOME/oopsinput/config else ~/.config/oopsinput/config.
+fn config_path() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("oopsinput/config"));
+    }
+    let home = std::env::var("HOME").ok()?;
+    (!home.is_empty()).then(|| PathBuf::from(home).join(".config/oopsinput/config"))
+}
+
+/// Minimal `key = value` reader for the SPEC §15 surface: first match wins,
+/// `#` starts a comment, whitespace is trimmed. The full surface (warn-once
+/// on unknown keys) arrives with policy.rs in M3.
+fn config_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("");
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() == key {
+            return Some(v.trim());
+        }
+    }
+    None
 }
 
 /// Test hooks exist in debug builds only (the PTY suite runs against the
@@ -125,8 +193,7 @@ fn check(args: &[String]) -> ExitCode {
         .filter(|t| matches!(t, lexer::Token::Word(_)))
         .count();
     // L1 typo layer (SPEC §5-L1): only meaningful when the command word
-    // resolves to nothing. Shadow mode records the evidence; the visible
-    // prompt lands with ui.rs. Distance is structural, never the names.
+    // resolves to nothing. Distance is structural, never the names.
     let suggestion = layers::typo::analyze(proposal.res_kind, &lexed, &proposal.names);
 
     let mut evidence = lexed.uncertainty;
@@ -144,10 +211,20 @@ fn check(args: &[String]) -> ExitCode {
         });
     }
 
+    // Analysis-only duration: the prompt below waits on a human and must not
+    // pollute the latency percentiles the budgets are measured against.
     let duration_us = started.elapsed().as_micros();
+
+    // Visible intervention (suggest mode and up): ask, then act on the
+    // answer. Shadow stays silent and records what would have happened.
+    let (decision_str, reason_code, exit_code) = match &suggestion {
+        Some(s) if resolve_mode() != Mode::Shadow => typo_intervention(&proposal.buffer, s),
+        _ => ("allow", "shadow.observed", 0u8),
+    };
+
     let decision = Decision {
-        decision: "allow",
-        reason_code: "shadow.observed",
+        decision: decision_str,
+        reason_code,
         evidence,
         timings_us: Timings { total: duration_us },
     };
@@ -167,10 +244,54 @@ fn check(args: &[String]) -> ExitCode {
     match serde_json::to_string(&decision) {
         Ok(json) => {
             println!("{json}");
-            ExitCode::SUCCESS
+            ExitCode::from(exit_code)
         }
         Err(_) => ExitCode::from(1),
     }
+}
+
+/// The L1 prompt flow. Returns (decision, reason_code, exit code) — exit 10
+/// means "replacement delivered on fd 3", and is only ever returned after the
+/// full replacement (sentinel included) was written successfully; every
+/// failure degrades to exit 0, running the original unchanged (SPEC §9-8).
+fn typo_intervention(
+    buffer: &str,
+    s: &layers::typo::Suggestion,
+) -> (&'static str, &'static str, u8) {
+    // Construct the replacement BEFORE asking: if it cannot be built with
+    // byte-exact certainty there is nothing to offer.
+    let Some(replacement) = layers::typo::replacement_buffer(buffer, &s.typed, &s.candidate) else {
+        return ("allow", "shadow.observed", 0);
+    };
+    PROMPT_ACTIVE.store(true, Ordering::SeqCst);
+    match ui::prompt_typo(&s.typed, &s.candidate) {
+        ui::TypoChoice::Correct => {
+            if write_replacement_fd3(&replacement).is_ok() {
+                ("replace", "typo.accepted", 10)
+            } else {
+                ("allow", "typo.delivery_failed", 0)
+            }
+        }
+        ui::TypoChoice::Original => ("allow", "typo.declined", 0),
+        ui::TypoChoice::Cancel => ("cancel", "typo.cancelled", 12),
+    }
+}
+
+/// Deliver the replacement to the plugin: exact bytes on fd 3, terminated by
+/// a single NUL sentinel. The sentinel survives zsh's command-substitution
+/// trailing-newline stripping and doubles as an integrity mark — the plugin
+/// runs the replacement only if the NUL is present, so a truncated write can
+/// never execute a truncated command. NUL itself cannot occur in the
+/// replacement (zsh strings and filenames cannot contain it).
+///
+/// fd 3 is re-opened via /dev/fd/3: std exposes no safe handle to an
+/// inherited raw fd, and `from_raw_fd` is unsafe (banned here without prior
+/// discussion — CLAUDE.md). /dev/fd works on Linux and the BSDs.
+fn write_replacement_fd3(replacement: &str) -> std::io::Result<()> {
+    let mut f = std::fs::OpenOptions::new().write(true).open("/dev/fd/3")?;
+    f.write_all(replacement.as_bytes())?;
+    f.write_all(b"\0")?;
+    f.flush()
 }
 
 /// Environment sanity checks. Grows per milestone (config validity, model
@@ -199,7 +320,13 @@ fn doctor() -> ExitCode {
                 "(absent — defaults in effect)"
             }
         );
-        println!("  mode:       shadow (default)");
+        println!(
+            "  mode:       {}",
+            match resolve_mode() {
+                Mode::Shadow => "shadow",
+                Mode::Suggest => "suggest (L1 typo prompts)",
+            }
+        );
 
         let zshrc = format!("{home}/.zshrc");
         let plugin_installed = std::fs::read_to_string(&zshrc)
@@ -257,6 +384,30 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mode_vocabulary_is_closed_and_fails_to_shadow() {
+        assert_eq!(parse_mode("shadow"), Mode::Shadow);
+        assert_eq!(parse_mode("suggest"), Mode::Suggest);
+        // warn/confirm include L1 prompts (SPEC §8) until their layers land
+        assert_eq!(parse_mode("warn"), Mode::Suggest);
+        assert_eq!(parse_mode("confirm"), Mode::Suggest);
+        // anything else — typos, injection attempts, empty — is shadow
+        assert_eq!(parse_mode(""), Mode::Shadow);
+        assert_eq!(parse_mode("SUGGEST"), Mode::Shadow);
+        assert_eq!(parse_mode("$(rm -rf /)"), Mode::Shadow);
+    }
+
+    #[test]
+    fn config_value_reads_the_spec_15_shape() {
+        let text = "# comment\nmode = suggest   # trailing comment\nmodel = qwen3.5:4b\n";
+        assert_eq!(config_value(text, "mode"), Some("suggest"));
+        assert_eq!(config_value(text, "model"), Some("qwen3.5:4b"));
+        assert_eq!(config_value(text, "missing"), None);
+        assert_eq!(config_value("", "mode"), None);
+        // first match wins; malformed lines are skipped
+        assert_eq!(config_value("garbage\nmode=a\nmode=b", "mode"), Some("a"));
+    }
 
     #[test]
     fn find_in_path_finds_sh() {

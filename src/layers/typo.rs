@@ -17,9 +17,9 @@ use crate::lexer::{Lexed, Token, command_words};
 use crate::proposal::ResolutionKind;
 
 pub struct Suggestion {
+    /// The misspelled command word exactly as typed.
+    pub typed: String,
     /// Name of the nearest resolvable command.
-    // Read only by tests until the ui.rs prompt lands (next M2 item).
-    #[allow(dead_code)]
     pub candidate: String,
     /// Edit distance from the typed word (1 or 2).
     pub distance: usize,
@@ -123,9 +123,40 @@ fn best_candidate(word: &str, path: &str, extra_names: &[String]) -> Option<Sugg
         return None;
     }
     search.best.map(|(distance, candidate)| Suggestion {
+        typed: word.to_string(),
         candidate,
         distance,
     })
+}
+
+/// Build the corrected buffer: the typed command word replaced by the
+/// candidate, **every other byte preserved exactly** (SPEC §9 — this string
+/// becomes an executed command; it is the security-critical output). Returns
+/// None unless the buffer's first non-whitespace run is byte-identical to
+/// `typed` and ends at a word boundary — any disagreement between this check
+/// and the lexer's view of the buffer means no replacement is offered.
+pub fn replacement_buffer(buffer: &str, typed: &str, candidate: &str) -> Option<String> {
+    if typed.is_empty() || candidate.is_empty() {
+        return None;
+    }
+    let start = buffer.find(|c: char| !c.is_whitespace())?;
+    let rest = &buffer[start..];
+    if !rest.starts_with(typed) {
+        return None;
+    }
+    let after = &rest[typed.len()..];
+    // The word must end here too: whitespace, an operator, or end-of-buffer.
+    // starts_with alone would let "gti" match into "gtifoo" if this check and
+    // the lexer ever disagreed on word boundaries.
+    if !after.is_empty() && !after.starts_with(|c: char| c.is_whitespace() || "|&;<>()".contains(c))
+    {
+        return None;
+    }
+    let mut out = String::with_capacity(buffer.len() - typed.len() + candidate.len());
+    out.push_str(&buffer[..start]);
+    out.push_str(candidate);
+    out.push_str(after);
+    Some(out)
 }
 
 /// Distance budget by typed-word length: short words get one edit, longer
@@ -345,6 +376,54 @@ mod tests {
         assert_eq!(s.candidate, "mistypes");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- replacement_buffer: pinned (SPEC §9 — this output gets executed) ----
+
+    #[test]
+    fn replacement_swaps_only_the_command_word() {
+        assert_eq!(
+            replacement_buffer("gti status", "gti", "git").as_deref(),
+            Some("git status")
+        );
+        assert_eq!(
+            replacement_buffer("gti", "gti", "git").as_deref(),
+            Some("git")
+        );
+        // every byte after the word preserved exactly: args, operators,
+        // quoting, unicode, doubled spaces, trailing whitespace
+        assert_eq!(
+            replacement_buffer("gti  commit -m 'żółć 嗯' && ls |grep x ", "gti", "git").as_deref(),
+            Some("git  commit -m 'żółć 嗯' && ls |grep x ")
+        );
+        // leading whitespace preserved exactly
+        assert_eq!(
+            replacement_buffer("  \tgti status", "gti", "git").as_deref(),
+            Some("  \tgit status")
+        );
+        // a later occurrence of the typed word is never touched
+        assert_eq!(
+            replacement_buffer("gti log gti", "gti", "git").as_deref(),
+            Some("git log gti")
+        );
+        // operator directly after the word
+        assert_eq!(
+            replacement_buffer("gti&&echo hi", "gti", "git").as_deref(),
+            Some("git&&echo hi")
+        );
+    }
+
+    #[test]
+    fn replacement_refuses_on_any_disagreement() {
+        // buffer does not start with the typed word
+        assert_eq!(replacement_buffer("FOO=1 gti status", "gti", "git"), None);
+        // typed word is a prefix of the actual first word — boundary check
+        assert_eq!(replacement_buffer("gtifoo status", "gti", "git"), None);
+        // empty pieces never construct anything
+        assert_eq!(replacement_buffer("", "gti", "git"), None);
+        assert_eq!(replacement_buffer("gti x", "", "git"), None);
+        assert_eq!(replacement_buffer("gti x", "gti", ""), None);
+        assert_eq!(replacement_buffer("   ", "gti", "git"), None);
     }
 
     #[test]

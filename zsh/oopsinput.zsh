@@ -73,6 +73,10 @@ _oopsinput_handle() {
         esac
     fi
 
+    # fd 3 is the replacement channel (SPEC §6): the binary's fd 3 is routed
+    # into $captured; its stdout (decision JSON) and stderr are discarded.
+    # Prompts reach the terminal via /dev/tty, not through these streams.
+    local captured rc
     if [[ $kind == none ]]; then
         # Command word resolves to nothing — L1 typo territory. Ship the
         # candidate pool (every name only the live shell can see: aliases,
@@ -80,15 +84,32 @@ _oopsinput_handle() {
         # strings can never contain NUL, so the separator is collision-free.
         # Only this already-failing path pays the cost.
         zmodload zsh/parameter 2>/dev/null
-        { print -rn -- "$original"$'\0'
-          print -rl -- ${(k)aliases} ${(k)functions} ${(k)builtins} ${(k)reswords}
-        } | "$_OOPSINPUT_BIN" check --res "$kind" >/dev/null 2>&1
+        captured=$( { print -rn -- "$original"$'\0'
+            print -rl -- ${(k)aliases} ${(k)functions} ${(k)builtins} ${(k)reswords}
+        } | "$_OOPSINPUT_BIN" check --res "$kind" 3>&1 >/dev/null 2>&1 )
+        rc=$?
     else
-        print -rn -- "$original" | "$_OOPSINPUT_BIN" check --res "$kind" >/dev/null 2>&1
+        captured=$( print -rn -- "$original" |
+            "$_OOPSINPUT_BIN" check --res "$kind" 3>&1 >/dev/null 2>&1 )
+        rc=$?
     fi
-    local rc=$?
 
     case $rc in
+        10)
+            # replace: run the corrected buffer the user consented to.
+            # SECURITY (SPEC §9): only with the integrity sentinel intact —
+            # the binary terminates the exact replacement bytes with one NUL
+            # (which also survives $(...)'s trailing-newline stripping). A
+            # missing sentinel means a truncated or absent write: fail open,
+            # run the original bytes unchanged.
+            if [[ $captured == *$'\0' ]]; then
+                BUFFER=${captured%$'\0'}
+            else
+                BUFFER=$original
+            fi
+            _oopsinput_delegate $w
+            return $?
+            ;;
         12)
             # cancel: run nothing
             BUFFER=""
@@ -102,7 +123,7 @@ _oopsinput_handle() {
             return 0
             ;;
         *)
-            # 0 = allow; 10 lands in M2; everything else = fail open.
+            # 0 = allow; anything unexpected = fail open.
             # Either way the original bytes run unchanged.
             BUFFER=$original
             _oopsinput_delegate $w
