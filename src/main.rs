@@ -16,6 +16,10 @@ mod events;
 mod layers;
 mod lexer;
 mod proposal;
+// TEMP allow: ui.rs lands one milestone item ahead of its caller — the y/n +
+// fd-3 wiring (next M2 item) consumes it; remove the allow there.
+#[allow(dead_code)]
+mod ui;
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -52,6 +56,14 @@ fn main() -> ExitCode {
         }
         Some("check") => check(&args[1..]),
         Some("doctor") => doctor(),
+        // Test seam (debug builds only): exercise the real /dev/tty + stty
+        // prompt path under a PTY, without needing the full suggest-mode flow.
+        #[cfg(debug_assertions)]
+        Some("__prompt-typo-test") => {
+            let choice = ui::prompt_typo("gti", "git");
+            println!("choice={choice:?}");
+            ExitCode::SUCCESS
+        }
         None | Some("help") | Some("--help") => {
             print_help();
             ExitCode::SUCCESS

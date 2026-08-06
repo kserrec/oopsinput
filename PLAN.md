@@ -30,8 +30,16 @@ clear on GitHub/crates.io/npm/PyPI/domains; `noops`, `oopsh`, `oopsys`,
       already-failing none path; shadow evidence `typo.candidate_d1/_d2`,
       names never logged; typo path ~9 ms p50 in-binary, resolving path
       unchanged ~240 µs)
-- [ ] ui.rs: /dev/tty single-key prompts; escaping pass (control/ANSI/OSC/bidi
-      neutralized) + fuzz target
+- [x] ui.rs: /dev/tty single-key prompts; escaping pass (control/ANSI/OSC/bidi
+      neutralized) + fuzz target (2026-08-06: escaper neutralizes all Cc
+      controls, bidi embeddings/overrides/isolates, zero-width/invisible
+      formatting — caret notation for C0, visible \u{...} otherwise; fuzz
+      smoke asserts nothing active survives + idempotence; single-key prompt
+      via stty on /dev/tty — -icanon -echo -isig, VTIME timeout 10 s → `n`,
+      Ctrl-C read as 0x03 = cancel, stty -g state restored by Drop guard;
+      real-tty PTY tests via debug-only `__prompt-typo-test` seam; caller
+      contract: neutralize watchdog before prompting — enforced at wiring,
+      next item)
 - [ ] `y` runs correction / `n` runs original / Ctrl-C cancels; replacement
       returns on fd 3, never argv/stdout — **security-critical channel** (audit
       2026-08-05): the one path where binary output becomes an executed

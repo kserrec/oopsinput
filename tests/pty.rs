@@ -268,6 +268,65 @@ fn typo_near_alias_records_candidate_evidence() {
     );
 }
 
+/// Drive the binary's debug-only prompt seam directly under a PTY (no zsh):
+/// proves the real /dev/tty open, stty mode switch, and single-key read work.
+/// Keys are sent only once the prompt is visible — a real user cannot press
+/// earlier, and before the mode switch the pty is still in canonical mode
+/// with ISIG on, so an early 0x03 would become SIGINT instead of a key
+/// (probed and confirmed 2026-08-06).
+fn run_prompt_seam(keys: &[u8]) -> String {
+    use std::io::Read;
+    let mut child = Command::new("script")
+        .args([
+            "-qec",
+            &format!("{} __prompt-typo-test", env!("CARGO_BIN_EXE_oopsinput")),
+            "/dev/null",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn script+oopsinput");
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut seen = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while !String::from_utf8_lossy(&seen).contains("[y/n]") {
+        match stdout.read(&mut chunk) {
+            Ok(0) | Err(_) => break, // EOF before prompt: fall through to asserts
+            Ok(n) => seen.extend_from_slice(&chunk[..n]),
+        }
+    }
+
+    child.stdin.as_mut().unwrap().write_all(keys).unwrap();
+    drop(child.stdin.take());
+    let _ = stdout.read_to_end(&mut seen);
+    let _ = child.wait();
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+#[test]
+fn prompt_reads_single_key_on_real_tty() {
+    // A bare 'y' with no Enter must resolve the prompt (single-key contract).
+    let out = run_prompt_seam(b"y");
+    assert!(
+        out.contains("did you mean 'git'?"),
+        "prompt text missing:\n{out}"
+    );
+    assert!(out.contains("choice=Correct"), "y did not consent:\n{out}");
+}
+
+#[test]
+fn prompt_ctrl_c_cancels_on_real_tty() {
+    // ISIG is disabled during the prompt: 0x03 must arrive as a key meaning
+    // cancel, not kill the process (which would read as fail-open).
+    let out = run_prompt_seam(&[0x03]);
+    assert!(
+        out.contains("choice=Cancel"),
+        "Ctrl-C did not cancel:\n{out}"
+    );
+}
+
 #[test]
 fn double_source_is_harmless() {
     let s = Session::new(None, &[]);
