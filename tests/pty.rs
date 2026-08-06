@@ -154,9 +154,19 @@ impl Session {
         }
         let _ = stdin.write_all(b"exit\r");
         drop(stdin);
-        // Drain whatever the session prints on its way out.
-        while let Ok(bytes) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
-            seen.extend_from_slice(&bytes);
+        // Drain whatever the session prints on its way out. A silent-but-
+        // alive session is killed rather than waited on — otherwise the
+        // child.wait() below would block forever on a shell that wedged
+        // after `exit` (bughunt 2026-08-06).
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(bytes) => seen.extend_from_slice(&bytes),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = child.kill();
+                    break;
+                }
+            }
         }
         let _ = child.wait();
         let _ = reader.join();
@@ -608,14 +618,28 @@ fn make_repo(s: &Session, dirty: bool) -> PathBuf {
     repo
 }
 
+/// The shared opening of every warning-flow test: a warn-mode session with
+/// a fixture repo, plus the first stage's send-string (enter the repo, print
+/// `marker`).
+fn warn_session(
+    dirty: bool,
+    marker: &str,
+    extra_env: &[(&str, &str)],
+) -> (Session, PathBuf, String) {
+    let mut env = vec![("OOPSINPUT_MODE", "warn")];
+    env.extend_from_slice(extra_env);
+    let s = Session::new(None, &env);
+    let repo = make_repo(&s, dirty);
+    let cd = format!("cd {repo:?}\recho {marker}\r");
+    (s, repo, cd)
+}
+
 #[test]
 fn warn_mode_dirty_reset_cancel_has_zero_side_effects() {
     // M3 acceptance, flagship half 1: dirty `git reset --hard` warns with
     // the facts named; cancel runs nothing and the dirty work survives.
     // The 300 ms pause proves the watchdog retires for warning prompts too.
-    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn")]);
-    let repo = make_repo(&s, true);
-    let cd = format!("cd {repo:?}\recho marker-w1\r");
+    let (s, repo, cd) = warn_session(true, "marker-w1", &[]);
     let out = s.run_staged(&[
         ("PTYTEST%", 0, &cd),
         ("marker-w1", 0, "git reset --hard\r"),
@@ -649,9 +673,7 @@ fn warn_mode_dirty_reset_cancel_has_zero_side_effects() {
 
 #[test]
 fn warn_mode_dirty_reset_run_once_executes_unchanged() {
-    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn")]);
-    let repo = make_repo(&s, true);
-    let cd = format!("cd {repo:?}\recho marker-r1\r");
+    let (s, repo, cd) = warn_session(true, "marker-r1", &[]);
     let out = s.run_staged(&[
         ("PTYTEST%", 0, &cd),
         ("marker-r1", 0, "git reset --hard\r"),
@@ -675,9 +697,7 @@ fn warn_mode_dirty_reset_run_once_executes_unchanged() {
 
 #[test]
 fn warn_mode_edit_restores_the_exact_buffer_to_zle() {
-    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn")]);
-    let repo = make_repo(&s, true);
-    let cd = format!("cd {repo:?}\recho marker-e1\r");
+    let (s, repo, cd) = warn_session(true, "marker-e1", &[]);
     // e → the original buffer must come back editable; Ctrl-U kills it and a
     // replacement line proves ZLE was live for editing.
     let out = s.run_staged(&[
@@ -709,9 +729,7 @@ fn warn_mode_edit_restores_the_exact_buffer_to_zle() {
 fn warn_mode_clean_reset_is_silently_allowed() {
     // M3 acceptance, flagship half 2 (the counterfactual): the identical
     // command on a clean tree passes without a word.
-    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn")]);
-    let repo = make_repo(&s, false);
-    let cd = format!("cd {repo:?}\recho marker-s1\r");
+    let (s, _repo, cd) = warn_session(false, "marker-s1", &[]);
     let out = s.run_staged(&[
         ("PTYTEST%", 0, &cd),
         ("marker-s1", 0, "git reset --hard\recho marker-s2\r"),
@@ -736,9 +754,7 @@ fn warning_names_the_previous_command_from_recency() {
     // SPEC §5-L3 flagship phrasing: "git reset --hard … right after git
     // diff". The recency relation is computed in the plugin (no raw history
     // text crosses) and surfaces as a "previous command:" line.
-    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn"), ("GIT_PAGER", "cat")]);
-    let repo = make_repo(&s, true);
-    let cd = format!("cd {repo:?}\recho marker-p1\r");
+    let (s, _repo, cd) = warn_session(true, "marker-p1", &[("GIT_PAGER", "cat")]);
     let out = s.run_staged(&[
         ("PTYTEST%", 0, &cd),
         // `git diff` output proves completion without adding another history
@@ -756,6 +772,78 @@ fn warning_names_the_previous_command_from_recency() {
     assert!(
         out.contains("marker-p2"),
         "session did not continue:\n{out}"
+    );
+}
+
+#[test]
+fn warning_outranks_the_typo_prompt_on_compound_buffers() {
+    // Regression (bughunt 2026-08-06): `oopspecialvq; git reset --hard` has
+    // an unresolvable first word AND a dangerous second segment. `;` does
+    // not short-circuit, so the reset runs whichever way a typo question is
+    // answered — the warning must win the prompt, not the typo chat.
+    let (s, repo, cd) = warn_session(true, "marker-x1", &[]);
+    let setup = format!("alias oopspecialv='echo NOPE'\r{cd}");
+    let out = s.run_staged(&[
+        ("PTYTEST%", 0, &setup),
+        ("marker-x1", 0, "oopspecialvq; git reset --hard\r"),
+        ("[e]dit", 300, "cecho marker-x2\r"),
+    ]);
+    assert!(
+        !out.contains("[y/n]"),
+        "typo prompt shown instead of the warning:\n{out}"
+    );
+    assert!(
+        out.contains("discard uncommitted changes"),
+        "warning missing:\n{out}"
+    );
+    assert!(
+        out.contains("marker-x2"),
+        "session did not continue:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+        "DIRTY\n",
+        "cancel must run nothing"
+    );
+}
+
+#[test]
+fn recency_overlap_counts_shared_targets_not_shared_flags() {
+    // Regression (bughunt 2026-08-06): `ls -f /tmp` then `rm -f x` scored
+    // recency.target_overlap from the shared "-f" — flag words are not
+    // "you referenced this target moments ago".
+    let (s, _repo, cd) = warn_session(false, "marker-o1", &[]);
+    let out = s.run_staged(&[
+        ("PTYTEST%", 0, &cd),
+        // pair 1: only the flag "-f" is shared with the previous command
+        (
+            "marker-o1",
+            0,
+            "ls -f /tmp >/dev/null\rrm -f zzq-nonexistent\recho marker-o2\r",
+        ),
+        // pair 2: the target word itself is shared with the previous command
+        (
+            "marker-o2",
+            0,
+            "touch zz-shared\rrm -f zz-shared\recho marker-o3\r",
+        ),
+    ]);
+    assert!(
+        out.contains("marker-o3"),
+        "session did not continue:\n{out}"
+    );
+    let log = s.events_log();
+    let rm_events: Vec<&str> = log.lines().filter(|l| l.contains("fs.rm_force")).collect();
+    assert_eq!(rm_events.len(), 2, "expected two rm events:\n{log}");
+    assert!(
+        !rm_events[0].contains("recency.target_overlap"),
+        "shared flag scored as target overlap:\n{}",
+        rm_events[0]
+    );
+    assert!(
+        rm_events[1].contains("recency.target_overlap"),
+        "genuine shared target not scored:\n{}",
+        rm_events[1]
     );
 }
 

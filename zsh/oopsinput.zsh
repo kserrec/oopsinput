@@ -83,17 +83,29 @@ _oopsinput_handle() {
     # moments ago), and the first two words sanitized to [A-Za-z0-9_-]{1,32};
     # anything else — quoted words, URLs, values — collapses to "_". A secret
     # cannot survive that shape.
-    local -a _oi_recency=() _oi_bufrest=( ${_oi_words[2,-1]} )
-    local -a _oi_hkeys=( ${(Onk)history} ) _oi_hw
+    #
+    # History access is by direct event number: inside the widget HISTCMD is
+    # the number the current line will get, so HISTCMD-age is the entry `age`
+    # commands back. Never ${(Onk)history} — sorting every history key on
+    # every accepted command cost ~8 ms at 10k entries, most of the whole
+    # p50 latency budget (bughunt 2026-08-06, measured).
+    #
+    # Shared-word detection ignores flag words on both sides: a shared "-f"
+    # is not "you referenced this target moments ago" (bughunt 2026-08-06).
+    local -a _oi_recency=() _oi_bufrest=( ${(M)_oi_words[2,-1]:#[^-]*} ) _oi_hw
     local _oi_h _oi_w _oi_c1 _oi_c2
     integer _oi_age _oi_share
     for _oi_age in 1 2 3 4 5; do
-        _oi_h=${history[${_oi_hkeys[$_oi_age]:-0}]:-}
+        _oi_h=${history[$(( ${HISTCMD:-0} - _oi_age ))]:-}
         [[ -z $_oi_h ]] && continue
         _oi_hw=( ${(z)_oi_h} )
         _oi_share=0
-        for _oi_w in ${_oi_hw[2,-1]}; do
-            if (( ${_oi_bufrest[(Ie)$_oi_w]} <= ${#_oi_bufrest} )); then
+        # (ie), not (Ie): forward exact search returns len+1 when absent;
+        # the REVERSE form returns 0, which made this test always true —
+        # shares was stuck at 1 (bughunt 2026-08-06, caught by the shim
+        # payload dump: `1 1 ls -f` after zero shared words).
+        for _oi_w in ${(M)_oi_hw[2,-1]:#[^-]*}; do
+            if (( ${_oi_bufrest[(ie)$_oi_w]} <= ${#_oi_bufrest} )); then
                 _oi_share=1; break
             fi
         done

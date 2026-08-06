@@ -237,24 +237,40 @@ fn split_flags<'a>(args: &[&'a Word]) -> (Vec<&'a Word>, Vec<&'a Word>) {
     (flags, operands)
 }
 
-/// True when `w` is a single-dash short-flag cluster containing `flag`
-/// (`'f'` in `-rf`). Long flags never match a cluster letter.
-fn cluster_has(w: &Word, flag: char) -> bool {
-    w.text.starts_with('-') && !w.text.starts_with("--") && w.text[1..].contains(flag)
+/// True when `w` is a single-dash short-flag cluster containing `flag` —
+/// but only if *every* letter in the cluster is one the tool defines
+/// (`letters`). To rm, `-force` is not recursive+force, it is "invalid
+/// option -- 'o'" and the command never runs; reading it as flags produced
+/// false catastrophic/warn interventions (bughunt 2026-08-06, proven
+/// against GNU rm and git ground truth).
+fn cluster_has(w: &Word, flag: char, letters: &str) -> bool {
+    w.text.starts_with('-')
+        && !w.text.starts_with("--")
+        && w.text[1..].chars().all(|c| letters.contains(c))
+        && w.text[1..].contains(flag)
 }
 
-fn any_flag(flags: &[&Word], long: &str, short: Option<char>) -> bool {
-    flags
-        .iter()
-        .any(|w| w.text == long || short.is_some_and(|c| cluster_has(w, c)))
+/// `short` carries the flag letter and the tool's full short-flag alphabet.
+fn any_flag(flags: &[&Word], long: Option<&str>, short: Option<(char, &str)>) -> bool {
+    flags.iter().any(|w| {
+        long.is_some_and(|l| w.text == l) || short.is_some_and(|(c, set)| cluster_has(w, c, set))
+    })
 }
 
 // ---- filesystem rules -----------------------------------------------------
 
+/// GNU rm's short flags.
+const RM_LETTERS: &str = "rRfiIdv";
+/// chmod/chown short flags relevant to clustering with -R.
+const PERM_LETTERS: &str = "Rvfch";
+/// cp ∪ mv short flags.
+const CP_MV_LETTERS: &str = "abdfilLnpPrRsStTuvxZH";
+
 fn rule_rm(args: &[&Word], home: Option<&str>, out: &mut Analysis) {
     let (flags, operands) = split_flags(args);
-    let recursive = any_flag(&flags, "--recursive", Some('r')) || any_flag(&flags, "", Some('R'));
-    let force = any_flag(&flags, "--force", Some('f'));
+    let recursive = any_flag(&flags, Some("--recursive"), Some(('r', RM_LETTERS)))
+        || any_flag(&flags, None, Some(('R', RM_LETTERS)));
+    let force = any_flag(&flags, Some("--force"), Some(('f', RM_LETTERS)));
     if !recursive && !force {
         return; // plain rm is not a danger rule (SPEC lists recursive/force)
     }
@@ -265,21 +281,34 @@ fn rule_rm(args: &[&Word], home: Option<&str>, out: &mut Analysis) {
         out.note("fs.rm_force");
     }
     let mut catastrophic_target = false;
+    let mut unknowable_target = false;
     for w in &operands {
         out.note_target(w);
-        if let Some(code) = classify_target(&w.text, w.expands, home) {
+        let classified = classify_target(&w.text, w.expands, home);
+        if let Some(code) = classified {
             out.note(code);
             catastrophic_target |= matches!(code, "fs.target_root" | "fs.target_home");
         }
+        // Expanding AND unclassified: `$DIR` is unknowable; `~` or `/*`
+        // expand too but the curated classifier reads them fine.
+        unknowable_target |= w.expands && classified.is_none();
     }
     if recursive && catastrophic_target {
         out.catastrophic = true;
+    }
+    // An operand whose runtime value is unknowable ($DIR, globs beyond the
+    // curated shapes) means L3's target facts cannot vouch for this rm —
+    // without this marker, a *different* rule's target (e.g. a redirect's
+    // file) satisfied policy's all-targets-exist check and mislabeled the
+    // command context-clear (bughunt 2026-08-06).
+    if unknowable_target {
+        out.note("fs.rm_target_unknown");
     }
 }
 
 fn rule_recursive_perm(args: &[&Word], code: &'static str, home: Option<&str>, out: &mut Analysis) {
     let (flags, operands) = split_flags(args);
-    if !(any_flag(&flags, "--recursive", Some('R'))) {
+    if !(any_flag(&flags, Some("--recursive"), Some(('R', PERM_LETTERS)))) {
         return;
     }
     out.note(code);
@@ -297,7 +326,7 @@ fn rule_recursive_perm(args: &[&Word], code: &'static str, home: Option<&str>, o
 
 fn rule_copy_move(args: &[&Word], out: &mut Analysis) {
     let (flags, operands) = split_flags(args);
-    let force = any_flag(&flags, "--force", Some('f'));
+    let force = any_flag(&flags, Some("--force"), Some(('f', CP_MV_LETTERS)));
     if force {
         out.note("fs.force_overwrite");
     }
@@ -324,8 +353,10 @@ fn rule_redirects(redirects: &[(&str, Option<&Word>)], out: &mut Analysis) {
         if t.contains('$') || t.contains('`') || t == "/dev/null" {
             continue;
         }
-        // `>&N` / `2>&1` duplicate a file descriptor — no file is written.
-        if op.ends_with('&') && t.chars().all(|c| c.is_ascii_digit()) {
+        // `>&N` / `2>&1` duplicate a file descriptor, and `>&-` / `2>&-`
+        // close one — neither writes a file (bughunt 2026-08-06: `exec >&-`
+        // was recorded as truncating a file named "-").
+        if op.ends_with('&') && (t == "-" || t.chars().all(|c| c.is_ascii_digit())) {
             continue;
         }
         // Whether the target exists (truncation of *existing* data) is L3's
@@ -357,19 +388,24 @@ fn rule_git(args: &[&Word], out: &mut Analysis) {
         return;
     }
     let (flags, operands) = split_flags(rest);
+    // Short-flag alphabets per subcommand (git does bundle short flags, and
+    // rejects clusters carrying unknown letters — `-force` is an error).
+    const CLEAN_LETTERS: &str = "dfinqxXe";
+    const PUSH_LETTERS: &str = "dfnoquv46";
+    const BRANCH_LETTERS: &str = "acCdDfilmMqrtuv";
     match sub.text.as_str() {
         "reset" => {
-            if any_flag(&flags, "--hard", None) {
+            if any_flag(&flags, Some("--hard"), None) {
                 out.note("git.reset_hard");
             }
         }
         "clean" => {
-            if any_flag(&flags, "--force", Some('f')) {
+            if any_flag(&flags, Some("--force"), Some(('f', CLEAN_LETTERS))) {
                 out.note("git.clean_force");
             }
         }
         "push" => {
-            if any_flag(&flags, "--force", Some('f'))
+            if any_flag(&flags, Some("--force"), Some(('f', PUSH_LETTERS)))
                 || flags
                     .iter()
                     .any(|w| w.text.starts_with("--force-with-lease"))
@@ -377,7 +413,7 @@ fn rule_git(args: &[&Word], out: &mut Analysis) {
                 out.note("git.push_force");
             }
             // Remote deletion: --delete/-d, or the `:ref` push-nothing refspec.
-            if any_flag(&flags, "--delete", Some('d'))
+            if any_flag(&flags, Some("--delete"), Some(('d', PUSH_LETTERS)))
                 || operands
                     .iter()
                     .any(|w| !w.expands && w.text.len() > 1 && w.text.starts_with(':'))
@@ -387,8 +423,10 @@ fn rule_git(args: &[&Word], out: &mut Analysis) {
         }
         "branch" => {
             // -D, or -d/--delete combined with -f/--force.
-            let delete = any_flag(&flags, "--delete", Some('d')) || any_flag(&flags, "", Some('D'));
-            let force = any_flag(&flags, "--force", Some('f')) || any_flag(&flags, "", Some('D'));
+            let delete = any_flag(&flags, Some("--delete"), Some(('d', BRANCH_LETTERS)))
+                || any_flag(&flags, None, Some(('D', BRANCH_LETTERS)));
+            let force = any_flag(&flags, Some("--force"), Some(('f', BRANCH_LETTERS)))
+                || any_flag(&flags, None, Some(('D', BRANCH_LETTERS)));
             if delete && force {
                 out.note("git.branch_delete_force");
             }
@@ -770,11 +808,15 @@ mod tests {
             codes("echo x > /dev/sda1"),
             ["fs.redirect_truncate", "fs.target_blockdev"]
         );
-        // appends, /dev/null, fd dups, unknowable targets: not evidence
+        // appends, /dev/null, fd dups, fd closes, unknowable targets: not
+        // evidence. `>&-` closes a descriptor — nothing is written (bughunt
+        // 2026-08-06: it was recorded as truncating a file named "-").
         assert_eq!(codes("echo data >> results.csv"), Vec::<&str>::new());
         assert_eq!(codes("make 2>/dev/null"), Vec::<&str>::new());
         assert_eq!(codes("cmd 2>&1"), Vec::<&str>::new());
         assert_eq!(codes("cmd >&2"), Vec::<&str>::new());
+        assert_eq!(codes("exec >&-"), Vec::<&str>::new());
+        assert_eq!(codes("cmd 2>&-"), Vec::<&str>::new());
         assert_eq!(codes("echo x > $OUT"), Vec::<&str>::new());
     }
 
@@ -796,13 +838,38 @@ mod tests {
     }
 
     #[test]
-    fn expanding_targets_are_unknowable() {
-        assert_eq!(codes("rm -rf $DIR"), ["fs.rm_recursive", "fs.rm_force"]);
+    fn expanding_targets_are_unknowable_and_say_so() {
+        // The marker code exists so policy never lets another rule's target
+        // vouch for an rm whose own operand is unknowable (bughunt
+        // 2026-08-06: `echo hi > exists.txt && rm -rf $DIR` was labeled
+        // context-clear on the strength of exists.txt).
+        assert_eq!(
+            codes("rm -rf $DIR"),
+            ["fs.rm_recursive", "fs.rm_force", "fs.rm_target_unknown"]
+        );
         assert_eq!(
             codes("rm -rf $(find-stale)"),
-            ["fs.rm_recursive", "fs.rm_force"]
+            ["fs.rm_recursive", "fs.rm_force", "fs.rm_target_unknown"]
         );
         assert!(!run("rm -rf $DIR").catastrophic);
+        // fully-literal operands carry no marker
+        assert_eq!(codes("rm -rf ./build"), ["fs.rm_recursive", "fs.rm_force"]);
+    }
+
+    #[test]
+    fn clusters_with_unknown_letters_are_not_flags() {
+        // `-force` is "invalid option -- 'o'" to rm and "did you mean
+        // --force?" to git — the commands never run, so reading the cluster
+        // as flags produced false interventions (bughunt 2026-08-06,
+        // proven against GNU rm and git).
+        assert_eq!(codes("rm -force /"), Vec::<&str>::new());
+        assert!(!run("rm -force /").catastrophic);
+        assert_eq!(codes("git push -force origin main"), Vec::<&str>::new());
+        assert_eq!(codes("git clean -force"), Vec::<&str>::new());
+        assert_eq!(codes("mv -force a b"), Vec::<&str>::new());
+        // real clusters still fire
+        assert_eq!(codes("rm -rfv x"), ["fs.rm_recursive", "fs.rm_force"]);
+        assert_eq!(codes("git clean -fdx"), ["git.clean_force"]);
     }
 
     #[test]

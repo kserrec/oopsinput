@@ -167,25 +167,25 @@ fn check(args: &[String]) -> ExitCode {
     // pollute the latency percentiles the budgets are measured against.
     let duration_us = started.elapsed().as_micros();
 
-    // Visible intervention (suggest mode and up): the L1 prompt. Otherwise
-    // the policy matrix decides; in warn/confirm modes a gated warn/confirm
-    // verdict reaches the warning prompt, everything else records silently
-    // with the policy reason preserved (the shadow conversion).
-    let (decision_str, reason_code, exit_code, outcome) = match &suggestion {
-        Some(s) if cfg.mode != policy::Mode::Shadow => {
-            let (d, r, e) = typo_intervention(&proposal.buffer, s);
-            (d, r, e, None)
+    // The strongest intervention wins: a gated warn/confirm outranks the L1
+    // typo prompt. `gti status; rm -rf /` has an unresolvable first word AND
+    // a catastrophic later segment — `;` does not short-circuit, so the rm
+    // runs either way the typo question is answered; the user must see the
+    // warning, not a chat about gti (bughunt 2026-08-06). Otherwise: the
+    // typo prompt in suggest mode and up, else record silently with the
+    // policy reason preserved (the shadow conversion).
+    let capped = policy::cap_for_mode(policy::warranted(&danger, context.as_ref()), cfg.mode);
+    let (decision_str, reason_code, exit_code, outcome) = match capped.verdict {
+        policy::Verdict::Warn | policy::Verdict::Confirm => {
+            warning_intervention(capped, &danger, context.as_ref(), &proposal.recency, &cfg)
         }
-        _ => {
-            let capped =
-                policy::cap_for_mode(policy::warranted(&danger, context.as_ref()), cfg.mode);
-            match capped.verdict {
-                policy::Verdict::Warn | policy::Verdict::Confirm => {
-                    warning_intervention(capped, &danger, context.as_ref(), &proposal.recency, &cfg)
-                }
-                _ => (capped.verdict.as_str(), capped.reason, 0u8, None),
+        _ => match &suggestion {
+            Some(s) if cfg.mode != policy::Mode::Shadow => {
+                let (d, r, e) = typo_intervention(&proposal.buffer, s);
+                (d, r, e, None)
             }
-        }
+            _ => (capped.verdict.as_str(), capped.reason, 0u8, None),
+        },
     };
 
     let decision = Decision {

@@ -25,6 +25,12 @@ Standing rules carried out of archived milestones:
 - **Word boundaries follow the shell, not Unicode**: `lexer::is_shell_whitespace`
   (space/tab/newline only) governs every decision about where a word starts
   or ends (bughunt 2026-08-06).
+- **Deferred finding (bughunt 2026-08-06):** danger's shape tables don't
+  model per-tool *arity* — `mv -f a` (missing destination) still emits
+  `fs.force_overwrite` evidence though mv itself errors. Deferral reason:
+  arity modeling turns curated shape tables into command validators (a rule-
+  layer redesign), and force_overwrite is observe-tier, so no wrong
+  intervention is reachable. Revisit if that category ever graduates.
 - **Documentation stays faithful to reality at all times** (Kyle,
   2026-08-06, resolving the structure-review question about SPEC §16's
   stale tree): purely descriptive drift — file trees, module lists, "what

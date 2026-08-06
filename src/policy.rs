@@ -102,6 +102,13 @@ pub fn warranted(danger: &Analysis, ctx: Option<&Context>) -> Assessment {
         if target_flagged {
             return assess(Verdict::Warn, "policy.target_context");
         }
+        // The all-exist check below can only vouch for rm when rm's own
+        // operands were all knowable — the target list is shared across
+        // rules, and a redirect's existing file must not clear an
+        // `rm -rf $DIR` (bughunt 2026-08-06).
+        if has("fs.rm_target_unknown") {
+            return assess(Verdict::Observe, "policy.evidence_unavailable");
+        }
         if !targets.is_empty() && targets.iter().all(|t| t.exists) {
             return assess(Verdict::Allow, "policy.context_clear");
         }
@@ -568,6 +575,28 @@ mod tests {
                 c.name
             );
         }
+    }
+
+    #[test]
+    fn another_rules_target_never_vouches_for_rm() {
+        // Regression (bughunt 2026-08-06): `echo hi > exists.txt && rm -rf
+        // $DIR` — the redirect's existing target satisfied the all-exist
+        // check and the unknowable rm was labeled context-clear.
+        let d = danger_for("echo hi > exists.txt && rm -rf $DIR");
+        let context = ctx(None, vec![target(true, false, false, false)]);
+        let got = warranted(&d, Some(&context));
+        assert_eq!(got.verdict, Verdict::Observe);
+        assert_eq!(got.reason, "policy.evidence_unavailable");
+        // ...while a fully-literal rm with existing targets stays clear
+        let d = danger_for("echo hi > exists.txt && rm -rf ./build");
+        let context = ctx(
+            None,
+            vec![
+                target(true, false, false, false),
+                target(true, false, false, false),
+            ],
+        );
+        assert_eq!(warranted(&d, Some(&context)).reason, "policy.context_clear");
     }
 
     #[test]

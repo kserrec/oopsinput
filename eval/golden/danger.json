@@ -30,7 +30,7 @@
     "name": "rm-rf-home-subdir-counterfactual",
     "pair": "rm-home",
     "buffer": "rm -rf ~/old-project",
-    "expect_evidence": ["fs.rm_recursive", "fs.rm_force"]
+    "expect_evidence": ["fs.rm_recursive", "fs.rm_force", "fs.rm_target_unknown"]
   },
   {
     "name": "git-reset-hard",
