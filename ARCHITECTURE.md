@@ -622,8 +622,16 @@ in their module headers:
   siblings). Unavailable evidence is reported as unavailable, never guessed.
 - **`src/distance.rs`** — the bounded edit distance, moved out of the typo
   layer so context's near-miss check shares one implementation.
+- **`src/policy.rs`** — the decision engine: `warranted` (the mode-blind
+  evidence → decision matrix pinned by `eval/golden/policy.json`),
+  `cap_for_mode` (the mode is a ceiling; downgrades preserve the policy
+  reason, which is what makes shadow data reportable), the intervention
+  budget and per-rule cooldown (built and tested; consumed once the warning
+  UI can show something), and the full SPEC §15 config surface with
+  warn-once diagnostics. The watchdog deadline now comes from
+  `det_timeout_ms`.
 
-Still ahead in M3: the recency relation (plugin-supplied), the policy
-engine, and the warning UI. Files SPEC §16 lists for later milestones
-(`policy.rs`, `model.rs`, `layers/infer.rs`) don't exist yet by design —
-modules are created when their milestone starts.
+Still ahead in M3: the warning UI and the recency relation
+(plugin-supplied). Files SPEC §16 lists for later milestones (`model.rs`,
+`layers/infer.rs`) don't exist yet by design — modules are created when
+their milestone starts.
