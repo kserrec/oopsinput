@@ -358,6 +358,29 @@ fn suggest_mode_y_runs_the_correction_exactly() {
 }
 
 #[test]
+fn suggest_mode_resolving_words_never_prompt() {
+    // M2 acceptance: zero tolerance for L1 false positives — every resolution
+    // kind that can actually run must pass through silently even with prompts
+    // enabled.
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "suggest")]);
+    let out = s.run(&[
+        "alias myok='echo ALIASRAN-$((6+7))'",
+        "myok",                                        // alias
+        "echo builtin-ran",                            // builtin
+        "/bin/ls /tmp >/dev/null && echo command-ran", // command + chain
+        "true && echo chain-ran",
+    ]);
+    assert!(
+        !out.contains("[y/n]"),
+        "a resolving command word prompted:\n{out}"
+    );
+    assert!(out.contains("ALIASRAN-13"), "alias did not run:\n{out}");
+    assert!(out.contains("builtin-ran"), "builtin did not run:\n{out}");
+    assert!(out.contains("command-ran"), "command did not run:\n{out}");
+    assert!(out.contains("chain-ran"), "chain did not run:\n{out}");
+}
+
+#[test]
 fn config_file_mode_suggest_enables_prompts() {
     // The exact artifact install.zsh writes must turn prompts on through the
     // real config path (no env override involved).

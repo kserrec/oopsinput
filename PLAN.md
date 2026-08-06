@@ -63,8 +63,18 @@ clear on GitHub/crates.io/npm/PyPI/domains; `noops`, `oopsh`, `oopsys`,
       default + perms, existing-config untouched, idempotency; PTY test
       proves the exact installed config artifact enables prompts through the
       real config path)
-- [ ] Acceptance: golden typo cases pass; command words that resolve NEVER
-      prompt; p95 within budget
+- [x] Acceptance: golden typo cases pass; command words that resolve NEVER
+      prompt; p95 within budget (2026-08-06: eval/golden/typo.json — 19 cases,
+      42% counterfactual pairs (≥30% ratio asserted in the runner), hermetic
+      via analyze_with_path with empty PATH, pinning candidate + exact
+      evidence assembly; PTY test proves alias/builtin/command/chain words
+      never prompt in suggest mode; release end-to-end incl. spawn:
+      deterministic p50 3.6 ms / p95 4.4 ms (budget 25), typo path with 2k
+      names + full PATH scan p50 16.3 ms / p95 19.5 ms (budget 75))
+
+**M2 complete 2026-08-06** — typing a misspelled command in suggest mode
+prompts with the nearest real command; `y` runs it, `n`/timeout runs the
+original, Ctrl-C cancels; resolving words never prompt.
 
 ## M3 — Danger + context layers, policy, warning UI
 

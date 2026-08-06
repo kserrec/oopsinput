@@ -1,0 +1,164 @@
+[
+  {
+    "name": "gti-transposition",
+    "pair": "gti",
+    "buffer": "gti status",
+    "res": "none",
+    "names": ["git", "gzip"],
+    "expect_candidate": "git",
+    "expect_evidence": ["typo.candidate_d1"]
+  },
+  {
+    "name": "gti-resolves-counterfactual",
+    "pair": "gti",
+    "buffer": "gti status",
+    "res": "command",
+    "names": ["git", "gzip"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "sl-short-word",
+    "pair": "sl",
+    "buffer": "sl",
+    "res": "none",
+    "names": ["ls", "sh"],
+    "expect_candidate": "ls",
+    "expect_evidence": ["typo.candidate_d1"]
+  },
+  {
+    "name": "sl-is-an-alias-counterfactual",
+    "pair": "sl",
+    "buffer": "sl",
+    "res": "alias",
+    "names": ["ls", "sh"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "pyhton-distance-one",
+    "pair": "pyhton",
+    "buffer": "pyhton -m venv .venv",
+    "res": "none",
+    "names": ["python", "python3"],
+    "expect_candidate": "python",
+    "expect_evidence": ["typo.candidate_d1"]
+  },
+  {
+    "name": "pyhton-is-a-function-counterfactual",
+    "pair": "pyhton",
+    "buffer": "pyhton -m venv .venv",
+    "res": "function",
+    "names": ["python", "python3"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "kubcetl-transposition-is-one-edit",
+    "pair": "kubcetl",
+    "buffer": "kubcetl get pods",
+    "res": "none",
+    "names": ["kubectl"],
+    "expect_candidate": "kubectl",
+    "expect_evidence": ["typo.candidate_d1"]
+  },
+  {
+    "name": "kubcetl-hashed-counterfactual",
+    "pair": "kubcetl",
+    "buffer": "kubcetl get pods",
+    "res": "hashed",
+    "names": ["kubectl"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "kbetl-distance-two",
+    "pair": "kbetl",
+    "buffer": "kbetl get pods",
+    "res": "none",
+    "names": ["kubectl"],
+    "expect_candidate": "kubectl",
+    "expect_evidence": ["typo.candidate_d2"]
+  },
+  {
+    "name": "kbetl-command-counterfactual",
+    "pair": "kbetl",
+    "buffer": "kbetl get pods",
+    "res": "command",
+    "names": ["kubectl"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "unknown-resolution-never-fires",
+    "buffer": "gti status",
+    "res": "unknown",
+    "names": ["git"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "nothing-nearby",
+    "buffer": "qwzxjvk",
+    "res": "none",
+    "names": ["git", "ls", "cargo"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "leading-assignment-not-analyzed",
+    "buffer": "FOO=1 gti status",
+    "res": "none",
+    "names": ["git"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "quoted-word-not-analyzed",
+    "buffer": "'gti' status",
+    "res": "none",
+    "names": ["git"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "path-like-word-is-l3-territory",
+    "buffer": "./scrpit.sh --run",
+    "res": "none",
+    "names": ["script"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "expansion-in-command-word",
+    "buffer": "$EDITOR file.txt",
+    "res": "none",
+    "names": ["editor"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "exact-name-conflict-suppresses",
+    "buffer": "gti status",
+    "res": "none",
+    "names": ["gti", "git"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "single-char-never-corrected",
+    "buffer": "g",
+    "res": "none",
+    "names": ["git", "go"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
+    "name": "opaque-substitution-still-suggests-nothing",
+    "buffer": "gti $(echo status)",
+    "res": "none",
+    "names": ["git"],
+    "expect_candidate": "git",
+    "expect_evidence": ["syntax.opaque_substitution", "typo.candidate_d1"]
+  }
+]

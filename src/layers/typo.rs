@@ -40,14 +40,25 @@ pub fn analyze(
     lexed: &Lexed,
     extra_names: &[String],
 ) -> Option<Suggestion> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    analyze_with_path(res_kind, lexed, extra_names, &path)
+}
+
+/// The whole layer with PATH explicit — the seam the hermetic golden corpus
+/// runs through (fixtures must not depend on the machine's real PATH).
+pub fn analyze_with_path(
+    res_kind: ResolutionKind,
+    lexed: &Lexed,
+    extra_names: &[String],
+    path: &str,
+) -> Option<Suggestion> {
     // Only `none` — an exact "does not resolve" report from the live shell.
     // Unknown/Other mean we don't know, and not-knowing never prompts.
     if res_kind != ResolutionKind::None {
         return None;
     }
     let word = literal_command_word(lexed)?;
-    let path = std::env::var("PATH").unwrap_or_default();
-    best_candidate(word, &path, extra_names)
+    best_candidate(word, path, extra_names)
 }
 
 /// The typed command word, only when we are certain it is the word the plugin

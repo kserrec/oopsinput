@@ -196,20 +196,12 @@ fn check(args: &[String]) -> ExitCode {
     // resolves to nothing. Distance is structural, never the names.
     let suggestion = layers::typo::analyze(proposal.res_kind, &lexed, &proposal.names);
 
-    let mut evidence = lexed.uncertainty;
-    if proposal.capped {
-        evidence.push("input.capped");
-    }
-    if proposal.names_capped {
-        evidence.push("input.names_capped");
-    }
-    if let Some(s) = &suggestion {
-        evidence.push(if s.distance == 1 {
-            "typo.candidate_d1"
-        } else {
-            "typo.candidate_d2"
-        });
-    }
+    let evidence = build_evidence(
+        lexed.uncertainty,
+        proposal.capped,
+        proposal.names_capped,
+        suggestion.as_ref(),
+    );
 
     // Analysis-only duration: the prompt below waits on a human and must not
     // pollute the latency percentiles the budgets are measured against.
@@ -248,6 +240,32 @@ fn check(args: &[String]) -> ExitCode {
         }
         Err(_) => ExitCode::from(1),
     }
+}
+
+/// Assemble the decision's evidence codes in stable order: lexer uncertainty
+/// (first-seen), input caps, then typo findings. The golden corpus pins this
+/// exact assembly — static strings only, never raw text.
+fn build_evidence(
+    lexer_uncertainty: Vec<&'static str>,
+    capped: bool,
+    names_capped: bool,
+    suggestion: Option<&layers::typo::Suggestion>,
+) -> Vec<&'static str> {
+    let mut evidence = lexer_uncertainty;
+    if capped {
+        evidence.push("input.capped");
+    }
+    if names_capped {
+        evidence.push("input.names_capped");
+    }
+    if let Some(s) = suggestion {
+        evidence.push(if s.distance == 1 {
+            "typo.candidate_d1"
+        } else {
+            "typo.candidate_d2"
+        });
+    }
+    evidence
 }
 
 /// The L1 prompt flow. Returns (decision, reason_code, exit code) — exit 10
@@ -384,6 +402,62 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SPEC §11 golden corpus, L1 slice: each case is buffer + resolution
+    /// context + candidate names → expected suggestion and evidence codes.
+    /// Hermetic — candidates come only from the fixture, never real PATH.
+    #[test]
+    fn golden_typo_corpus() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            /// Set on counterfactual pairs: same buffer, different context,
+            /// different expectation (SPEC §11 paired-case discipline).
+            #[serde(default)]
+            pair: Option<String>,
+            buffer: String,
+            res: String,
+            #[serde(default)]
+            names: Vec<String>,
+            expect_candidate: Option<String>,
+            expect_evidence: Vec<String>,
+        }
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/eval/golden/typo.json");
+        let text = std::fs::read_to_string(path).expect("read golden corpus");
+        let cases: Vec<Case> = serde_json::from_str(&text).expect("parse golden corpus");
+        assert!(!cases.is_empty());
+
+        let paired = cases.iter().filter(|c| c.pair.is_some()).count();
+        assert!(
+            paired * 100 >= cases.len() * 30,
+            "SPEC §11: ≥30% of golden cases must be counterfactual pairs \
+             ({paired}/{} are)",
+            cases.len()
+        );
+
+        for c in &cases {
+            let lexed = lexer::lex(&c.buffer);
+            let res = proposal::ResolutionKind::parse(&c.res);
+            let suggestion = layers::typo::analyze_with_path(res, &lexed, &c.names, "");
+            assert_eq!(
+                suggestion.as_ref().map(|s| s.candidate.as_str()),
+                c.expect_candidate.as_deref(),
+                "case '{}': wrong candidate",
+                c.name
+            );
+            let evidence = build_evidence(lexed.uncertainty, false, false, suggestion.as_ref());
+            assert_eq!(
+                evidence,
+                c.expect_evidence
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                "case '{}': wrong evidence",
+                c.name
+            );
+        }
+    }
 
     #[test]
     fn mode_vocabulary_is_closed_and_fails_to_shadow() {
