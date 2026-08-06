@@ -58,13 +58,16 @@ Standing rules carried out of archived milestones:
       invisible may spend budget). det_timeout_ms now drives the watchdog.
       Flagship pair proven live: dirty `git reset --hard` → observe/
       dirty_work_at_risk; probe in ~4.7 ms
-- [ ] Warning UI: anatomy per SPEC §7; e/edit c/cancel r/run-once; exact
-      buffer restore on edit (PTY-tested). Deferred bughunt finding
-      (2026-08-06, deferred because this item rebuilds the prompt key
-      handling): the single-byte prompt read treats a multi-byte key
-      sequence (arrow keys: ESC [ A) as ESC + leftover bytes, which leak
-      into the next ZLE buffer as stray characters — the new key reader
-      must consume complete escape sequences
+- [x] Warning UI: anatomy per SPEC §7; e/edit c/cancel r/run-once; exact
+      buffer restore on edit (PTY-tested) — ✅ 2026-08-06. Warn tier is
+      advisory (timeout runs), confirm tier pauses (timeout cancels — `r`
+      never the default). Budget/cooldown gates went live with it (spend
+      only on actually-shown prompts); outcomes land in the event log. The
+      deferred multi-byte key bug is fixed: the key reader consumes complete
+      escape sequences (CSI/SS3/alt-chords), PTY-pinned by
+      arrow_keys_at_a_prompt_leave_no_stray_bytes. Both flagship acceptance
+      halves PTY-proven: dirty reset warns with facts named and cancel has
+      zero side effects; clean reset passes silently
 - [ ] recency relation (rest of SPEC §5-L3): plugin-supplied structural
       summaries of recent commands, secrets stripped in the plugin — zsh
       plugin change, so PTY tests required. (Reordered after policy + UI,

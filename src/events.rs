@@ -33,6 +33,11 @@ pub struct Event {
     pub ctx_git_dirty: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ctx_target_entries: Option<u32>,
+    /// What the user did at a visible L2+ intervention (SPEC §4 — central to
+    /// evaluation, distinct from the decision): edited | cancelled |
+    /// ran_unchanged. Absent when nothing was shown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<&'static str>,
 }
 
 pub fn now_ms() -> u64 {
@@ -122,6 +127,7 @@ mod tests {
                                 duration_us: 1,
                                 ctx_git_dirty: None,
                                 ctx_target_entries: None,
+                                outcome: None,
                             },
                         );
                     }
@@ -155,6 +161,7 @@ mod tests {
             duration_us: 42,
             ctx_git_dirty: Some(14),
             ctx_target_entries: None,
+            outcome: Some("cancelled"),
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"decision\":\"allow\""));

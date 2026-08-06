@@ -32,32 +32,84 @@ pub enum TypoChoice {
     Cancel,
 }
 
-/// Prompt read timeout in deciseconds (VTIME): 10 s, then `n` (SPEC §5-L1).
-const PROMPT_TIMEOUT_DS: &str = "100";
+/// Outcome of an L2+ warning/confirmation prompt (SPEC §7): `e` restores the
+/// exact buffer to ZLE for editing, `c` cancels (nothing runs), `r` runs the
+/// original unchanged once. Timeout defaults are tier-specific: a warning is
+/// advisory (timeout runs), a pausing confirmation is a gate (timeout
+/// cancels — `r` is a distinct deliberate key, never the default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarnChoice {
+    Edit,
+    Cancel,
+    RunOnce,
+}
 
-/// Ask the L1 typo question on /dev/tty. Total failure of any step degrades
-/// to `Original` — the user just sees their command fail naturally.
-pub fn prompt_typo(typed: &str, candidate: &str) -> TypoChoice {
-    let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") else {
-        return TypoChoice::Original;
-    };
-    let Some(saved) = stty(&tty, &["-g"]) else {
-        return TypoChoice::Original;
-    };
+/// Prompt read timeout in deciseconds (VTIME): 10 s, then the default.
+const PROMPT_TIMEOUT_DS: &str = "100";
+/// Drain timeout while consuming an escape sequence's remaining bytes: the
+/// terminal delivers the whole sequence in one burst, so 0.1 s is plenty.
+const DRAIN_TIMEOUT_DS: &str = "1";
+
+/// A terminal a prompt can read decision keys from. `set_drain` flips the
+/// read timeout between "wait for a human" and "collect the rest of an
+/// escape sequence"; test doubles ignore it (their bytes are all buffered).
+pub(crate) trait PromptTty: Read + Write {
+    fn set_drain(&mut self, _drain: bool) {}
+}
+
+/// The real /dev/tty in raw-ish mode. Constructed only via
+/// `open_prompt_tty`, which owns the mode save/restore.
+struct RealTty {
+    file: File,
+}
+
+impl Read for RealTty {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+impl Write for RealTty {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+impl PromptTty for RealTty {
+    fn set_drain(&mut self, drain: bool) {
+        let t = if drain {
+            DRAIN_TIMEOUT_DS
+        } else {
+            PROMPT_TIMEOUT_DS
+        };
+        // Failure tolerated: reads then use the previous timeout, which is
+        // safe in both directions (just slower or snappier than ideal).
+        let _ = stty(&self.file, &["min", "0", "time", t]);
+    }
+}
+
+/// Open /dev/tty in single-key mode; the returned guard restores the saved
+/// terminal state on drop, whatever path leaves.
+fn open_prompt_tty() -> Option<(RealTty, SttyRestore)> {
+    let tty = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let saved = stty(&tty, &["-g"])?;
     // The guard owns its own handle to the tty so the main handle stays free
     // for the prompt's reads and writes.
-    let Ok(guard_handle) = tty.try_clone() else {
-        return TypoChoice::Original;
-    };
-    let _restore = SttyRestore {
+    let guard_handle = tty.try_clone().ok()?;
+    let restore = SttyRestore {
         tty: guard_handle,
         saved,
     };
     // -icanon: byte-at-a-time reads. -echo: the pressed key is not printed.
     // -isig: Ctrl-C arrives as byte 0x03 instead of killing us mid-prompt
-    // (it must mean "cancel", not "fail open and run the typo").
-    // min 0 time N: the read itself times out; an empty read means "n".
-    if stty(
+    // (it must mean "cancel", not "fail open and run the command").
+    // min 0 time N: the read itself times out; an empty read is the default.
+    stty(
         &tty,
         &[
             "-icanon",
@@ -68,12 +120,28 @@ pub fn prompt_typo(typed: &str, candidate: &str) -> TypoChoice {
             "time",
             PROMPT_TIMEOUT_DS,
         ],
-    )
-    .is_none()
-    {
-        return TypoChoice::Original; // restore guard still runs
+    )?; // on failure the restore guard still runs
+    Some((RealTty { file: tty }, restore))
+}
+
+/// Ask the L1 typo question on /dev/tty. Total failure of any step degrades
+/// to `Original` — the user just sees their command fail naturally.
+pub fn prompt_typo(typed: &str, candidate: &str) -> TypoChoice {
+    match open_prompt_tty() {
+        Some((mut tty, _restore)) => run_typo_prompt(&mut tty, typed, candidate),
+        None => TypoChoice::Original,
     }
-    run_typo_prompt(&mut tty, typed, candidate)
+}
+
+/// Show an L2+ warning on /dev/tty. `lines` are pre-assembled (untrusted
+/// pieces already escaped by the builder); this adds the trusted framing
+/// prefix and the keys line. Total failure fails open to `RunOnce` — the
+/// original command runs unchanged (SPEC §9-6/8).
+pub fn prompt_warning(lines: &[String], pausing: bool) -> WarnChoice {
+    match open_prompt_tty() {
+        Some((mut tty, _restore)) => run_warning_prompt(&mut tty, lines, pausing),
+        None => WarnChoice::RunOnce,
+    }
 }
 
 /// Restores the saved `stty -g` state on scope exit, whatever path leaves.
@@ -157,10 +225,75 @@ fn run_bounded(mut cmd: std::process::Command, timeout_ms: u64) -> Option<String
     Some(out.trim().to_string())
 }
 
-/// The prompt proper, generic over the terminal handle so the key protocol is
-/// testable without a tty. One key decides; the escaper guards every piece of
-/// untrusted text in the message.
-fn run_typo_prompt<T: Read + Write>(tty: &mut T, typed: &str, candidate: &str) -> TypoChoice {
+/// One decision keypress, decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Key {
+    Char(u8),
+    /// Lone ESC keypress (no sequence followed).
+    Esc,
+    /// A complete multi-byte escape sequence (arrow key, F-key, alt-chord) —
+    /// consumed in full so its tail bytes can never leak into the next ZLE
+    /// buffer as stray characters (deferred bughunt finding 2026-08-06).
+    Seq,
+    /// Terminal-level read timeout (`min 0 time N` expired).
+    Timeout,
+    Err,
+}
+
+/// Keys examined before a prompt gives up and takes its timeout default —
+/// a human answering is a handful of keys; only hostile or wedged input
+/// streams reach this bound.
+const MAX_PROMPT_KEYS: usize = 32;
+
+fn read_key<T: PromptTty>(tty: &mut T) -> Key {
+    let mut b = [0u8; 1];
+    match tty.read(&mut b) {
+        Ok(0) => Key::Timeout,
+        Err(_) => Key::Err,
+        Ok(_) if b[0] != 0x1b => Key::Char(b[0]),
+        Ok(_) => {
+            tty.set_drain(true);
+            let k = consume_escape_sequence(tty);
+            tty.set_drain(false);
+            k
+        }
+    }
+}
+
+/// Cursor on the byte after ESC. Consumes exactly one sequence: CSI
+/// (`ESC [ params final`), SS3 (`ESC O x`), or an alt-modified character.
+/// A read timeout mid-sequence means the ESC was a lone keypress (or the
+/// stream is malformed — either way there is nothing more to consume).
+fn consume_escape_sequence<T: Read>(tty: &mut T) -> Key {
+    let mut b = [0u8; 1];
+    match tty.read(&mut b) {
+        Ok(0) | Err(_) => Key::Esc,
+        Ok(_) => match b[0] {
+            // CSI: parameter/intermediate bytes 0x20–0x3F, one final byte
+            // 0x40–0x7E. Bounded — hostile input cannot hold the prompt.
+            b'[' => {
+                for _ in 0..16 {
+                    match tty.read(&mut b) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if (0x40..=0x7e).contains(&b[0]) => break,
+                        Ok(_) => {}
+                    }
+                }
+                Key::Seq
+            }
+            b'O' => {
+                let _ = tty.read(&mut b); // SS3 carries one final byte
+                Key::Seq
+            }
+            _ => Key::Seq, // alt-modified character: consumed, ignored
+        },
+    }
+}
+
+/// The L1 prompt proper, generic over the terminal handle so the key
+/// protocol is testable without a tty. One key decides; the escaper guards
+/// every piece of untrusted text in the message.
+fn run_typo_prompt<T: PromptTty>(tty: &mut T, typed: &str, candidate: &str) -> TypoChoice {
     let msg = format!(
         "oopsinput: '{}' not found — did you mean '{}'? [y/n] ",
         escape_for_display(typed),
@@ -173,16 +306,60 @@ fn run_typo_prompt<T: Read + Write>(tty: &mut T, typed: &str, candidate: &str) -
     {
         return TypoChoice::Original;
     }
-    let mut key = [0u8; 1];
-    let choice = match tty.read(&mut key) {
-        Ok(1) => match key[0] {
-            b'y' | b'Y' => TypoChoice::Correct,
-            0x03 => TypoChoice::Cancel, // Ctrl-C
+    let mut choice = TypoChoice::Original;
+    for _ in 0..MAX_PROMPT_KEYS {
+        choice = match read_key(tty) {
+            Key::Char(b'y' | b'Y') => TypoChoice::Correct,
+            Key::Char(0x03) => TypoChoice::Cancel, // Ctrl-C
+            // an escape sequence is not an answer — keep waiting
+            Key::Seq => continue,
+            // any other key, lone ESC, timeout, error: the do-nothing outcome
             _ => TypoChoice::Original,
-        },
-        // 0 bytes = terminal-level timeout; errors degrade the same way.
-        _ => TypoChoice::Original,
+        };
+        break;
+    }
+    let _ = tty.write_all(b"\r\n");
+    choice
+}
+
+/// The L2+ warning prompt (SPEC §7 anatomy: the caller's lines say what the
+/// command does, what it hits, and why context is unusual; this adds the
+/// keys). Only deliberate keys decide — unrecognized keys are ignored, and
+/// the timeout default depends on the tier: advisory warnings run the
+/// command, pausing confirmations cancel it.
+fn run_warning_prompt<T: PromptTty>(tty: &mut T, lines: &[String], pausing: bool) -> WarnChoice {
+    let timeout_default = if pausing {
+        WarnChoice::Cancel
+    } else {
+        WarnChoice::RunOnce
     };
+    let mut msg = String::new();
+    for line in lines {
+        msg.push_str("oopsinput: ");
+        msg.push_str(line);
+        msg.push_str("\r\n");
+    }
+    msg.push_str("oopsinput: [e]dit  [c]ancel  [r]un unchanged ");
+    if tty
+        .write_all(msg.as_bytes())
+        .and_then(|()| tty.flush())
+        .is_err()
+    {
+        return WarnChoice::RunOnce; // fail open (SPEC §9-8)
+    }
+    let mut choice = timeout_default;
+    for _ in 0..MAX_PROMPT_KEYS {
+        choice = match read_key(tty) {
+            Key::Char(b'e' | b'E') => WarnChoice::Edit,
+            Key::Char(b'c' | b'C') | Key::Char(0x03) | Key::Esc => WarnChoice::Cancel,
+            Key::Char(b'r' | b'R') => WarnChoice::RunOnce,
+            Key::Timeout => timeout_default,
+            Key::Err => WarnChoice::RunOnce, // fail open
+            // not an answer: escape sequences and unrecognized keys
+            Key::Seq | Key::Char(_) => continue,
+        };
+        break;
+    }
     let _ = tty.write_all(b"\r\n");
     choice
 }
@@ -398,6 +575,7 @@ mod tests {
             Ok(())
         }
     }
+    impl PromptTty for FakeTty {} // all bytes pre-buffered: no drain switch
 
     #[test]
     fn y_consents_and_message_is_framed() {
@@ -450,6 +628,129 @@ mod tests {
         assert_eq!(
             run_typo_prompt(&mut tty, "gti", "git"),
             TypoChoice::Original
+        );
+    }
+
+    #[test]
+    fn escape_sequences_are_consumed_whole_and_are_not_answers() {
+        // Regression (bughunt 2026-08-06, deferred to this rebuild): the old
+        // single-byte read took an arrow key's ESC as the answer and left
+        // "[A" behind, which leaked into the next ZLE buffer as stray
+        // characters. The reader must swallow the complete sequence and keep
+        // waiting for a real key.
+        let mut tty = FakeTty::new(b"\x1b[Ay"); // Up arrow, then y
+        assert_eq!(run_typo_prompt(&mut tty, "gti", "git"), TypoChoice::Correct);
+        assert_eq!(
+            tty.input.position() as usize,
+            tty.input.get_ref().len(),
+            "sequence bytes left unconsumed"
+        );
+        // SS3 arrow (application mode), then n
+        let mut tty = FakeTty::new(b"\x1bOAn");
+        assert_eq!(
+            run_typo_prompt(&mut tty, "gti", "git"),
+            TypoChoice::Original
+        );
+        assert_eq!(tty.input.position() as usize, tty.input.get_ref().len());
+        // CSI with parameters (e.g. shift-arrow: ESC [ 1 ; 2 A), then y
+        let mut tty = FakeTty::new(b"\x1b[1;2Ay");
+        assert_eq!(run_typo_prompt(&mut tty, "gti", "git"), TypoChoice::Correct);
+        assert_eq!(tty.input.position() as usize, tty.input.get_ref().len());
+    }
+
+    #[test]
+    fn lone_esc_runs_the_original() {
+        let mut tty = FakeTty::new(b"\x1b");
+        assert_eq!(
+            run_typo_prompt(&mut tty, "gti", "git"),
+            TypoChoice::Original
+        );
+    }
+
+    #[test]
+    fn hostile_key_soup_cannot_hold_the_prompt_open() {
+        // MAX_PROMPT_KEYS bounds the loop: endless sequences resolve to the
+        // default rather than waiting forever.
+        let soup: Vec<u8> = b"\x1b[A".repeat(100).to_vec();
+        let mut tty = FakeTty::new(&soup);
+        assert_eq!(
+            run_typo_prompt(&mut tty, "gti", "git"),
+            TypoChoice::Original
+        );
+        let mut tty = FakeTty::new(&soup);
+        assert_eq!(
+            run_warning_prompt(&mut tty, &["x".into()], false),
+            WarnChoice::RunOnce
+        );
+    }
+
+    // ---- warning prompt key protocol (SPEC §7) ----
+
+    fn lines() -> Vec<String> {
+        vec![
+            "git reset --hard discards uncommitted changes".to_string(),
+            "right now: 17 modified tracked files".to_string(),
+        ]
+    }
+
+    #[test]
+    fn warning_shows_anatomy_and_keys_with_trusted_framing() {
+        let mut tty = FakeTty::new(b"c");
+        assert_eq!(
+            run_warning_prompt(&mut tty, &lines(), false),
+            WarnChoice::Cancel
+        );
+        let shown = tty.shown();
+        for line in shown.lines().filter(|l| !l.trim().is_empty()) {
+            assert!(
+                line.starts_with("oopsinput: "),
+                "unframed line reached the tty: {line:?}"
+            );
+        }
+        assert!(shown.contains("discards uncommitted changes"));
+        assert!(shown.contains("17 modified tracked files"));
+        assert!(shown.contains("[e]dit"));
+        assert!(shown.contains("[c]ancel"));
+        assert!(shown.contains("[r]un unchanged"));
+    }
+
+    #[test]
+    fn warning_keys_decide() {
+        for (keys, want) in [
+            (&b"e"[..], WarnChoice::Edit),
+            (b"E", WarnChoice::Edit),
+            (b"c", WarnChoice::Cancel),
+            (b"C", WarnChoice::Cancel),
+            (b"r", WarnChoice::RunOnce),
+            (b"R", WarnChoice::RunOnce),
+            (b"\x03", WarnChoice::Cancel),    // Ctrl-C
+            (b"\x1b", WarnChoice::Cancel),    // lone ESC = dismiss
+            (b"xq!e", WarnChoice::Edit),      // unrecognized keys are ignored
+            (b"\x1b[Bc", WarnChoice::Cancel), // arrow consumed, then c
+        ] {
+            let mut tty = FakeTty::new(keys);
+            assert_eq!(
+                run_warning_prompt(&mut tty, &lines(), false),
+                want,
+                "keys {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn warning_timeout_default_depends_on_tier() {
+        // advisory warning: timeout runs the command (nonblocking notice)
+        let mut tty = FakeTty::new(b"");
+        assert_eq!(
+            run_warning_prompt(&mut tty, &lines(), false),
+            WarnChoice::RunOnce
+        );
+        // pausing confirmation: timeout cancels — running is never the
+        // default for predicted-irreversible commands (SPEC §7)
+        let mut tty = FakeTty::new(b"");
+        assert_eq!(
+            run_warning_prompt(&mut tty, &lines(), true),
+            WarnChoice::Cancel
         );
     }
 

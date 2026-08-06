@@ -173,7 +173,6 @@ const COOLDOWN_TRIGGER: u32 = 3;
 /// Direct-catastrophic is exempt from both (SPEC §7). `commit` records the
 /// spend — pass false when the intervention cannot actually be shown yet.
 /// Exhaustion degrades to observe (shadow recording), never to nagging.
-#[allow(dead_code)] // consumer is the M3 warning UI; exercised by tests now
 pub fn apply_gates(
     assessment: Assessment,
     primary_code: Option<&str>,
@@ -212,7 +211,6 @@ pub fn apply_gates(
 /// Called by the warning UI (next M3 item) with what the user did. Repeated
 /// run-unchanged on the same rule reads as "I mean it, stop asking" and
 /// triggers the cooldown; any edit/cancel resets it.
-#[allow(dead_code)] // consumer is the M3 warning UI; exercised by tests now
 pub fn record_outcome(state: &mut PolicyState, code: &str, ran_unchanged: bool, now_ms: u64) {
     let c = state.cooldowns.entry(code.to_string()).or_default();
     if ran_unchanged {
@@ -228,12 +226,10 @@ pub fn record_outcome(state: &mut PolicyState, code: &str, ran_unchanged: bool, 
 
 /// The rule a cooldown keys on: the first danger code (rules note their own
 /// code before any target classification, so this is the rule identity).
-#[allow(dead_code)] // consumer is the M3 warning UI; exercised by tests now
 pub fn primary_code(danger: &Analysis) -> Option<&'static str> {
     danger.codes.first().copied()
 }
 
-#[allow(dead_code)] // consumer is the M3 warning UI; exercised by tests now
 pub fn load_state() -> PolicyState {
     let Some(dir) = crate::events::state_dir() else {
         return PolicyState::default();
@@ -245,7 +241,6 @@ pub fn load_state() -> PolicyState {
     serde_json::from_str(&text).unwrap_or_default()
 }
 
-#[allow(dead_code)] // consumer is the M3 warning UI; exercised by tests now
 pub fn save_state(state: &PolicyState) {
     let Some(dir) = crate::events::state_dir() else {
         return;

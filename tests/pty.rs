@@ -534,6 +534,208 @@ fn prompt_ctrl_c_cancels_on_real_tty() {
     );
 }
 
+// ---- M3 warning UI: the flagship pair, end-to-end ----
+
+/// A repo with one committed file that has uncommitted modifications —
+/// exactly the context in which `git reset --hard` destroys work.
+fn make_repo(s: &Session, dirty: bool) -> PathBuf {
+    let repo = s.dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+    std::fs::write(repo.join("tracked.txt"), "clean\n").unwrap();
+    git(&["add", "tracked.txt"]);
+    git(&[
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-q",
+        "-m",
+        "c",
+    ]);
+    if dirty {
+        std::fs::write(repo.join("tracked.txt"), "DIRTY\n").unwrap();
+    }
+    repo
+}
+
+#[test]
+fn warn_mode_dirty_reset_cancel_has_zero_side_effects() {
+    // M3 acceptance, flagship half 1: dirty `git reset --hard` warns with
+    // the facts named; cancel runs nothing and the dirty work survives.
+    // The 300 ms pause proves the watchdog retires for warning prompts too.
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn")]);
+    let repo = make_repo(&s, true);
+    let cd = format!("cd {repo:?}\recho marker-w1\r");
+    let out = s.run_staged(&[
+        ("PTYTEST%", 0, &cd),
+        ("marker-w1", 0, "git reset --hard\r"),
+        ("[e]dit", 300, "cecho marker-w2\r"),
+    ]);
+    assert!(
+        out.contains("discard uncommitted changes"),
+        "warning anatomy line missing:\n{out}"
+    );
+    assert!(
+        out.contains("1 modified tracked file"),
+        "context facts not named:\n{out}"
+    );
+    assert!(
+        out.contains("marker-w2"),
+        "session did not continue:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+        "DIRTY\n",
+        "cancel must leave the dirty work untouched"
+    );
+    let log = s.events_log();
+    assert!(
+        log.contains("\"decision\":\"warn\"")
+            && log.contains("policy.dirty_work_at_risk")
+            && log.contains("\"outcome\":\"cancelled\""),
+        "cancelled warning not recorded:\n{log}"
+    );
+}
+
+#[test]
+fn warn_mode_dirty_reset_run_once_executes_unchanged() {
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn")]);
+    let repo = make_repo(&s, true);
+    let cd = format!("cd {repo:?}\recho marker-r1\r");
+    let out = s.run_staged(&[
+        ("PTYTEST%", 0, &cd),
+        ("marker-r1", 0, "git reset --hard\r"),
+        ("[e]dit", 0, "recho marker-r2\r"),
+    ]);
+    assert!(
+        out.contains("marker-r2"),
+        "session did not continue:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+        "clean\n",
+        "run-once must execute the original command unchanged"
+    );
+    let log = s.events_log();
+    assert!(
+        log.contains("\"outcome\":\"ran_unchanged\""),
+        "run-once outcome not recorded:\n{log}"
+    );
+}
+
+#[test]
+fn warn_mode_edit_restores_the_exact_buffer_to_zle() {
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn")]);
+    let repo = make_repo(&s, true);
+    let cd = format!("cd {repo:?}\recho marker-e1\r");
+    // e → the original buffer must come back editable; Ctrl-U kills it and a
+    // replacement line proves ZLE was live for editing.
+    let out = s.run_staged(&[
+        ("PTYTEST%", 0, &cd),
+        ("marker-e1", 0, "git reset --hard\r"),
+        ("[e]dit", 0, "e"),
+        ("git reset --hard", 200, "\u{15}echo edited-ok\r"),
+    ]);
+    assert!(out.contains("edited-ok"), "editing did not work:\n{out}");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+        "DIRTY\n",
+        "edit must not run the command"
+    );
+    // The command text appears at least twice: once as typed, once redrawn
+    // in ZLE after exit 11 restored the buffer.
+    assert!(
+        out.matches("git reset --hard").count() >= 2,
+        "restored buffer not redrawn:\n{out}"
+    );
+    let log = s.events_log();
+    assert!(
+        log.contains("\"outcome\":\"edited\""),
+        "edited outcome not recorded:\n{log}"
+    );
+}
+
+#[test]
+fn warn_mode_clean_reset_is_silently_allowed() {
+    // M3 acceptance, flagship half 2 (the counterfactual): the identical
+    // command on a clean tree passes without a word.
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn")]);
+    let repo = make_repo(&s, false);
+    let cd = format!("cd {repo:?}\recho marker-s1\r");
+    let out = s.run_staged(&[
+        ("PTYTEST%", 0, &cd),
+        ("marker-s1", 0, "git reset --hard\recho marker-s2\r"),
+    ]);
+    assert!(
+        out.contains("marker-s2"),
+        "session did not continue:\n{out}"
+    );
+    assert!(
+        !out.contains("[e]dit"),
+        "clean-tree reset must not warn:\n{out}"
+    );
+    let log = s.events_log();
+    assert!(
+        log.contains("policy.context_clear"),
+        "silent allow not recorded with its reason:\n{log}"
+    );
+}
+
+#[test]
+fn warn_mode_benign_commands_stay_silent() {
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn")]);
+    let out = s.run(&["echo warn-benign-ok"]);
+    assert!(out.contains("warn-benign-ok"));
+    assert!(
+        !out.contains("oopsinput:"),
+        "benign command provoked output:\n{out}"
+    );
+}
+
+#[test]
+fn arrow_keys_at_a_prompt_leave_no_stray_bytes() {
+    // Regression (bughunt 2026-08-06, fixed in the M3 key-reader rebuild):
+    // an arrow key at the prompt was read as ESC + leftover bytes, and the
+    // leftovers ("[A") leaked into the next ZLE buffer as stray characters.
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "suggest")]);
+    let out = s.run_staged(&[
+        (
+            "PTYTEST%",
+            0,
+            "alias oopspeciala='echo WRONG-$((8+9))'\recho marker-a1\r",
+        ),
+        ("marker-a1", 0, "oopspecialaq\r"),
+        // Up arrow first — must be consumed whole and ignored — then n.
+        ("[y/n]", 200, "\u{1b}[Anecho marker-a2\r"),
+    ]);
+    assert!(
+        out.contains("command not found: oopspecialaq"),
+        "n after arrow did not run the original:\n{out}"
+    );
+    assert!(
+        out.contains("marker-a2"),
+        "session did not continue:\n{out}"
+    );
+    assert!(
+        !out.contains("[Aecho") && !out.contains("command not found: [A"),
+        "arrow-key bytes leaked into the next buffer:\n{out}"
+    );
+}
+
 #[test]
 fn double_source_is_harmless() {
     let s = Session::new(None, &[]);

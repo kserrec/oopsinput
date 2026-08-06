@@ -1,14 +1,16 @@
 //! oopsinput — catches commands that probably aren't what you meant, before they run.
 //!
-//! M1: real proposal intake from the zsh plugin, shadow-mode analysis (always
-//! allow, record structural event), self-watchdog deadline so a wedged process
-//! can never hold the user's shell. See SPEC.md (canonical) and PLAN.md.
+//! The full deterministic pipeline: proposal intake from the zsh plugin,
+//! lexer, typo/danger/context layers, policy decision, and the two visible
+//! interventions — the L1 typo prompt and the L2+ warning prompt — all under
+//! a self-watchdog deadline so a wedged process can never hold the user's
+//! shell. See SPEC.md (canonical) and PLAN.md.
 //!
 //! Exit code contract (the zsh plugin treats anything unexpected as fail-open allow):
 //!   0  = allow, run the original buffer unchanged
-//!   10 = replace buffer with text from fd 3 and run it   (M2, typo `y`)
-//!   11 = restore original buffer to ZLE for editing       (M3)
-//!   12 = cancel, run nothing                              (M3)
+//!   10 = replace buffer with text from fd 3 and run it   (typo `y`)
+//!   11 = restore original buffer to ZLE for editing       (warning `e`)
+//!   12 = cancel, run nothing                              (warning `c`, typo Ctrl-C)
 //!   2  = usage error
 //!   1  = internal error (plugin fails open)
 
@@ -133,8 +135,7 @@ fn check(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     };
 
-    // Shadow analysis: lex for structure and honest uncertainty (SPEC §13);
-    // the decision layers land next — for now always allow, always record.
+    // Lex for structure and honest uncertainty (SPEC §13).
     let lexed = lexer::lex(&proposal.buffer);
     let cmd_expands = lexer::command_words(&lexed)
         .first()
@@ -149,9 +150,7 @@ fn check(args: &[String]) -> ExitCode {
     let suggestion = layers::typo::analyze(proposal.res_kind, &lexed, &proposal.names);
 
     // L2 danger layer (SPEC §5-L2): deterministic candidate marking. It never
-    // intervenes on its own — policy (M3) will consume it; until then its
-    // codes feed the shadow event log so the pilot can rank rules on real
-    // usage before any of them go live.
+    // intervenes on its own — policy consumes it below.
     let danger = layers::danger::analyze(&lexed);
 
     // L3 context layer (SPEC §5-L3, deterministic half): fresh git and
@@ -173,24 +172,23 @@ fn check(args: &[String]) -> ExitCode {
     let duration_us = started.elapsed().as_micros();
 
     // Visible intervention (suggest mode and up): the L1 prompt. Otherwise
-    // the policy matrix decides. Its warn/confirm verdicts cannot be shown
-    // until the warning UI (next M3 item) exists, so they are recorded as
-    // observe with the policy reason preserved — that preserved reason is the
-    // shadow conversion the report reads — and without touching the
-    // intervention budget (nothing was actually shown).
-    let (decision_str, reason_code, exit_code) = match &suggestion {
-        Some(s) if cfg.mode != policy::Mode::Shadow => typo_intervention(&proposal.buffer, s),
+    // the policy matrix decides; in warn/confirm modes a gated warn/confirm
+    // verdict reaches the warning prompt, everything else records silently
+    // with the policy reason preserved (the shadow conversion).
+    let (decision_str, reason_code, exit_code, outcome) = match &suggestion {
+        Some(s) if cfg.mode != policy::Mode::Shadow => {
+            let (d, r, e) = typo_intervention(&proposal.buffer, s);
+            (d, r, e, None)
+        }
         _ => {
             let capped =
                 policy::cap_for_mode(policy::warranted(&danger, context.as_ref()), cfg.mode);
-            let recorded = match capped.verdict {
-                policy::Verdict::Warn | policy::Verdict::Confirm => policy::Assessment {
-                    verdict: policy::Verdict::Observe,
-                    reason: capped.reason,
-                },
-                _ => capped,
-            };
-            (recorded.verdict.as_str(), recorded.reason, 0u8)
+            match capped.verdict {
+                policy::Verdict::Warn | policy::Verdict::Confirm => {
+                    warning_intervention(capped, &danger, context.as_ref(), &cfg)
+                }
+                _ => (capped.verdict.as_str(), capped.reason, 0u8, None),
+            }
         }
     };
 
@@ -218,6 +216,7 @@ fn check(args: &[String]) -> ExitCode {
         ctx_target_entries: context
             .as_ref()
             .and_then(|c| c.targets.iter().filter_map(|t| t.entries).max()),
+        outcome,
     });
 
     // The decision JSON is diagnostics; the exit code is the contract. Once
@@ -318,6 +317,151 @@ fn typo_intervention(
         }
         ui::TypoChoice::Original => ("allow", "typo.declined", 0),
         ui::TypoChoice::Cancel => ("cancel", "typo.cancelled", 12),
+    }
+}
+
+/// The L2+ warning flow (SPEC §7): gate through budget and cooldown, show
+/// the prompt, act on the answer, record the outcome. Returns (decision,
+/// reason, exit code, outcome). Exit codes: 11 = restore buffer for editing,
+/// 12 = cancel, 0 = run unchanged — the plugin holds up its end of each.
+fn warning_intervention(
+    assessment: policy::Assessment,
+    danger: &layers::danger::Analysis,
+    context: Option<&layers::context::Context>,
+    cfg: &policy::Config,
+) -> (&'static str, &'static str, u8, Option<&'static str>) {
+    let rule = policy::primary_code(danger);
+    let mut state = policy::load_state();
+    let gated = policy::apply_gates(
+        assessment,
+        rule,
+        danger.catastrophic,
+        &mut state,
+        events::now_ms(),
+        cfg.budget_per_hour,
+        true, // the prompt below is real: this intervention spends budget
+    );
+    if !matches!(
+        gated.verdict,
+        policy::Verdict::Warn | policy::Verdict::Confirm
+    ) {
+        // budget exhausted or rule in cooldown: degrade to shadow recording
+        policy::save_state(&state);
+        return (gated.verdict.as_str(), gated.reason, 0, None);
+    }
+
+    let lines = warning_lines(gated.reason, danger, context);
+    let pausing = gated.verdict == policy::Verdict::Confirm;
+    PROMPT_ACTIVE.store(true, Ordering::SeqCst);
+    let choice = ui::prompt_warning(&lines, pausing);
+    let (outcome, ran_unchanged, exit_code) = match choice {
+        ui::WarnChoice::Edit => ("edited", false, 11u8),
+        ui::WarnChoice::Cancel => ("cancelled", false, 12),
+        ui::WarnChoice::RunOnce => ("ran_unchanged", true, 0),
+    };
+    if let Some(code) = rule {
+        policy::record_outcome(&mut state, code, ran_unchanged, events::now_ms());
+    }
+    policy::save_state(&state);
+    (
+        gated.verdict.as_str(),
+        gated.reason,
+        exit_code,
+        Some(outcome),
+    )
+}
+
+/// Assemble the warning's message lines (SPEC §7 anatomy: what the command
+/// does, what it hits, why the current context is unusual — the UI adds the
+/// keys). Trusted template text plus escaped untrusted fragments only.
+fn warning_lines(
+    reason: &str,
+    danger: &layers::danger::Analysis,
+    context: Option<&layers::context::Context>,
+) -> Vec<String> {
+    let has = |code: &str| danger.codes.contains(&code);
+    let git = context.and_then(|c| c.git.as_ref());
+    let targets = || -> String {
+        let joined = danger
+            .targets
+            .iter()
+            .map(|t| format!("'{}'", ui::escape_for_display(t)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if joined.is_empty() {
+            "its target".to_string()
+        } else {
+            joined
+        }
+    };
+    match reason {
+        "policy.dirty_work_at_risk" => {
+            let action = if has("git.reset_hard") {
+                "git reset --hard will discard uncommitted changes in tracked files"
+            } else {
+                "git clean -f will delete untracked files"
+            };
+            let mut facts = Vec::new();
+            if let Some(d) = git.and_then(|g| g.dirty)
+                && d > 0
+            {
+                facts.push(format!(
+                    "{d} modified tracked file{}",
+                    if d == 1 { "" } else { "s" }
+                ));
+            }
+            if git.and_then(|g| g.untracked) == Some(true) {
+                facts.push("untracked files present".to_string());
+            }
+            vec![
+                action.to_string(),
+                format!("right now: {}", facts.join(", ")),
+            ]
+        }
+        "policy.main_branch_force" => vec![
+            "force-push will rewrite the remote branch's history".to_string(),
+            "the current branch is a primary branch (main/master/trunk)".to_string(),
+        ],
+        "policy.target_context" => {
+            let t = context.map(|c| c.targets.as_slice()).unwrap_or(&[]);
+            let why = if has("fs.target_cwd") || t.iter().any(|t| t.is_cwd) {
+                "the target is the current directory itself"
+            } else if has("fs.target_parent") || t.iter().any(|t| t.is_parent) {
+                "the target is the parent of the current directory"
+            } else {
+                "the target does not exist, but a similarly-named neighbor does — typo?"
+            };
+            vec![
+                format!("recursive delete of {}", targets()),
+                why.to_string(),
+            ]
+        }
+        "policy.blockdev_write" => {
+            let dev = danger
+                .targets
+                .iter()
+                .find(|t| t.starts_with("/dev/"))
+                .map(|t| ui::escape_for_display(t))
+                .unwrap_or_else(|| "a raw disk device".to_string());
+            vec![
+                format!("this writes directly to {dev}"),
+                "everything currently stored there becomes unrecoverable".to_string(),
+            ]
+        }
+        "policy.direct_catastrophic" => {
+            let what = if has("fs.target_home") {
+                "your entire home directory"
+            } else {
+                "the filesystem root"
+            };
+            vec![
+                format!("this recursively deletes {what}"),
+                "there is no undo".to_string(),
+            ]
+        }
+        _ => vec![format!(
+            "high-consequence command flagged by policy ({reason})"
+        )],
     }
 }
 
@@ -567,6 +711,39 @@ mod tests {
 
     // Mode vocabulary and the SPEC §15 config surface are policy.rs's
     // domain now — their tests moved there with the code.
+
+    #[test]
+    fn warning_lines_name_the_facts() {
+        use layers::context::{Context, GitFacts};
+        // flagship: dirty reset — counts named, no raw command text needed
+        let danger = layers::danger::analyze_with_home(&lexer::lex("git reset --hard"), None);
+        let ctx = Context {
+            git: Some(GitFacts {
+                detached: false,
+                branch_main_like: false,
+                dirty: Some(17),
+                untracked: Some(true),
+            }),
+            targets: vec![],
+        };
+        let lines = warning_lines("policy.dirty_work_at_risk", &danger, Some(&ctx));
+        let joined = lines.join("\n");
+        assert!(joined.contains("git reset --hard"), "{joined}");
+        assert!(joined.contains("17 modified tracked files"), "{joined}");
+        assert!(joined.contains("untracked files present"), "{joined}");
+
+        // catastrophic home delete names what dies
+        let danger = layers::danger::analyze_with_home(&lexer::lex("rm -rf ~"), None);
+        let joined = warning_lines("policy.direct_catastrophic", &danger, None).join("\n");
+        assert!(joined.contains("home directory"), "{joined}");
+
+        // hostile target text is escaped before display (SPEC §9-5)
+        let danger =
+            layers::danger::analyze_with_home(&lexer::lex("rm -rf ./x\u{1b}EVIL\u{7}y"), None);
+        let joined = warning_lines("policy.target_context", &danger, None).join("\n");
+        assert!(!joined.contains('\u{1b}'), "raw ESC in warning: {joined:?}");
+        assert!(joined.contains("./x^[EVIL^Gy"), "{joined}");
+    }
 
     #[test]
     fn find_in_path_finds_sh() {

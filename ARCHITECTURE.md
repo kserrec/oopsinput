@@ -13,13 +13,12 @@ How it relates to the other documents:
 - **This document** covers *how the code works right now*, in depth through
   the M2 state: command capture in zsh, the conservative lexer, the typo
   layer with its single-key prompt and correction channel, event logging, and
-  the test harness that proves buffers survive intact. Two M3 layers have
-  since landed and are summarized in §9 pending this document's next full
-  refresh: the danger layer (`src/layers/danger.rs`, curated rule tables that
-  mark candidates) and the deterministic half of the context layer
-  (`src/layers/context.rs`, git/filesystem facts collected only for
-  candidates). Policy and the model layer remain unbuilt; nothing intervenes
-  on danger yet.
+  the test harness that proves buffers survive intact. The M3 core has since
+  landed and is summarized in §9 pending this document's next full refresh:
+  the danger layer, the deterministic half of the context layer, the policy
+  engine, and the L2+ warning UI (e/edit, c/cancel, r/run-once — live in
+  warn/confirm modes). The model layer and the recency relation remain
+  unbuilt.
 
 ## 1. The pieces
 
@@ -582,18 +581,13 @@ Short versions — SPEC has the full arguments:
 
 Honest about what today's code does *not* do:
 
-- **Nothing intervenes on danger yet.** The danger and context layers now
-  *recognize* high-consequence commands and record their evidence, but the
-  policy engine that turns evidence into warnings is unbuilt — so a
-  `rm -rf` that resolves is passed through silently and recorded with its
-  evidence codes, nothing more. The model layer (L4) is also unbuilt.
+- **Danger warnings are opt-in.** The default modes (shadow, suggest) never
+  show L2+ warnings — the policy verdict is recorded as shadow data instead.
+  Visible warnings/confirmations require `mode = warn` or `confirm`, and no
+  rule category is enabled that way by default until the M5 pilot supplies
+  evidence (SPEC §8 graduation). The model layer (L4) is unbuilt.
 - **Only the first line of a multi-line command is analyzed.**
   Continuation lines typed at the `PS2` prompt pass through untouched.
-- **A multi-byte keypress at the prompt leaves stray bytes behind.** Arrow
-  keys send several bytes; the prompt consumes one (answering the question
-  safely, as "run the original") and the rest reach the next command line as
-  stray characters. Recorded against the M3 warning-UI work, which rebuilds
-  this key handling.
 - **Linux and interactive zsh only.** The `/dev/fd/3` mechanism works on the
   BSDs too, but nothing else is tested there, and there is no bash adapter.
 - **The candidate scan is bounded, not exhaustive.** Directory entries and
@@ -631,7 +625,15 @@ in their module headers:
   warn-once diagnostics. The watchdog deadline now comes from
   `det_timeout_ms`.
 
-Still ahead in M3: the warning UI and the recency relation
-(plugin-supplied). Files SPEC §16 lists for later milestones (`model.rs`,
-`layers/infer.rs`) don't exist yet by design — modules are created when
-their milestone starts.
+- **The L2+ warning UI** (in `src/ui.rs` and `src/main.rs`) — the SPEC §7
+  warning anatomy on /dev/tty with e/edit (exit 11, exact buffer restored to
+  ZLE), c/cancel (exit 12, nothing runs), r/run-once. Warnings are advisory
+  (timeout runs the command); confirmations pause (timeout cancels).
+  Outcomes are recorded in the event log and feed the per-rule cooldown; the
+  intervention budget is spent only when a prompt is actually shown. The
+  prompt key reader now consumes complete escape sequences, fixing the
+  stray-bytes-after-arrow-keys bug (bughunt 2026-08-06).
+
+Still ahead in M3: the recency relation (plugin-supplied). Files SPEC §16
+lists for later milestones (`model.rs`, `layers/infer.rs`) don't exist yet
+by design — modules are created when their milestone starts.
