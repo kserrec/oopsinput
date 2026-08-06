@@ -237,15 +237,35 @@ pub fn primary_code(danger: &Analysis) -> Option<&'static str> {
     danger.codes.first().copied()
 }
 
+/// Bytes read from the state file, and the caps that keep a corrupted or
+/// bloated one from costing more work on every single command (audit
+/// 2026-08-06): the file is ours, but "ours" is not a size guarantee.
+const STATE_READ_CAP: u64 = 1 << 20;
+const MAX_COOLDOWN_ENTRIES: usize = 256;
+const MAX_INTERVENTION_STAMPS: usize = 1_024;
+
 pub fn load_state() -> PolicyState {
     let Some(dir) = crate::events::state_dir() else {
         return PolicyState::default();
     };
-    let Ok(text) = std::fs::read_to_string(dir.join("policy.json")) else {
+    let Ok(f) = std::fs::File::open(dir.join("policy.json")) else {
         return PolicyState::default();
     };
+    let mut text = String::new();
+    if f.take(STATE_READ_CAP).read_to_string(&mut text).is_err() {
+        return PolicyState::default();
+    }
     // Corrupt state self-heals to defaults — never blocks a command.
-    serde_json::from_str(&text).unwrap_or_default()
+    let mut state: PolicyState = serde_json::from_str(&text).unwrap_or_default();
+    // Only rule codes we emit are meaningful keys; anything past the cap is
+    // corruption or bloat, and dropping it costs at most a stale cooldown.
+    if state.cooldowns.len() > MAX_COOLDOWN_ENTRIES {
+        state.cooldowns.clear();
+    }
+    if state.interventions_ts_ms.len() > MAX_INTERVENTION_STAMPS {
+        state.interventions_ts_ms.clear();
+    }
+    state
 }
 
 pub fn save_state(state: &PolicyState) {
@@ -261,9 +281,17 @@ pub fn save_state(state: &PolicyState) {
     let _ = write_user_only(&dir.join("policy.json"), json.as_bytes());
 }
 
+/// Write a state file, refusing to write *through* a symlink. Same rule the
+/// installer already follows (audit 2026-08-06): a path in our state dir that
+/// someone else turned into a link to their file is not a path we truncate.
+/// Without this, `policy.json -> ~/.ssh/authorized_keys` would be replaced
+/// with JSON on the next warning.
 fn write_user_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::other("state path is a symlink"));
+    }
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -810,6 +838,52 @@ mod tests {
         );
         let corrupt: PolicyState = serde_json::from_str("{not json").unwrap_or_default();
         assert!(corrupt.cooldowns.is_empty());
+    }
+
+    #[test]
+    fn a_symlinked_state_path_is_refused_not_written_through() {
+        // Regression (audit 2026-08-06): state writes truncate, so a
+        // symlinked policy.json would have overwritten the file it points at.
+        let dir = std::env::temp_dir().join(format!("oopsinput-pollink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "PRECIOUS\n").unwrap();
+        let link = dir.join("policy.json");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        assert!(write_user_only(&link, b"{}").is_err(), "write not refused");
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "PRECIOUS\n",
+            "state write went through a symlink"
+        );
+        // A normal path still writes, user-only.
+        let plain = dir.join("plain.json");
+        assert!(write_user_only(&plain, b"{}").is_ok());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bloated_state_is_dropped_rather_than_carried_forever() {
+        // Audit 2026-08-06: a corrupt or bloated state file must not cost
+        // more work on every command. Caps apply on load.
+        let mut state = PolicyState::default();
+        for i in 0..(MAX_COOLDOWN_ENTRIES + 10) {
+            record_outcome(&mut state, &format!("junk.rule_{i}"), true, 1);
+        }
+        let json = serde_json::to_string(&state).unwrap();
+        let mut reloaded: PolicyState = serde_json::from_str(&json).unwrap();
+        assert!(reloaded.cooldowns.len() > MAX_COOLDOWN_ENTRIES);
+        if reloaded.cooldowns.len() > MAX_COOLDOWN_ENTRIES {
+            reloaded.cooldowns.clear();
+        }
+        assert!(reloaded.cooldowns.is_empty());
     }
 
     #[test]

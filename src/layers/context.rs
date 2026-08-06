@@ -153,13 +153,37 @@ fn read_capped(path: &Path, cap: u64) -> Option<String> {
 /// Run `git status` read-only and bounded: fixed argv, no shell, hard
 /// timeout (SPEC §9-1). `--no-optional-locks` keeps it from touching the
 /// index. Returns (dirty tracked files, untracked present).
+///
+/// SECURITY (audit 2026-08-06, proven): the repository we run in is not
+/// necessarily the user's own work — a directory tree extracted from an
+/// archive, or a fixture repo committed inside another project, carries its
+/// own `.git/config`. `git status` *executes* `core.fsmonitor` from that
+/// config, so merely typing `rm -rf ./build` in such a directory ran the
+/// stranger's program: analysis caused execution, which SPEC §9-1 forbids
+/// outright. Every known config key that makes git spawn something is
+/// neutralized on the command line, where `-c` outranks repo config.
 fn git_status(git: &Path, cwd: &Path) -> Option<(u32, bool)> {
     let mut cmd = std::process::Command::new(git);
-    cmd.args(["--no-optional-locks", "status", "--porcelain"])
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+    cmd.args([
+        "-c",
+        "core.fsmonitor=", // proven exec vector: repo config runs this program
+        "-c",
+        "core.hooksPath=/dev/null", // status runs no hooks today; keep it that way
+        "-c",
+        "core.pager=cat", // never hand our output to a repo-chosen program
+        "--no-optional-locks",
+        "status",
+        "--porcelain",
+    ])
+    .current_dir(cwd)
+    // System/global config can also carry these keys; the repo is the
+    // untrusted one, but nothing in `status --porcelain` needs either file.
+    .env("GIT_CONFIG_NOSYSTEM", "1")
+    .env("GIT_TERMINAL_PROMPT", "0")
+    .env("GIT_PAGER", "cat")
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::null());
     let out = run_capture(cmd, GIT_TIMEOUT_MS, GIT_OUTPUT_CAP)?;
     let capped = out.len() as u64 >= GIT_OUTPUT_CAP;
     let text = String::from_utf8_lossy(&out);
@@ -415,6 +439,48 @@ mod tests {
         let g = collect_at(&dir, &[], None).git.unwrap();
         assert_eq!(g.dirty, None, "no binary → no claim, not zero");
         assert_eq!(g.untracked, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hostile_repo_config_cannot_make_analysis_execute_anything() {
+        // Regression (audit 2026-08-06, proven exploitable): `git status`
+        // executes `core.fsmonitor` from the repository's own config, so
+        // analyzing ANY dangerous-looking command inside a directory whose
+        // .git/config came from someone else (an extracted archive, a
+        // fixture repo committed inside another project) ran that
+        // stranger's program. SPEC §9-1: analysis never executes anything.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = make_repo("hostile");
+        let marker = dir.join("EXECUTED");
+        let evil = dir.join("evil.sh");
+        fs::write(
+            &evil,
+            format!("#!/bin/sh\ntouch {}\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&evil, fs::Permissions::from_mode(0o755)).unwrap();
+        git_in(&dir, &["config", "core.fsmonitor", evil.to_str().unwrap()]);
+
+        // Sanity: the trap is armed — plain `git status` does run it.
+        let _ = Command::new(real_git())
+            .args(["status", "--porcelain"])
+            .current_dir(&dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        assert!(
+            marker.exists(),
+            "fixture is not actually hostile — this test would prove nothing"
+        );
+        fs::remove_file(&marker).unwrap();
+
+        // Our collector must not.
+        let _ = collect_at(&dir, &[], Some(&real_git()));
+        assert!(
+            !marker.exists(),
+            "analysis executed a program from the repository's config"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

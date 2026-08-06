@@ -85,11 +85,18 @@ fn append_to(dir: &std::path::Path, event: &Event) {
     // and O_APPEND atomicity holds per write call — a separate newline write
     // would let two processes interleave and corrupt the JSONL stream.
     line.push('\n');
+    // Never append *through* a symlink someone else placed in our state dir
+    // (audit 2026-08-06; same rule the installer follows): the log would
+    // otherwise grow onto their chosen file.
+    let log = dir.join("events.jsonl");
+    if std::fs::symlink_metadata(&log).is_ok_and(|m| m.file_type().is_symlink()) {
+        return;
+    }
     let Ok(mut f) = OpenOptions::new()
         .append(true)
         .create(true)
         .mode(0o600)
-        .open(dir.join("events.jsonl"))
+        .open(&log)
     else {
         return;
     };
@@ -144,6 +151,43 @@ mod tests {
                 "corrupt JSONL line: {line}"
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_symlinked_log_path_is_refused_not_written_through() {
+        // Regression (audit 2026-08-06): appending through a symlink placed
+        // in our state dir would grow the log onto someone else's file.
+        let dir = std::env::temp_dir().join(format!("oopsinput-evlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "PRECIOUS\n").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("events.jsonl")).unwrap();
+
+        append_to(
+            &dir,
+            &Event {
+                ts_ms: 1,
+                decision: "allow",
+                reason_code: "shadow.observed",
+                evidence: vec![],
+                res_kind: "command",
+                cmd_expands: false,
+                buffer_bytes: 1,
+                word_count: 1,
+                duration_us: 1,
+                ctx_git_dirty: None,
+                ctx_target_entries: None,
+                outcome: None,
+            },
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "PRECIOUS\n",
+            "the log was written through a symlink"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

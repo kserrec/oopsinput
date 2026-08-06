@@ -21,7 +21,20 @@ Standing rules carried out of archived milestones:
   in M2 for the fd-3 correction channel; applies to every later milestone).
 - **Every external helper: absolute path, fixed argv, hard timeout** — never
   resolved through $PATH (audit 2026-08-06; see M6's SECURITY.md item for
-  why).
+  why). **And its own configuration is untrusted input**: a helper that
+  reads config from the working directory can be told by that config to
+  execute something (audit 2026-08-06, proven: `git status` runs
+  `core.fsmonitor` from the repo's `.git/config`, so analyzing `rm -rf
+  ./build` inside an extracted archive ran a stranger's program). Neutralize
+  every exec-capable key on the command line, where `-c` outranks repo
+  config. Any future helper gets the same treatment before it ships.
+- **Displayed text goes through the escaper unconditionally** (SPEC §9-4) —
+  no exemption for text a distant charset check is believed to have made
+  safe; that rule breaks silently when the distant check is edited (audit
+  2026-08-06, recency words).
+- **Never write through a symlink in our own state dir** — check
+  `symlink_metadata` before any create/truncate/append (audit 2026-08-06;
+  same rule install.zsh already followed).
 - **Word boundaries follow the shell, not Unicode**: `lexer::is_shell_whitespace`
   (space/tab/newline only) governs every decision about where a word starts
   or ends (bughunt 2026-08-06).
@@ -141,7 +154,18 @@ Standing rules carried out of archived milestones:
       repo's ./bin added by direnv); document the external-helper rule that
       follows from it (see header). Also record: install.zsh leaves any
       existing path (dangling symlinks included) untouched rather than
-      writing through it.
+      writing through it, and the binary refuses to write through a symlink
+      in its own state dir.
+      **Must also document the residual git-helper risk** (audit
+      2026-08-06): we neutralize the config keys that make `git status`
+      execute something (`core.fsmonitor`, hooks path, pager), but that
+      defense is a curated list — a future git release could add a new
+      exec-capable key. State plainly that oopsinput runs `git status` in
+      whatever directory the user is standing in, and that a repository
+      directory obtained from someone else (extracted archive, committed
+      fixture repo) is untrusted input. The structural fix — reading the
+      index ourselves, no git spawn at all — is a v2 candidate, not a v1
+      promise.
 - [ ] `oopsinput doctor` covers: plugin installed, widgets wrapped, config
       valid, model reachable (optional), state perms
 - [ ] Clean-machine test: fresh user → install → shadow → report → uninstall

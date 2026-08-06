@@ -396,17 +396,21 @@ pub fn warning_lines(
                 action.to_string(),
                 format!("right now: {}", facts.join(", ")),
             ];
-            // "right after git diff" (SPEC §5-L3): name the previous command
-            // when its words were clean enough to survive sanitization —
-            // charset-enforced in proposal.rs, so inert on a terminal.
+            // "right after git diff" (SPEC §5-L3): name the previous command.
+            // These words are charset-restricted twice (plugin, then parser),
+            // and escaped here anyway — SPEC §9-4 says *all* displayed
+            // untrusted text goes through the escaper, with no exemption for
+            // text believed to be safe already (audit 2026-08-06: a rule that
+            // holds only while a distant charset check stays correct is a
+            // rule that breaks silently when that check is edited).
             if let Some(prev) = recency.first()
                 && prev.age == 1
                 && prev.cmd != "_"
             {
-                let mut line = format!("previous command: {}", prev.cmd);
+                let mut line = format!("previous command: {}", escape_for_display(&prev.cmd));
                 if prev.sub != "_" {
                     line.push(' ');
-                    line.push_str(&prev.sub);
+                    line.push_str(&escape_for_display(&prev.sub));
                 }
                 lines.push(line);
             }
