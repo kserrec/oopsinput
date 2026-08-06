@@ -84,9 +84,21 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       pre-completes the "model reachable" part of M6's doctor item. Verified
       live against this machine's Ollama: present / not-pulled / disabled
       all correct.
-- [ ] Prompt assembly: trusted evidence / untrusted command separation; schema-
+- [x] Prompt assembly: trusted evidence / untrusted command separation; schema-
       constrained output via Ollama structured outputs; validation → invalid =
-      unavailable evidence
+      unavailable evidence — ✅ 2026-08-06, layers/infer.rs. The user message
+      is one JSON document: computed facts under "evidence" (closed vocab +
+      numbers only, pinned by a test that walks the subtree), every human
+      string under an `untrusted_` key; serde serialization keeps hostile
+      buffers inert. Validator rejects unknown vocab, unknown fields, >240-
+      char reasons (chars, not bytes); every failure → a stable
+      `model.unreachable/timeout/invalid/error` code so the log can tell
+      fallback from success. `consult()` is built and tested (16 tests, mock
+      TCP servers) plus probed live against qwen3:1.7b — schema-valid
+      structured output end-to-end — but NOT yet called from check: the gate
+      is the next item, which must also give the model path its own watchdog
+      deadline (SPEC §6 — today's watchdog would kill a 2 s model call at
+      det_timeout_ms).
 - [ ] Candidate gate: L4 only when L2 candidate ∧ L3 ambiguous; <1% invocation
       target measured on replayed history
 - [ ] Deterministic fallback path tested: Ollama down, slow, malformed, lying

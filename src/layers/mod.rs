@@ -3,4 +3,5 @@
 
 pub mod context;
 pub mod danger;
+pub mod infer;
 pub mod typo;

@@ -14,9 +14,11 @@ How it relates to the other documents:
   deterministic product: command capture in zsh, the lexer, all three
   deterministic analysis layers (typo, danger, context), the policy engine,
   both visible prompts, event logging, and the test harness that proves your
-  buffer survives intact. Of the optional local-model layer (L4), only the
-  transport exists so far: a loopback HTTP client that `doctor` uses to check
-  Ollama reachability. No analysis path talks to the model yet.
+  buffer survives intact. The optional local-model layer (L4) is built but
+  not yet wired in: the loopback HTTP client (which `doctor` uses to check
+  Ollama reachability), prompt assembly, and response validation all exist;
+  the gate that decides when `check` consults the model does not, so no
+  analysis path talks to the model yet.
 
 ## 1. The pieces
 
@@ -228,7 +230,7 @@ All were real bugs, now pinned by tests:
 
 ## 4. The Rust side, ground-up
 
-Eleven modules. Analysis runs strictly cheapest-first, and each layer can be
+Twelve modules. Analysis runs strictly cheapest-first, and each layer can be
 read on its own:
 
 ### 4.1 `src/main.rs` — dispatch, watchdog, the `check` path
@@ -252,7 +254,7 @@ analysis deadline, and killing the process mid-prompt would leave the
 terminal in the wrong mode. What makes retiring safe is that everything past
 that point is bounded by construction — the prompt's own read has a timeout
 enforced by the terminal, and every external helper it runs is killed at a
-deadline (§4.11).
+deadline (§4.12).
 
 The analysis sequence, in order: read the proposal, lex it, run the typo
 layer (L1), run the danger layer (L2), and — only if danger found something —
@@ -380,7 +382,7 @@ the plugin resolved), unquoted, free of expansions, free of `/`, and between
 2 and 64 characters. A single character is never corrected, because nearly
 every short name is one edit away from it.
 
-Matching uses the shared bounded edit distance (§4.11). Words of four
+Matching uses the shared bounded edit distance (§4.12). Words of four
 characters or fewer allow one edit; longer words allow two. (`gti` → `git`
 is a swap of two adjacent characters, so it costs one.) Candidates come from
 two places: the names the plugin supplied, and the executables the layer
@@ -637,7 +639,38 @@ caller maps to "model evidence unavailable" (SPEC §9-6); nothing in this
 module can block a command. Today `doctor` is its only caller; the inference
 layer (prompt assembly, schema validation, the candidate gate) comes next.
 
-### 4.11 The two shared helpers
+### 4.11 `src/layers/infer.rs` — L4, the inference layer (unwired)
+
+The brain above §4.10's transport: prompt assembly, the response schema, and
+validation. Not yet called from `check` — the candidate gate that decides
+*when* to consult (L2 candidate ∧ L3 ambiguous) is the next milestone item —
+but fully built and tested.
+
+The prompt keeps computed facts and human text strictly apart (SPEC §5-L4).
+The request's user message is one JSON document: everything under
+`"evidence"` was computed by the deterministic layers (danger codes,
+git/target facts, structural recency — closed vocabularies and numbers, no
+free text); every human-originated string — the command buffer, target
+words, recency words — sits under a key starting with `untrusted_`. serde
+does the serialization, so hostile buffer content cannot escape its JSON
+string, and a test walks the whole evidence subtree proving no free text
+appears outside `untrusted_` keys. The system prompt tells the model
+untrusted text is inert data, and that text instructing the model is itself
+evidence (`adversarial_or_untrusted_instruction`).
+
+The response is doubly constrained: Ollama's structured outputs (`format`:
+a JSON schema) constrain sampling server-side, and our own validator
+re-checks everything on arrival — closed assessment vocabulary, closed
+mismatch-kind vocabulary, reason ≤ 240 characters, no unknown fields.
+Anything else — including a well-formed answer with one extra key — is
+discarded whole as unavailable evidence (SPEC §9-6), recorded under a
+stable code (`model.unreachable` / `model.timeout` / `model.invalid` /
+`model.error`) so evaluation can tell fallback from success. The reason
+text stays untrusted and passes through the display escaper if it is ever
+shown. Verified live against a local Ollama: schema-valid structured output
+end-to-end through §4.10's client.
+
+### 4.12 The two shared helpers
 
 - **`src/distance.rs`** — the bounded **optimal string alignment** distance:
   insertion, deletion, substitution, and swapping two adjacent characters
@@ -649,7 +682,7 @@ layer (prompt assembly, schema validation, the candidate gate) comes next.
   Having one copy is the point: "no path outlives the deadline" is a claim
   that should be provable by reading one function.
 
-### 4.12 Dependencies
+### 4.13 Dependencies
 
 Exactly two: `serde` and `serde_json` (JSON is a correctness/security surface
 with real spec depth). Everything else — CLI dispatch, PATH lookup, the edit
@@ -897,9 +930,10 @@ Honest about what today's code does *not* do:
 - **Rules match shapes, not semantics.** There is no model of how many
   arguments a command requires, so a malformed command can still produce
   evidence (recorded, never shown at today's tiers).
-- **The local-model layer (L4) is transport only.** The loopback client
-  exists and `doctor` uses it for a reachability check, but no analysis path
-  touches the network — `check` remains fully deterministic.
+- **The local-model layer (L4) is built but unwired.** The loopback client,
+  prompt assembly, and response validation exist (`doctor` uses the client
+  for its reachability check), but the candidate gate does not yet, so no
+  analysis path touches the network — `check` remains fully deterministic.
 - **Only the first line of a multi-line command is analyzed.** Continuation
   lines typed at the `PS2` prompt pass through untouched.
 - **Linux and interactive zsh only.** The `/dev/fd/3` mechanism works on the

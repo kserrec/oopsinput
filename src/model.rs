@@ -277,17 +277,18 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testutil {
+    //! Mock-server helpers shared by this module's tests and the inference
+    //! layer's: every test runs against a real TCP peer on 127.0.0.1, so
+    //! the test *is* the probe — the failure mode is produced on a live
+    //! socket and watched, not simulated.
+
     use super::*;
     use std::net::TcpListener;
     use std::thread;
 
-    // Every test here runs against a real TCP peer on 127.0.0.1, so the
-    // test *is* the probe: the failure mode is produced on a live socket
-    // and watched, not simulated.
-
     /// One-shot server: accept one connection, run `f` on it.
-    fn serve_with<F: FnOnce(TcpStream) + Send + 'static>(f: F) -> SocketAddr {
+    pub(crate) fn serve_with<F: FnOnce(TcpStream) + Send + 'static>(f: F) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         thread::spawn(move || {
@@ -300,7 +301,7 @@ mod tests {
 
     /// One-shot server that reads the full request, then writes `response`
     /// (in `parts` writes with a small gap, to exercise incremental reads).
-    fn serve(response: &[u8], parts: usize) -> SocketAddr {
+    pub(crate) fn serve(response: &[u8], parts: usize) -> SocketAddr {
         let response = response.to_vec();
         serve_with(move |mut s| {
             read_full_request(&mut s);
@@ -316,7 +317,7 @@ mod tests {
     }
 
     /// Read our client's request: head, then exactly Content-Length bytes.
-    fn read_full_request(s: &mut TcpStream) {
+    pub(crate) fn read_full_request(s: &mut TcpStream) {
         let mut got = Vec::new();
         let mut buf = [0u8; 4096];
         let head_end = loop {
@@ -341,9 +342,17 @@ mod tests {
         }
     }
 
-    fn soon() -> Instant {
+    pub(crate) fn soon() -> Instant {
         Instant::now() + Duration::from_secs(2)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::*;
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn content_length_body_returned() {
