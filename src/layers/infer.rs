@@ -340,6 +340,7 @@ fn consult_at(
         Err(model::ModelError::Connect | model::ModelError::NotLoopback) => {
             Consult::Unavailable("model.unreachable")
         }
+        Err(model::ModelError::UntrustedPeer) => Consult::Unavailable("model.untrusted_peer"),
         Err(model::ModelError::Timeout) => Consult::Unavailable("model.timeout"),
         Err(_) => Consult::Unavailable("model.error"),
     }

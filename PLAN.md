@@ -35,6 +35,17 @@ Standing rules carried out of archived milestones:
   no exemption for text a distant charset check is believed to have made
   safe; that rule breaks silently when the distant check is edited (audit
   2026-08-06, recency words).
+- **Never send data to a loopback peer without checking who owns it**
+  (audit 2026-08-06): any local account can bind a free unprivileged port —
+  on a shared machine, 127.0.0.1:11434 with Ollama down is any other user's
+  for the taking, and the model request carries raw command text. After
+  connecting and before sending, `model::verify_peer` reads the peer's uid
+  from /proc/net/tcp (the established connection's own entry, so there is
+  no swap window) and requires our uid or a system account (< 1000); any
+  doubt refuses and falls back to deterministic-only. Pinned by
+  column-exact parser tests (uid sits right after retrnsmt, which also
+  parses as a number — an off-by-one trusts everyone) plus the live
+  same-uid socket suite. Any future loopback client gets the same check.
 - **Never write through a symlink in our own state dir** — check
   `symlink_metadata` before any create/truncate/append (audit 2026-08-06;
   same rule install.zsh already followed).
@@ -196,6 +207,14 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       (3) install.zsh leaves any existing path (dangling symlinks included)
       untouched rather than writing through it, and the binary refuses to
       write through a symlink in its own state dir.
+      (4) The loopback model peer check (audit 2026-08-06): with a model
+      configured, command text goes to 127.0.0.1:11434 only after the
+      peer's uid checks out (own user / system account). State the
+      residuals honestly: the uid<1000 heuristic assumes standard
+      SYS_UID_MAX, a hostile *system* account is out of scope (that's a
+      compromised machine), and a nonstandard Ollama setup (e.g. dual-stack
+      bind putting the socket in /proc/net/tcp6) fails closed to
+      deterministic-only — `doctor` names the refusal.
 - [ ] `oopsinput doctor` covers: plugin installed, widgets wrapped, config
       valid, model reachable (optional — ✅ landed with M4's model.rs),
       state perms

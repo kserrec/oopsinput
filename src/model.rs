@@ -34,6 +34,9 @@ pub(crate) fn ollama_addr() -> SocketAddr {
 pub(crate) enum ModelError {
     /// Refused before any I/O: the target address is not loopback.
     NotLoopback,
+    /// Refused before sending: the process on the other end of the
+    /// connection is not owned by a trusted uid (see `verify_peer`).
+    UntrustedPeer,
     /// Could not connect — the daemon is down or not listening.
     Connect,
     /// The overall deadline expired somewhere in the exchange.
@@ -72,6 +75,7 @@ pub(crate) fn post_json(
             ModelError::Connect
         }
     })?;
+    verify_peer(&stream, addr.port())?;
 
     let head = format!(
         "POST {path} HTTP/1.1\r\n\
@@ -86,6 +90,69 @@ pub(crate) fn post_json(
     write_all(&mut stream, body, deadline)?;
 
     read_response(&mut stream, deadline, max_body)
+}
+
+/// Human account uids start here on standard Linux (SYS_UID_MAX). Below it:
+/// root and system service accounts — the `ollama` systemd user, Docker's
+/// root-owned proxy.
+const FIRST_HUMAN_UID: u32 = 1000;
+
+/// SECURITY (audit 2026-08-06): anyone's process may bind 127.0.0.1:11434
+/// while Ollama is down — binding a free unprivileged port needs no rights —
+/// and this client used to send the raw command buffer to whatever answered.
+/// On a shared machine that hands gate-eligible command lines to any other
+/// local user squatting the port. So, after connecting and BEFORE sending a
+/// byte: find the accepted socket's entry in /proc/net/tcp (the peer's side
+/// of *this* connection — local = the service port, remote = our ephemeral
+/// port, so there is no window to swap in a different listener) and require
+/// its owner to be our own user or a system account (uid < 1000). Any doubt
+/// — unreadable table, missing entry, foreign human uid — refuses the
+/// consultation; the caller falls back to deterministic-only, the same as
+/// every other model failure. A hostile *system* account is outside the
+/// threat model (that is a compromised machine, which SPEC §9 states we do
+/// not resist).
+fn verify_peer(stream: &TcpStream, service_port: u16) -> Result<(), ModelError> {
+    let our_port = stream
+        .local_addr()
+        .map_err(|_| ModelError::UntrustedPeer)?
+        .port();
+    let table = std::fs::read_to_string("/proc/net/tcp").map_err(|_| ModelError::UntrustedPeer)?;
+    let peer_uid =
+        find_peer_uid(&table, service_port, our_port).ok_or(ModelError::UntrustedPeer)?;
+    // Our own uid, without libc: /proc/self is owned by this process's uid.
+    let self_uid = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self")
+            .map_err(|_| ModelError::UntrustedPeer)?
+            .uid()
+    };
+    if peer_uid_trusted(peer_uid, self_uid) {
+        Ok(())
+    } else {
+        Err(ModelError::UntrustedPeer)
+    }
+}
+
+fn peer_uid_trusted(peer_uid: u32, self_uid: u32) -> bool {
+    peer_uid == self_uid || peer_uid < FIRST_HUMAN_UID
+}
+
+/// Find the uid owning the peer's side of an established loopback
+/// connection in a /proc/net/tcp table: the row whose local address is
+/// 127.0.0.1:`service_port` and whose remote address is 127.0.0.1:`our_port`.
+/// Row layout: `sl local_address rem_address st ... uid ...` with addresses
+/// as `0100007F:PORT` (hex, uppercase) and uid at whitespace field 7.
+fn find_peer_uid(table: &str, service_port: u16, our_port: u16) -> Option<u32> {
+    let local = format!("0100007F:{service_port:04X}");
+    let remote = format!("0100007F:{our_port:04X}");
+    table.lines().skip(1).find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let _sl = fields.next()?;
+        if fields.next()? != local || fields.next()? != remote {
+            return None;
+        }
+        fields.nth(4)?.parse().ok() // skip st, tx_rx, tr_tm, retrnsmt → uid
+    })
 }
 
 /// Time left before `deadline`, or Timeout. Never returns zero (the strict
@@ -546,6 +613,47 @@ mod tests {
             ModelError::NotLoopback
         );
         assert!(start.elapsed() < Duration::from_millis(50)); // no connect attempt
+    }
+
+    // Peer verification (audit 2026-08-06). Every socket test in this file
+    // already exercises the accept path live — the mock servers run as our
+    // own uid, so a broken check would fail the whole suite. The refusal
+    // side can't be produced without a second uid, so its logic is pinned
+    // as pure functions on realistic /proc/net/tcp rows.
+
+    #[test]
+    fn peer_uid_parsed_from_realistic_proc_net_tcp() {
+        // Real row shape — uid is field 7, AFTER retrnsmt ("00000000"),
+        // which also parses as a number: an off-by-one here reads uid 0 and
+        // trusts everyone. This fixture (uid 1027) pins the exact column.
+        let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+             0: 0100007F:2CAB 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1027        0 12345 1 0000000000000000 100 0 0 10 0\n\
+             1: 0100007F:2CAB 0100007F:C350 01 00000000:00000000 00:00000000 00000000  1027        0 12346 1 0000000000000000 20 4 30 10 -1\n";
+        assert_eq!(find_peer_uid(table, 0x2CAB, 0xC350), Some(1027));
+        // The listener row (rem 0.0.0.0:0) must not match our connection.
+        assert_eq!(find_peer_uid(table, 0x2CAB, 0x1234), None);
+        assert_eq!(find_peer_uid("", 0x2CAB, 0xC350), None);
+    }
+
+    #[test]
+    fn peer_trust_policy() {
+        // own uid: trusted
+        assert!(peer_uid_trusted(1000, 1000));
+        // root (Docker proxy) and system accounts (ollama service): trusted
+        assert!(peer_uid_trusted(0, 1000));
+        assert!(peer_uid_trusted(999, 1000));
+        // another human user squatting the port: refused
+        assert!(!peer_uid_trusted(1001, 1000));
+        assert!(!peer_uid_trusted(1000, 1001));
+    }
+
+    #[test]
+    fn same_uid_peer_is_accepted_live() {
+        // The full verify_peer path against a real socket owned by us —
+        // the positive half of the audit fix, on a live /proc/net/tcp.
+        let addr = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 1);
+        let body = post_json(addr, "/", b"{}", soon(), 1024).unwrap();
+        assert_eq!(body, b"ok");
     }
 
     // decode_chunked edges not reachable through a socket round-trip:

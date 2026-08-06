@@ -625,7 +625,13 @@ needs no TLS, no redirects, no connection reuse). It refuses any non-loopback
 address before opening a socket, and the target is fixed at Ollama's default
 `127.0.0.1:11434` — deliberately not configurable, because SPEC §14 allows no
 network beyond loopback and an address knob would invite pointing it
-elsewhere.
+elsewhere. Loopback is not blindly trusted either (audit 2026-08-06): any
+local account can bind the port while Ollama is down, so after connecting
+and before sending a byte, the client reads the peer's uid from
+/proc/net/tcp — the established connection's own row, so the listener can't
+be swapped — and refuses anything not owned by the user or a system
+account. A refusal, like every other model failure, means
+deterministic-only.
 
 Its two disciplines mirror the external-helper rules:
 

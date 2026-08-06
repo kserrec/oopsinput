@@ -569,6 +569,10 @@ fn print_model_line(cfg: &policy::Config) {
         Err(model::ModelError::Connect) => println!(
             "  model:      {shown} — Ollama not reachable at 127.0.0.1:11434; runs deterministic-only"
         ),
+        Err(model::ModelError::UntrustedPeer) => println!(
+            "  model:      {shown} — the process on 127.0.0.1:11434 is not owned by you or a \
+             system account; refusing to talk to it (runs deterministic-only)"
+        ),
         Err(model::ModelError::Timeout) => println!(
             "  model:      {shown} — Ollama didn't answer within {} ms; runs deterministic-only",
             cfg.model_timeout_ms
