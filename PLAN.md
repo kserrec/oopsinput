@@ -22,8 +22,14 @@ clear on GitHub/crates.io/npm/PyPI/domains; `noops`, `oopsh`, `oopsys`,
       lost) when it lands mid-UTF-8-character — read bytes and truncate at a
       char boundary so oversized input is capped-and-analyzed instead
       (2026-08-05)
-- [ ] layers/typo.rs: exact resolution check, bounded edit distance vs PATH +
-      plugin-supplied names
+- [x] layers/typo.rs: exact resolution check, bounded edit distance vs PATH +
+      plugin-supplied names (2026-08-06: fires only on res=none with a literal
+      first word; bounded OSA distance ≤1/≤2 by length; PATH scanned by
+      readdir with x-bit verification and hard caps; plugin ships the
+      alias/function/builtin/resword pool NUL-separated on stdin, only on the
+      already-failing none path; shadow evidence `typo.candidate_d1/_d2`,
+      names never logged; typo path ~9 ms p50 in-binary, resolving path
+      unchanged ~240 µs)
 - [ ] ui.rs: /dev/tty single-key prompts; escaping pass (control/ANSI/OSC/bidi
       neutralized) + fuzz target
 - [ ] `y` runs correction / `n` runs original / Ctrl-C cancels; replacement

@@ -239,6 +239,36 @@ fn resolution_kinds_are_correctly_extracted() {
 }
 
 #[test]
+fn typo_near_alias_records_candidate_evidence() {
+    // End-to-end L1 shadow path: an unresolvable word one edit away from an
+    // alias must record typo-candidate evidence — and neither the typed word
+    // nor the candidate name may reach the log (evidence codes only).
+    let s = Session::new(None, &[]);
+    let out = s.run(&[
+        "alias oopspecialx='echo pty-aliased'",
+        "oopspecialxq", // none: distance 1 from the alias
+        "oopspecialx",  // resolves: must never produce typo evidence
+        "echo pty-typo-ok",
+    ]);
+    assert!(out.contains("pty-typo-ok"), "commands did not run:\n{out}");
+    assert!(
+        out.contains("pty-aliased"),
+        "alias itself did not run:\n{out}"
+    );
+
+    let log = std::fs::read_to_string(s.dir.join("state/events.jsonl")).expect("event log written");
+    assert_eq!(
+        log.matches("typo.candidate_d1").count(),
+        1,
+        "expected exactly one typo candidate event:\n{log}"
+    );
+    assert!(
+        !log.contains("oopspecial"),
+        "typed word or candidate name leaked into the log:\n{log}"
+    );
+}
+
+#[test]
 fn double_source_is_harmless() {
     let s = Session::new(None, &[]);
     let plugin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("zsh/oopsinput.zsh");

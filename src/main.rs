@@ -13,6 +13,7 @@
 //!   1  = internal error (plugin fails open)
 
 mod events;
+mod layers;
 mod lexer;
 mod proposal;
 
@@ -111,9 +112,24 @@ fn check(args: &[String]) -> ExitCode {
         .iter()
         .filter(|t| matches!(t, lexer::Token::Word(_)))
         .count();
+    // L1 typo layer (SPEC §5-L1): only meaningful when the command word
+    // resolves to nothing. Shadow mode records the evidence; the visible
+    // prompt lands with ui.rs. Distance is structural, never the names.
+    let suggestion = layers::typo::analyze(proposal.res_kind, &lexed, &proposal.names);
+
     let mut evidence = lexed.uncertainty;
     if proposal.capped {
         evidence.push("input.capped");
+    }
+    if proposal.names_capped {
+        evidence.push("input.names_capped");
+    }
+    if let Some(s) = &suggestion {
+        evidence.push(if s.distance == 1 {
+            "typo.candidate_d1"
+        } else {
+            "typo.candidate_d2"
+        });
     }
 
     let duration_us = started.elapsed().as_micros();

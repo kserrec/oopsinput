@@ -73,7 +73,19 @@ _oopsinput_handle() {
         esac
     fi
 
-    print -rn -- "$original" | "$_OOPSINPUT_BIN" check --res "$kind" >/dev/null 2>&1
+    if [[ $kind == none ]]; then
+        # Command word resolves to nothing — L1 typo territory. Ship the
+        # candidate pool (every name only the live shell can see: aliases,
+        # functions, builtins, reserved words) after a NUL separator; zsh
+        # strings can never contain NUL, so the separator is collision-free.
+        # Only this already-failing path pays the cost.
+        zmodload zsh/parameter 2>/dev/null
+        { print -rn -- "$original"$'\0'
+          print -rl -- ${(k)aliases} ${(k)functions} ${(k)builtins} ${(k)reswords}
+        } | "$_OOPSINPUT_BIN" check --res "$kind" >/dev/null 2>&1
+    else
+        print -rn -- "$original" | "$_OOPSINPUT_BIN" check --res "$kind" >/dev/null 2>&1
+    fi
     local rc=$?
 
     case $rc in
