@@ -22,12 +22,37 @@ pub struct Analysis {
     pub codes: Vec<&'static str>,
     /// Direct-catastrophic subset (SPEC §5-L2): recursive delete of / or ~.
     pub catastrophic: bool,
+    /// Literal target words of fired rules, for L3 to stat. Only words whose
+    /// runtime value is knowable (no expansion) are collected. These carry
+    /// raw text and exist for in-process analysis only — they never reach a
+    /// log or a display without the escaper (SPEC §9).
+    pub targets: Vec<String>,
 }
+
+/// Targets are for L3 stat calls; a handful bounds that syscall cost.
+const MAX_TARGETS: usize = 8;
 
 impl Analysis {
     fn note(&mut self, code: &'static str) {
         if !self.codes.contains(&code) {
             self.codes.push(code);
+        }
+    }
+
+    /// Record a literal target for L3. Only called from rules that fired, so
+    /// a benign command contributes no targets.
+    fn note_target(&mut self, w: &Word) {
+        self.note_target_text(&w.text, w.expands);
+    }
+
+    /// Same, for a target that is a slice of a word (dd's `of=…` value).
+    fn note_target_text(&mut self, text: &str, expands: bool) {
+        if !expands
+            && !text.is_empty()
+            && self.targets.len() < MAX_TARGETS
+            && !self.targets.iter().any(|t| t == text)
+        {
+            self.targets.push(text.to_string());
         }
     }
 }
@@ -44,6 +69,7 @@ pub fn analyze_with_home(lexed: &Lexed, home: Option<&str>) -> Analysis {
     let mut out = Analysis {
         codes: Vec::new(),
         catastrophic: false,
+        targets: Vec::new(),
     };
     // Split the token stream into simple-command segments (any control
     // operator ends one), collecting each segment's words and redirects.
@@ -240,6 +266,7 @@ fn rule_rm(args: &[&Word], home: Option<&str>, out: &mut Analysis) {
     }
     let mut catastrophic_target = false;
     for w in &operands {
+        out.note_target(w);
         if let Some(code) = classify_target(&w.text, w.expands, home) {
             out.note(code);
             catastrophic_target |= matches!(code, "fs.target_root" | "fs.target_home");
@@ -256,9 +283,12 @@ fn rule_recursive_perm(args: &[&Word], code: &'static str, home: Option<&str>, o
         return;
     }
     out.note(code);
-    // First operand is the mode/owner — it classifies to nothing; real
-    // targets follow it.
-    for w in &operands {
+    // First operand is the mode/owner — it classifies to nothing and is not
+    // a stat target; real targets follow it.
+    for (i, w) in operands.iter().enumerate() {
+        if i > 0 {
+            out.note_target(w);
+        }
         if let Some(code) = classify_target(&w.text, w.expands, home) {
             out.note(code);
         }
@@ -267,15 +297,19 @@ fn rule_recursive_perm(args: &[&Word], code: &'static str, home: Option<&str>, o
 
 fn rule_copy_move(args: &[&Word], out: &mut Analysis) {
     let (flags, operands) = split_flags(args);
-    if any_flag(&flags, "--force", Some('f')) {
+    let force = any_flag(&flags, "--force", Some('f'));
+    if force {
         out.note("fs.force_overwrite");
     }
     // The destination is the last operand; only a block device is danger
     // evidence by itself (cwd/home destinations are everyday copies).
-    if let Some(dest) = operands.last()
-        && let Some(code) = blockdev_target(&dest.text)
-    {
-        out.note(code);
+    if let Some(dest) = operands.last() {
+        if let Some(code) = blockdev_target(&dest.text) {
+            out.note(code);
+            out.note_target(dest);
+        } else if force {
+            out.note_target(dest);
+        }
     }
 }
 
@@ -295,8 +329,9 @@ fn rule_redirects(redirects: &[(&str, Option<&Word>)], out: &mut Analysis) {
             continue;
         }
         // Whether the target exists (truncation of *existing* data) is L3's
-        // stat to make; L2 marks the truncating shape.
+        // stat to make; L2 marks the truncating shape and hands the target on.
         out.note("fs.redirect_truncate");
+        out.note_target(w);
         if let Some(code) = blockdev_target(t) {
             out.note(code);
         }
@@ -372,6 +407,7 @@ fn rule_dd(args: &[&Word], out: &mut Analysis) {
     for w in args {
         if let Some(target) = w.text.strip_prefix("of=") {
             out.note("system.dd_of");
+            out.note_target_text(target, w.expands);
             if let Some(code) = blockdev_target(target) {
                 out.note(code);
             }
@@ -382,10 +418,11 @@ fn rule_dd(args: &[&Word], out: &mut Analysis) {
 fn rule_mkfs(args: &[&Word], out: &mut Analysis) {
     out.note("system.mkfs");
     let (_, operands) = split_flags(args);
-    if let Some(w) = operands.first()
-        && let Some(code) = blockdev_target(&w.text)
-    {
-        out.note(code);
+    if let Some(w) = operands.first() {
+        out.note_target(w);
+        if let Some(code) = blockdev_target(&w.text) {
+            out.note(code);
+        }
     }
 }
 
@@ -766,5 +803,24 @@ mod tests {
             ["fs.rm_recursive", "fs.rm_force"]
         );
         assert!(!run("rm -rf $DIR").catastrophic);
+    }
+
+    #[test]
+    fn targets_are_collected_only_from_fired_rules_and_only_literals() {
+        // The failure modes this pins: a benign command contributing stat
+        // targets, an expanding word being stat'ed as its literal spelling,
+        // and a mode/owner operand being mistaken for a path.
+        assert_eq!(run("rm -rf ./build ./dist").targets, ["./build", "./dist"]);
+        assert!(run("rm x").targets.is_empty()); // no rule fired
+        assert!(run("rm -rf $DIR").targets.is_empty()); // unknowable
+        assert!(run("rm -rf ~").targets.is_empty()); // tilde expands too
+        assert_eq!(run("chmod -R 777 /srv/data").targets, ["/srv/data"]); // mode skipped
+        assert_eq!(run("echo x > out.txt").targets, ["out.txt"]);
+        assert_eq!(run("dd if=a of=disk.img").targets, ["disk.img"]);
+        assert_eq!(run("mkfs.ext4 /dev/sdb1").targets, ["/dev/sdb1"]);
+        assert_eq!(run("mv -f a b").targets, ["b"]); // destination only
+        assert!(run("mv a b").targets.is_empty()); // no rule fired
+        // capped and deduplicated
+        assert_eq!(run("rm -rf a a b c d e f g h i j").targets.len(), 8);
     }
 }

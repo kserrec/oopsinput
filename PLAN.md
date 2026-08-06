@@ -40,8 +40,16 @@ sign-off. Same review also added the test-derivation rule to CLAUDE.md
       them next. priv.sudo fires only when the wrapped command tripped a rule.
       Golden corpus eval/golden/danger.json (command-shape pairs; the
       context-flip pairs arrive with policy + L3 below)
-- [ ] layers/context.rs: git facts, target facts, recency relation, near-miss
-      targets — all hard-capped syscall collectors
+- [x] layers/context.rs: git facts, target facts, near-miss targets — all
+      hard-capped syscall collectors — ✅ 2026-08-06: runs only on L2
+      candidates (common path stays syscall-free); git status as an external
+      helper per the standing rule (absolute path, fixed argv, 80 ms kill);
+      honest None when evidence is unavailable. Danger layer now hands its
+      literal targets to L3. Measured on this repo: candidate path ~4.7 ms
+      incl. git spawn
+- [ ] recency relation (rest of SPEC §5-L3): plugin-supplied structural
+      summaries of recent commands, secrets stripped in the plugin — zsh
+      plugin change, so PTY tests required
 - [ ] policy.rs: evidence → decision matrix; direct-catastrophic subset;
       intervention budget + per-rule cooldown; shadow conversion. Note a
       minimal config reader already exists from M2 ($OOPSINPUT_MODE > config

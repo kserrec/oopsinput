@@ -26,6 +26,13 @@ pub struct Event {
     pub buffer_bytes: usize,
     pub word_count: usize,
     pub duration_us: u128,
+    /// Context-layer counts (present only when L3 ran): dirty tracked files,
+    /// and the largest entry count among directory targets. Counts only —
+    /// never names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctx_git_dirty: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctx_target_entries: Option<u32>,
 }
 
 pub fn now_ms() -> u64 {
@@ -113,6 +120,8 @@ mod tests {
                                 buffer_bytes: 10,
                                 word_count: 2,
                                 duration_us: 1,
+                                ctx_git_dirty: None,
+                                ctx_target_entries: None,
                             },
                         );
                     }
@@ -144,11 +153,16 @@ mod tests {
             buffer_bytes: 9,
             word_count: 2,
             duration_us: 42,
+            ctx_git_dirty: Some(14),
+            ctx_target_entries: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"decision\":\"allow\""));
         assert!(json.contains("\"buffer_bytes\":9"));
         assert!(json.contains("\"evidence\":[\"syntax.opaque_substitution\"]"));
+        assert!(json.contains("\"ctx_git_dirty\":14"));
+        // absent context counts stay out of the line entirely
+        assert!(!json.contains("ctx_target_entries"));
         // The event type has no field that could carry buffer content; this
         // test documents that invariant for future editors.
         assert!(!json.contains("buffer_text"));

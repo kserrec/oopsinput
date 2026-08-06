@@ -12,6 +12,7 @@
 //!   2  = usage error
 //!   1  = internal error (plugin fails open)
 
+mod distance;
 mod events;
 mod layers;
 mod lexer;
@@ -202,12 +203,18 @@ fn check(args: &[String]) -> ExitCode {
     // usage before any of them go live.
     let danger = layers::danger::analyze(&lexed);
 
+    // L3 context layer (SPEC §5-L3, deterministic half): fresh git and
+    // filesystem facts, collected only when L2 marked a candidate — the
+    // common path stays syscall-free.
+    let context = (!danger.codes.is_empty()).then(|| layers::context::collect(&danger.targets));
+
     let evidence = build_evidence(
         lexed.uncertainty,
         proposal.capped,
         proposal.names_capped,
         suggestion.as_ref(),
         &danger,
+        context.as_ref(),
     );
 
     // Analysis-only duration: the prompt below waits on a human and must not
@@ -238,6 +245,13 @@ fn check(args: &[String]) -> ExitCode {
         buffer_bytes: proposal.buffer.len(),
         word_count,
         duration_us,
+        ctx_git_dirty: context
+            .as_ref()
+            .and_then(|c| c.git.as_ref())
+            .and_then(|g| g.dirty),
+        ctx_target_entries: context
+            .as_ref()
+            .and_then(|c| c.targets.iter().filter_map(|t| t.entries).max()),
     });
 
     // The decision JSON is diagnostics; the exit code is the contract. Once
@@ -251,14 +265,16 @@ fn check(args: &[String]) -> ExitCode {
 }
 
 /// Assemble the decision's evidence codes in stable order: lexer uncertainty
-/// (first-seen), input caps, typo findings, then danger findings. The golden
-/// corpus pins this exact assembly — static strings only, never raw text.
+/// (first-seen), input caps, typo findings, danger findings, then context
+/// facts. The golden corpus pins this exact assembly — static strings only,
+/// never raw text (context *counts* travel as event fields, not codes).
 fn build_evidence(
     lexer_uncertainty: Vec<&'static str>,
     capped: bool,
     names_capped: bool,
     suggestion: Option<&layers::typo::Suggestion>,
     danger: &layers::danger::Analysis,
+    context: Option<&layers::context::Context>,
 ) -> Vec<&'static str> {
     let mut evidence = lexer_uncertainty;
     if capped {
@@ -277,6 +293,37 @@ fn build_evidence(
     evidence.extend(danger.codes.iter().copied());
     if danger.catastrophic {
         evidence.push("danger.direct_catastrophic");
+    }
+    if let Some(ctx) = context {
+        if let Some(g) = &ctx.git {
+            evidence.push("ctx.git_repo");
+            if g.detached {
+                evidence.push("ctx.git_detached");
+            }
+            if g.branch_main_like {
+                evidence.push("ctx.git_main_branch");
+            }
+            match g.dirty {
+                Some(0) => {}
+                Some(_) => evidence.push("ctx.git_dirty"),
+                None => evidence.push("ctx.git_unavailable"),
+            }
+            if g.untracked == Some(true) {
+                evidence.push("ctx.git_untracked");
+            }
+        }
+        let t = &ctx.targets;
+        for (present, code) in [
+            (t.iter().any(|t| !t.exists), "ctx.target_missing"),
+            (t.iter().any(|t| t.is_symlink), "ctx.target_symlink"),
+            (t.iter().any(|t| t.is_cwd), "ctx.target_is_cwd"),
+            (t.iter().any(|t| t.is_parent), "ctx.target_is_parent"),
+            (t.iter().any(|t| t.near_miss), "ctx.near_miss_target"),
+        ] {
+            if present {
+                evidence.push(code);
+            }
+        }
     }
     evidence
 }
@@ -474,6 +521,7 @@ mod tests {
                 false,
                 suggestion.as_ref(),
                 &danger,
+                None,
             );
             assert_eq!(
                 evidence,
