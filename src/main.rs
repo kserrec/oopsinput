@@ -18,6 +18,7 @@ mod distance;
 mod events;
 mod layers;
 mod lexer;
+mod model;
 mod policy;
 mod proc;
 mod proposal;
@@ -437,6 +438,7 @@ fn doctor() -> ExitCode {
                     cfg.warnings.len()
                 );
             }
+            print_model_line(&cfg);
         }
     }
 
@@ -462,6 +464,48 @@ fn doctor() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+/// Ollama's /api/show response carries the modelfile, license text, and
+/// tensor metadata — legitimately large. Generous cap; this is a reachability
+/// check, not model I/O.
+const SHOW_RESPONSE_CAP: usize = 4 * 1024 * 1024;
+
+/// Doctor's model line: is Ollama up, and is the configured model pulled?
+/// POST /api/show answers both without loading the model or running any
+/// inference. The model name comes from the config file — untrusted display
+/// text, so it goes through the escaper (SPEC §9-4, no exemptions).
+fn print_model_line(cfg: &policy::Config) {
+    let Some(name) = &cfg.model else {
+        println!("  model:      disabled (deterministic-only)");
+        return;
+    };
+    let shown = ui::escape_for_display(name);
+    let body = serde_json::json!({ "model": name }).to_string();
+    let deadline = Instant::now() + std::time::Duration::from_millis(cfg.model_timeout_ms);
+    let result = model::post_json(
+        model::ollama_addr(),
+        "/api/show",
+        body.as_bytes(),
+        deadline,
+        SHOW_RESPONSE_CAP,
+    );
+    match result {
+        Ok(_) => println!("  model:      {shown} (Ollama reachable, model present)"),
+        Err(model::ModelError::Status(404)) => println!(
+            "  model:      {shown} — Ollama is up but this model isn't pulled (ollama pull {shown})"
+        ),
+        Err(model::ModelError::Connect) => println!(
+            "  model:      {shown} — Ollama not reachable at 127.0.0.1:11434; runs deterministic-only"
+        ),
+        Err(model::ModelError::Timeout) => println!(
+            "  model:      {shown} — Ollama didn't answer within {} ms; runs deterministic-only",
+            cfg.model_timeout_ms
+        ),
+        Err(_) => println!(
+            "  model:      {shown} — unexpected reply from 127.0.0.1:11434; runs deterministic-only"
+        ),
     }
 }
 

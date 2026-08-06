@@ -366,9 +366,7 @@ pub struct Config {
     pub det_timeout_ms: u64,
     pub budget_per_hour: u32,
     /// Empty/absent = deterministic-only. Consumed by the model layer (M4).
-    #[allow(dead_code)]
     pub model: Option<String>,
-    #[allow(dead_code)]
     pub model_timeout_ms: u64,
     /// Opt-in research capture (M5). Parsed and validated now.
     #[allow(dead_code)]

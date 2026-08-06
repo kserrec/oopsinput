@@ -14,8 +14,9 @@ How it relates to the other documents:
   deterministic product: command capture in zsh, the lexer, all three
   deterministic analysis layers (typo, danger, context), the policy engine,
   both visible prompts, event logging, and the test harness that proves your
-  buffer survives intact. The optional local-model layer (L4) is designed in
-  SPEC but not built.
+  buffer survives intact. Of the optional local-model layer (L4), only the
+  transport exists so far: a loopback HTTP client that `doctor` uses to check
+  Ollama reachability. No analysis path talks to the model yet.
 
 ## 1. The pieces
 
@@ -227,7 +228,7 @@ All were real bugs, now pinned by tests:
 
 ## 4. The Rust side, ground-up
 
-Ten modules. Analysis runs strictly cheapest-first, and each layer can be
+Eleven modules. Analysis runs strictly cheapest-first, and each layer can be
 read on its own:
 
 ### 4.1 `src/main.rs` — dispatch, watchdog, the `check` path
@@ -251,7 +252,7 @@ analysis deadline, and killing the process mid-prompt would leave the
 terminal in the wrong mode. What makes retiring safe is that everything past
 that point is bounded by construction — the prompt's own read has a timeout
 enforced by the terminal, and every external helper it runs is killed at a
-deadline (§4.10).
+deadline (§4.11).
 
 The analysis sequence, in order: read the proposal, lex it, run the typo
 layer (L1), run the danger layer (L2), and — only if danger found something —
@@ -279,10 +280,13 @@ works end-to-end; a release binary has a fixed deadline and no hang hook.
 `doctor` prints environment sanity checks: version, whether `zsh` is on PATH
 (via direct file-metadata lookup that requires the executable bit — never by
 asking a shell, per SPEC §9), which config file is in effect and whether it
-exists, the resulting mode, how many config problems were found, and whether
-the plugin block is present in `~/.zshrc`. The config line and the mode line
-resolve through the same function, so they can never contradict each other
-(they once did — a bug found by review and now pinned by `tests/doctor.rs`).
+exists, the resulting mode, how many config problems were found, whether
+the plugin block is present in `~/.zshrc`, and — when a model is configured —
+whether Ollama answers on loopback and has that model pulled (a POST to
+`/api/show` through §4.10's client; it loads nothing and runs no inference).
+The config line and the mode line resolve through the same function, so they
+can never contradict each other (they once did — a bug found by review and
+now pinned by `tests/doctor.rs`).
 
 ### 4.2 `src/proposal.rs` — input parsing
 
@@ -376,7 +380,7 @@ the plugin resolved), unquoted, free of expansions, free of `/`, and between
 2 and 64 characters. A single character is never corrected, because nearly
 every short name is one edit away from it.
 
-Matching uses the shared bounded edit distance (§4.10). Words of four
+Matching uses the shared bounded edit distance (§4.11). Words of four
 characters or fewer allow one edit; longer words allow two. (`gti` → `git`
 is a swap of two adjacent characters, so it costs one.) Candidates come from
 two places: the names the plugin supplied, and the executables the layer
@@ -605,7 +609,35 @@ call, both learned from a security review:
 The saved terminal settings are restored on every exit path by a guard
 value, so no path out of the prompt leaves your terminal in raw mode.
 
-### 4.10 The two shared helpers
+### 4.10 `src/model.rs` — the loopback HTTP client (L4 transport)
+
+The first piece of the inference layer: a self-written HTTP/1.1 POST over
+`std::net::TcpStream` (SPEC §12 rejects an HTTP crate for this — loopback
+needs no TLS, no redirects, no connection reuse). It refuses any non-loopback
+address before opening a socket, and the target is fixed at Ollama's default
+`127.0.0.1:11434` — deliberately not configurable, because SPEC §14 allows no
+network beyond loopback and an address knob would invite pointing it
+elsewhere.
+
+Its two disciplines mirror the external-helper rules:
+
+- **One hard deadline covers the whole exchange.** Connect, every write, and
+  every read recompute the time remaining and use that as the socket timeout.
+  The recomputation is the point: a server dripping one byte per poll resets
+  a naive per-read timeout forever (probed and pinned by test) but cannot
+  stretch a shrinking one.
+- **Size caps on everything buffered**: the response head, the decoded body
+  (caller-chosen cap), and the still-encoded chunked stream, so a hostile
+  peer can't balloon memory with framing overhead.
+
+It speaks enough HTTP to talk to Ollama and nothing more: status line,
+`Content-Length` / chunked / connection-close framing. Every failure —
+unreachable, timeout, oversized, malformed, non-2xx — is a distinct error the
+caller maps to "model evidence unavailable" (SPEC §9-6); nothing in this
+module can block a command. Today `doctor` is its only caller; the inference
+layer (prompt assembly, schema validation, the candidate gate) comes next.
+
+### 4.11 The two shared helpers
 
 - **`src/distance.rs`** — the bounded **optimal string alignment** distance:
   insertion, deletion, substitution, and swapping two adjacent characters
@@ -617,11 +649,11 @@ value, so no path out of the prompt leaves your terminal in raw mode.
   Having one copy is the point: "no path outlives the deadline" is a claim
   that should be provable by reading one function.
 
-### 4.11 Dependencies
+### 4.12 Dependencies
 
 Exactly two: `serde` and `serde_json` (JSON is a correctness/security surface
 with real spec depth). Everything else — CLI dispatch, PATH lookup, the edit
-distance, the lexer, config parsing, and eventually the HTTP client — is
+distance, the lexer, config parsing, and the loopback HTTP client — is
 self-written per the policy in SPEC §12. Adding a dependency requires
 updating SPEC §12 first.
 
@@ -865,7 +897,9 @@ Honest about what today's code does *not* do:
 - **Rules match shapes, not semantics.** There is no model of how many
   arguments a command requires, so a malformed command can still produce
   evidence (recorded, never shown at today's tiers).
-- **The local-model layer (L4) is unbuilt.** No network of any kind today.
+- **The local-model layer (L4) is transport only.** The loopback client
+  exists and `doctor` uses it for a reachability check, but no analysis path
+  touches the network — `check` remains fully deterministic.
 - **Only the first line of a multi-line command is analyzed.** Continuation
   lines typed at the `PS2` prompt pass through untouched.
 - **Linux and interactive zsh only.** The `/dev/fd/3` mechanism works on the

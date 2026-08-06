@@ -74,8 +74,16 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
 
 ## M4 — Inference layer
 
-- [ ] model.rs: minimal loopback HTTP/1.1 client (std only), hard timeout,
-      response size cap
+- [x] model.rs: minimal loopback HTTP/1.1 client (std only), hard timeout,
+      response size cap — ✅ 2026-08-06. Refuses non-loopback addresses;
+      target fixed at 127.0.0.1:11434 (no address knob — SPEC §14). Deadline
+      recomputed per socket call (a trickling server can't evade it — probed:
+      naive per-read timeout rode out the whole drip run); caps on head,
+      decoded body, and encoded chunk stream. First caller: `doctor`'s model
+      line (POST /api/show — daemon up? model pulled? no inference), which
+      pre-completes the "model reachable" part of M6's doctor item. Verified
+      live against this machine's Ollama: present / not-pulled / disabled
+      all correct.
 - [ ] Prompt assembly: trusted evidence / untrusted command separation; schema-
       constrained output via Ollama structured outputs; validation → invalid =
       unavailable evidence
@@ -133,7 +141,8 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       untouched rather than writing through it, and the binary refuses to
       write through a symlink in its own state dir.
 - [ ] `oopsinput doctor` covers: plugin installed, widgets wrapped, config
-      valid, model reachable (optional), state perms
+      valid, model reachable (optional — ✅ landed with M4's model.rs),
+      state perms
 - [ ] Clean-machine test: fresh user → install → shadow → report → uninstall
       leaves no trace
 - [ ] Cut v0.1.0 tag; send to first outside testers
