@@ -357,6 +357,7 @@ pub fn warning_lines(
     danger: &crate::layers::danger::Analysis,
     context: Option<&crate::layers::context::Context>,
     recency: &[crate::proposal::RecencyEntry],
+    model: Option<&crate::layers::infer::ModelEvidence>,
 ) -> Vec<String> {
     let has = |code: &str| danger.codes.contains(&code);
     let git = context.and_then(|c| c.git.as_ref());
@@ -456,6 +457,29 @@ pub fn warning_lines(
                 format!("this recursively deletes {what}"),
                 "there is no undo".to_string(),
             ]
+        }
+        // The two model-driven warns (SPEC §5-L4). The reason sentence is
+        // model output — untrusted, escaped, and labeled as the model's so
+        // the user can weigh it accordingly (honest claims, SPEC §2-10).
+        "policy.model_mismatch" => {
+            let mut lines = vec![format!(
+                "high-consequence command targeting {}, and the local model \
+                 sees a probable mismatch with what you meant",
+                targets()
+            )];
+            if let Some(m) = model {
+                lines.push(format!("model: {}", escape_for_display(&m.reason)));
+            }
+            lines
+        }
+        "policy.model_adversarial" => {
+            let mut lines = vec![
+                "this command's text appears designed to manipulate the guard itself".to_string(),
+            ];
+            if let Some(m) = model {
+                lines.push(format!("model: {}", escape_for_display(&m.reason)));
+            }
+            lines
         }
         _ => vec![format!(
             "high-consequence command flagged by policy ({reason})"
@@ -875,7 +899,7 @@ mod tests {
             }),
             targets: vec![],
         };
-        let lines = warning_lines("policy.dirty_work_at_risk", &danger, Some(&ctx), &[]);
+        let lines = warning_lines("policy.dirty_work_at_risk", &danger, Some(&ctx), &[], None);
         let joined = lines.join("\n");
         assert!(joined.contains("git reset --hard"), "{joined}");
         assert!(joined.contains("17 modified tracked files"), "{joined}");
@@ -883,7 +907,8 @@ mod tests {
 
         // catastrophic home delete names what dies
         let danger = crate::layers::danger::analyze_with_home(&crate::lexer::lex("rm -rf ~"), None);
-        let joined = warning_lines("policy.direct_catastrophic", &danger, None, &[]).join("\n");
+        let joined =
+            warning_lines("policy.direct_catastrophic", &danger, None, &[], None).join("\n");
         assert!(joined.contains("home directory"), "{joined}");
 
         // hostile target text is escaped before display (SPEC §9-5)
@@ -891,9 +916,29 @@ mod tests {
             &crate::lexer::lex("rm -rf ./x\u{1b}EVIL\u{7}y"),
             None,
         );
-        let joined = warning_lines("policy.target_context", &danger, None, &[]).join("\n");
+        let joined = warning_lines("policy.target_context", &danger, None, &[], None).join("\n");
         assert!(!joined.contains('\u{1b}'), "raw ESC in warning: {joined:?}");
         assert!(joined.contains("./x^[EVIL^Gy"), "{joined}");
+    }
+
+    #[test]
+    fn model_reason_is_labeled_and_escaped() {
+        // The model's reason is untrusted output (SPEC §9-4/§9-5): a hostile
+        // or confused model emitting ANSI must be displayed inert, and the
+        // line must be labeled as the model's, not presented as our fact.
+        use crate::layers::infer::{MismatchKind, ModelAssessment, ModelEvidence};
+        let danger =
+            crate::layers::danger::analyze_with_home(&crate::lexer::lex("git reset --hard"), None);
+        let ev = ModelEvidence {
+            assessment: ModelAssessment::ProbableMismatch,
+            kind: MismatchKind::Target,
+            reason: "wipes \u{1b}[31mEVIL\u{7} work".into(),
+        };
+        let joined =
+            warning_lines("policy.model_mismatch", &danger, None, &[], Some(&ev)).join("\n");
+        assert!(joined.contains("model: "), "{joined}");
+        assert!(!joined.contains('\u{1b}'), "raw ESC in warning: {joined:?}");
+        assert!(joined.contains("wipes ^[[31mEVIL^G work"), "{joined}");
     }
 
     #[test]

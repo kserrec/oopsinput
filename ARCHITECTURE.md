@@ -14,11 +14,10 @@ How it relates to the other documents:
   deterministic product: command capture in zsh, the lexer, all three
   deterministic analysis layers (typo, danger, context), the policy engine,
   both visible prompts, event logging, and the test harness that proves your
-  buffer survives intact. The optional local-model layer (L4) is built but
-  not yet wired in: the loopback HTTP client (which `doctor` uses to check
-  Ollama reachability), prompt assembly, and response validation all exist;
-  the gate that decides when `check` consults the model does not, so no
-  analysis path talks to the model yet.
+  buffer survives intact. The optional local-model layer (L4) is fully
+  wired: with a model configured (default: none — deterministic-only),
+  `check` consults loopback Ollama on the rare ambiguous danger candidate,
+  measured at 0.27% of replayed natural commands.
 
 ## 1. The pieces
 
@@ -247,6 +246,13 @@ prompt cannot be held hostage. A blunt `exit` is safe precisely because the
 process is per-command: there's nothing to clean up that matters more than
 the user's prompt. (SPEC §6 records the one honest residual: a process stuck
 in uninterruptible disk I/O can't even do that; documented, not defended.)
+
+The watchdog grants one bounded **extension** when a model consultation is
+in flight (SPEC §6: the model path gets its own longer deadline): before
+the first socket call, the check path stores `model_timeout_ms` plus margin
+into an atomic the watchdog reads at the deterministic deadline. The
+consultation's own socket deadline is strictly shorter, so the extension is
+a backstop, not the bound.
 
 The watchdog **retires** once a prompt is on screen (a flag named
 `PROMPT_ACTIVE`): a question waiting on a human legitimately outlives an
@@ -639,12 +645,25 @@ caller maps to "model evidence unavailable" (SPEC §9-6); nothing in this
 module can block a command. Today `doctor` is its only caller; the inference
 layer (prompt assembly, schema validation, the candidate gate) comes next.
 
-### 4.11 `src/layers/infer.rs` — L4, the inference layer (unwired)
+### 4.11 `src/layers/infer.rs` — L4, the inference layer
 
 The brain above §4.10's transport: prompt assembly, the response schema, and
-validation. Not yet called from `check` — the candidate gate that decides
-*when* to consult (L2 candidate ∧ L3 ambiguous) is the next milestone item —
-but fully built and tested.
+validation. `check` consults it only when **all** of these hold: a model is
+configured (`model =` in config; the default is none, so default installs
+never touch the network), the danger layer marked a candidate that is *not*
+direct-catastrophic, and policy's mode-blind verdict came back Observe with
+an ambiguity reason — L3 neither cleared the command nor decided against
+it (`policy::l4_gate`). Replaying 1,107 natural commands from this
+machine's real history put the gate-eligible rate at 0.27%, inside SPEC
+§5-L4's <1% target. What the model says is consumed deterministically
+(`policy::apply_model_evidence`): exactly two arms, both capped at Warn —
+`probable_mismatch` and `adversarial_or_untrusted_instruction` — and no
+downgrade arm at all, so a lying model can never clear a command and
+Confirm stays reachable only through deterministic rules. Because a
+consultation legitimately outlives the 150 ms deterministic deadline, the
+check path arms a one-shot watchdog extension (`model_timeout_ms` + margin)
+before the first socket call; the probe for that test showed the process
+watchdog-killed mid-consultation without it.
 
 The prompt keeps computed facts and human text strictly apart (SPEC §5-L4).
 The request's user message is one JSON document: everything under
@@ -930,10 +949,13 @@ Honest about what today's code does *not* do:
 - **Rules match shapes, not semantics.** There is no model of how many
   arguments a command requires, so a malformed command can still produce
   evidence (recorded, never shown at today's tiers).
-- **The local-model layer (L4) is built but unwired.** The loopback client,
-  prompt assembly, and response validation exist (`doctor` uses the client
-  for its reachability check), but the candidate gate does not yet, so no
-  analysis path touches the network — `check` remains fully deterministic.
+- **The local-model layer (L4) is opt-in and advisory.** With no `model`
+  configured (the default), `check` never touches the network. With one, the
+  model is consulted on ambiguous danger candidates only, its answer can at
+  most raise a Warn, and every failure falls back to the deterministic
+  verdict silently. Whether the model *earns* a place in the default config
+  is decided by the paired-corpus comparison (M4's remaining evaluation
+  work), not by wiring.
 - **Only the first line of a multi-line command is analyzed.** Continuation
   lines typed at the `PS2` prompt pass through untouched.
 - **Linux and interactive zsh only.** The `/dev/fd/3` mechanism works on the

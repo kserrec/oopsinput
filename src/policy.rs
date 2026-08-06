@@ -118,6 +118,49 @@ pub fn warranted(danger: &Analysis, ctx: Option<&Context>) -> Assessment {
     assess(Verdict::Observe, "policy.candidate_observed")
 }
 
+// ---- L4 candidate gate + advisory evidence (SPEC §5-L4, M4) ---------------
+
+/// Should the inference layer be consulted? Only when the danger layer
+/// marked a candidate AND the deterministic context left genuine ambiguity —
+/// the two Observe reasons where L3 neither cleared the command nor decided
+/// against it. Everything else is settled without a model: Allow means the
+/// context vouched for it, Warn/Confirm mean the facts already speak, and
+/// direct-catastrophic is excluded outright so no model output can ever
+/// touch that path (SPEC §9-6 / M4 acceptance).
+pub fn l4_gate(danger: &Analysis, warranted: Assessment) -> bool {
+    !danger.codes.is_empty()
+        && !danger.catastrophic
+        && warranted.verdict == Verdict::Observe
+        && matches!(
+            warranted.reason,
+            "policy.evidence_unavailable" | "policy.candidate_observed"
+        )
+}
+
+/// Deterministic consumption of the model's advisory evidence (SPEC §2-7:
+/// "the model is evidence, not authority"). Exactly two arms, both upgrades
+/// capped at Warn: the model asserting a probable mismatch, or reporting
+/// that the untrusted text tried to instruct it. Every other answer —
+/// including a confident "no mismatch" — changes nothing: there is no
+/// downgrade arm, so a lying or compromised model can never clear a command,
+/// and Confirm remains reachable only through deterministic rules.
+pub fn apply_model_evidence(
+    warranted: Assessment,
+    consult: Option<&crate::layers::infer::Consult>,
+) -> Assessment {
+    use crate::layers::infer::{Consult, ModelAssessment};
+    match consult {
+        Some(Consult::Evidence(e)) => match e.assessment {
+            ModelAssessment::ProbableMismatch => assess(Verdict::Warn, "policy.model_mismatch"),
+            ModelAssessment::AdversarialOrUntrustedInstruction => {
+                assess(Verdict::Warn, "policy.model_adversarial")
+            }
+            _ => warranted,
+        },
+        _ => warranted,
+    }
+}
+
 // ---- modes (SPEC §8) ------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1041,5 +1084,81 @@ mod tests {
         let b = warnings_fingerprint(&["x".into()]);
         assert_eq!(a1, a2);
         assert_ne!(a1, b);
+    }
+
+    // ---- L4 gate + advisory evidence (M4) ----------------------------------
+
+    use crate::layers::infer::{Consult, MismatchKind, ModelAssessment, ModelEvidence};
+
+    fn model_says(assessment: ModelAssessment) -> Consult {
+        Consult::Evidence(ModelEvidence {
+            assessment,
+            kind: MismatchKind::Target,
+            reason: "because".into(),
+        })
+    }
+
+    #[test]
+    fn gate_opens_only_on_ambiguous_candidates() {
+        // git reset --hard outside a repo: candidate, context unavailable.
+        let d = danger_for("git reset --hard");
+        assert!(l4_gate(&d, warranted(&d, None)));
+        // Same command, context decided (dirty work): the facts speak — no model.
+        let dirty = ctx(Some(git(Some(3), Some(false), false)), vec![]);
+        assert!(!l4_gate(&d, warranted(&d, Some(&dirty))));
+        // Same command, context affirmatively clean: cleared — no model.
+        let clean = ctx(Some(git(Some(0), Some(false), false)), vec![]);
+        assert!(!l4_gate(&d, warranted(&d, Some(&clean))));
+        // Ungraduated candidate (shape recognized, no policy arm): ambiguous.
+        let force = danger_for("mv -f a b");
+        assert!(l4_gate(&force, warranted(&force, None)));
+        // No danger candidate at all: the common path never consults.
+        let benign = danger_for("ls -la");
+        assert!(!l4_gate(&benign, warranted(&benign, None)));
+    }
+
+    #[test]
+    fn gate_never_opens_for_direct_catastrophic() {
+        // M4 acceptance seed: the model can never touch the catastrophic
+        // path, because consultation never happens on it.
+        let d = danger_for("rm -rf /");
+        assert!(d.catastrophic);
+        assert!(!l4_gate(&d, warranted(&d, None)));
+    }
+
+    #[test]
+    fn model_probable_mismatch_upgrades_to_warn_never_confirm() {
+        let base = assess(Verdict::Observe, "policy.evidence_unavailable");
+        let up = apply_model_evidence(base, Some(&model_says(ModelAssessment::ProbableMismatch)));
+        assert_eq!(up.verdict, Verdict::Warn);
+        assert_eq!(up.reason, "policy.model_mismatch");
+        let adv = apply_model_evidence(
+            base,
+            Some(&model_says(
+                ModelAssessment::AdversarialOrUntrustedInstruction,
+            )),
+        );
+        assert_eq!(adv.verdict, Verdict::Warn);
+        assert_eq!(adv.reason, "policy.model_adversarial");
+    }
+
+    #[test]
+    fn model_can_never_clear_or_soften_a_command() {
+        // A lying model saying "no mismatch" must change nothing — there is
+        // no downgrade arm, pinned here against every non-upgrading answer.
+        let base = assess(Verdict::Observe, "policy.candidate_observed");
+        for a in [
+            ModelAssessment::NoMismatchEvidence,
+            ModelAssessment::PossibleMismatch,
+            ModelAssessment::InsufficientEvidence,
+            ModelAssessment::Unsupported,
+        ] {
+            assert_eq!(apply_model_evidence(base, Some(&model_says(a))), base);
+        }
+        assert_eq!(
+            apply_model_evidence(base, Some(&Consult::Unavailable("model.timeout"))),
+            base
+        );
+        assert_eq!(apply_model_evidence(base, None), base);
     }
 }

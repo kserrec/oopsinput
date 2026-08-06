@@ -99,8 +99,21 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       is the next item, which must also give the model path its own watchdog
       deadline (SPEC §6 — today's watchdog would kill a 2 s model call at
       det_timeout_ms).
-- [ ] Candidate gate: L4 only when L2 candidate ∧ L3 ambiguous; <1% invocation
-      target measured on replayed history
+- [x] Candidate gate: L4 only when L2 candidate ∧ L3 ambiguous; <1% invocation
+      target measured on replayed history — ✅ 2026-08-06. `policy::l4_gate`:
+      model configured ∧ danger candidate ∧ ¬catastrophic ∧ warranted verdict
+      is Observe with an ambiguity reason (evidence_unavailable /
+      candidate_observed). Consumption is `policy::apply_model_evidence`:
+      exactly two Warn-capped upgrade arms (probable_mismatch, adversarial),
+      no downgrade arm — a lying model cannot clear a command; Confirm stays
+      deterministic-only. Watchdog gets a one-shot model extension armed
+      before the first socket call (probed: without it the binary is
+      watchdog-killed mid-consultation at ~160 ms). Measured on this
+      machine's real history: 3/1,107 commands gate-eligible = **0.27%**,
+      inside the <1% target (caveats: replayed from $HOME so context facts
+      differ from original cwd; all 3 were ungraduated candidate_observed
+      shapes). 5 policy unit tests + 5 end-to-end tests (tests/model_path.rs,
+      mock Ollama over the debug-only port seam).
 - [ ] Deterministic fallback path tested: Ollama down, slow, malformed, lying
 - [ ] Paired-corpus comparison: deterministic-only vs +model; model joins
       default config only if SPEC §11 bar is met

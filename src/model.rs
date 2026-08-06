@@ -17,8 +17,16 @@ use std::time::{Duration, Instant};
 
 /// Ollama's default listen address. Fixed, not configurable, in v1:
 /// SPEC §14 allows no network beyond loopback, and an address knob would be
-/// a standing invitation to point the client somewhere else.
+/// a standing invitation to point the client somewhere else. The debug-only
+/// port override exists for the integration tests' mock servers and can
+/// never leave loopback — only the port is variable.
 pub(crate) fn ollama_addr() -> SocketAddr {
+    #[cfg(debug_assertions)]
+    if let Ok(p) = std::env::var("OOPSINPUT_TEST_OLLAMA_PORT")
+        && let Ok(port) = p.parse::<u16>()
+    {
+        return SocketAddr::from(([127, 0, 0, 1], port));
+    }
     SocketAddr::from(([127, 0, 0, 1], 11434))
 }
 

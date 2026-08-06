@@ -26,7 +26,7 @@ mod ui;
 
 use std::io::Write;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -81,6 +81,16 @@ fn main() -> ExitCode {
 /// contract). The prompt bounds itself via the terminal-level read timeout.
 static PROMPT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// One-shot deadline extension for the model path (SPEC §6: "the model path
+/// gets its own longer deadline"). Zero until the L4 gate opens; the check
+/// path stores `model_timeout_ms` + margin here *before* connecting, so a
+/// consultation legitimately outlives the deterministic deadline without
+/// disarming the watchdog. If the store loses the race with the watchdog's
+/// read — analysis reached the gate at the very moment the deterministic
+/// budget expired — the process fail-opens, which is the correct answer for
+/// analysis that slow.
+static MODEL_EXTENSION_MS: AtomicU64 = AtomicU64::new(0);
+
 /// If analysis wedges for any reason, exit with the fail-open code before the
 /// shell-side wait becomes perceptible. The process is per-command, so a blunt
 /// exit is safe: there is nothing to clean up that matters more than the
@@ -88,11 +98,22 @@ static PROMPT_ACTIVE: AtomicBool = AtomicBool::new(false);
 fn arm_watchdog(deadline_ms: u64) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(deadline_ms));
-        if !PROMPT_ACTIVE.load(Ordering::SeqCst) {
-            std::process::exit(1);
+        if PROMPT_ACTIVE.load(Ordering::SeqCst) {
+            // Prompt on screen: the watchdog retires. Post-prompt work is a
+            // single fd write and exit.
+            return;
         }
-        // Prompt on screen: the watchdog retires. Post-prompt work is a
-        // single fd write and exit.
+        let extension = MODEL_EXTENSION_MS.load(Ordering::SeqCst);
+        if extension > 0 {
+            // Model consultation in flight — grant its bounded window (the
+            // consult's own socket deadline is strictly shorter), then
+            // enforce as usual.
+            std::thread::sleep(std::time::Duration::from_millis(extension));
+            if PROMPT_ACTIVE.load(Ordering::SeqCst) {
+                return;
+            }
+        }
+        std::process::exit(1);
     });
 }
 
@@ -154,6 +175,26 @@ fn check(args: &[String]) -> ExitCode {
     // common path stays syscall-free.
     let context = (!danger.codes.is_empty()).then(|| layers::context::collect(&danger.targets));
 
+    // L4 inference layer (SPEC §5-L4, M4): consulted only when a model is
+    // configured (default: none) AND the candidate gate opens — danger
+    // marked it, context left it genuinely ambiguous, and it is not
+    // direct-catastrophic. The watchdog extension goes up before the first
+    // socket call; consult() itself is bounded strictly tighter.
+    let warranted = policy::warranted(&danger, context.as_ref());
+    let consulted = match &cfg.model {
+        Some(name) if policy::l4_gate(&danger, warranted) => {
+            MODEL_EXTENSION_MS.store(cfg.model_timeout_ms + 1_000, Ordering::SeqCst);
+            Some(layers::infer::consult(
+                name,
+                cfg.model_timeout_ms,
+                &proposal,
+                &danger,
+                context.as_ref(),
+            ))
+        }
+        _ => None,
+    };
+
     let evidence = build_evidence(
         lexed.uncertainty,
         proposal.capped,
@@ -162,6 +203,7 @@ fn check(args: &[String]) -> ExitCode {
         &danger,
         context.as_ref(),
         &proposal.recency,
+        consulted.as_ref(),
     );
 
     // Analysis-only duration: the prompt below waits on a human and must not
@@ -175,11 +217,17 @@ fn check(args: &[String]) -> ExitCode {
     // warning, not a chat about gti (bughunt 2026-08-06). Otherwise: the
     // typo prompt in suggest mode and up, else record silently with the
     // policy reason preserved (the shadow conversion).
-    let capped = policy::cap_for_mode(policy::warranted(&danger, context.as_ref()), cfg.mode);
+    let assessed = policy::apply_model_evidence(warranted, consulted.as_ref());
+    let capped = policy::cap_for_mode(assessed, cfg.mode);
     let (decision_str, reason_code, exit_code, outcome) = match capped.verdict {
-        policy::Verdict::Warn | policy::Verdict::Confirm => {
-            warning_intervention(capped, &danger, context.as_ref(), &proposal.recency, &cfg)
-        }
+        policy::Verdict::Warn | policy::Verdict::Confirm => warning_intervention(
+            capped,
+            &danger,
+            context.as_ref(),
+            &proposal.recency,
+            model_evidence(consulted.as_ref()),
+            &cfg,
+        ),
         _ => match &suggestion {
             Some(s) if cfg.mode != policy::Mode::Shadow => {
                 let (d, r, e) = typo_intervention(&proposal.buffer, s);
@@ -230,6 +278,7 @@ fn check(args: &[String]) -> ExitCode {
 /// (first-seen), input caps, typo findings, danger findings, then context
 /// facts. The golden corpus pins this exact assembly — static strings only,
 /// never raw text (context *counts* travel as event fields, not codes).
+#[allow(clippy::too_many_arguments)] // one flat assembly point, by design
 fn build_evidence(
     lexer_uncertainty: Vec<&'static str>,
     capped: bool,
@@ -238,6 +287,7 @@ fn build_evidence(
     danger: &layers::danger::Analysis,
     context: Option<&layers::context::Context>,
     recency: &[proposal::RecencyEntry],
+    consulted: Option<&layers::infer::Consult>,
 ) -> Vec<&'static str> {
     let mut evidence = lexer_uncertainty;
     if capped {
@@ -293,7 +343,26 @@ fn build_evidence(
     if !danger.codes.is_empty() && recency.iter().any(|r| r.shares_word) {
         evidence.push("recency.target_overlap");
     }
+    // Model consultation outcome (SPEC §5-L4): the assessment when one
+    // arrived, or the stable unavailability code — recorded either way so
+    // evaluation can tell deterministic fallback from model agreement.
+    match consulted {
+        Some(layers::infer::Consult::Evidence(e)) => evidence.push(e.assessment.evidence_code()),
+        Some(layers::infer::Consult::Unavailable(code)) => evidence.push(code),
+        None => {}
+    }
     evidence
+}
+
+/// The validated model evidence, if this run produced any — for the warning
+/// UI, which shows the model's (escaped) reason alongside the facts.
+fn model_evidence(
+    consulted: Option<&layers::infer::Consult>,
+) -> Option<&layers::infer::ModelEvidence> {
+    match consulted {
+        Some(layers::infer::Consult::Evidence(e)) => Some(e),
+        _ => None,
+    }
 }
 
 /// The L1 prompt flow. Returns (decision, reason_code, exit code) — exit 10
@@ -332,6 +401,7 @@ fn warning_intervention(
     danger: &layers::danger::Analysis,
     context: Option<&layers::context::Context>,
     recency: &[proposal::RecencyEntry],
+    model: Option<&layers::infer::ModelEvidence>,
     cfg: &policy::Config,
 ) -> (&'static str, &'static str, u8, Option<&'static str>) {
     let rule = policy::primary_code(danger);
@@ -352,7 +422,7 @@ fn warning_intervention(
         return (gated.verdict.as_str(), gated.reason, 0, None);
     }
 
-    let lines = ui::warning_lines(gated.reason, danger, context, recency);
+    let lines = ui::warning_lines(gated.reason, danger, context, recency, model);
     let pausing = gated.verdict == policy::Verdict::Confirm;
     PROMPT_ACTIVE.store(true, Ordering::SeqCst);
     let choice = ui::prompt_warning(&lines, pausing);
@@ -609,6 +679,7 @@ mod tests {
                 &danger,
                 None,
                 &[],
+                None,
             );
             assert_eq!(
                 evidence,

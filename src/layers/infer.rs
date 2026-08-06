@@ -14,10 +14,6 @@
 //! themselves evidence of an attack. We assume that defense can fail, which
 //! is why the schema, the validator, and policy stand behind it.
 
-// Not yet called from the check path: the candidate gate that decides *when*
-// to consult is M4 item 3. Everything here is exercised by its tests.
-#![allow(dead_code)]
-
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -42,16 +38,16 @@ pub enum ModelAssessment {
 }
 
 impl ModelAssessment {
-    /// Stable evidence-code suffix; the event log records these, never the
-    /// free-text reason.
-    pub fn as_str(self) -> &'static str {
+    /// Stable evidence code for the event log — the log records these,
+    /// never the free-text reason.
+    pub fn evidence_code(self) -> &'static str {
         match self {
-            Self::NoMismatchEvidence => "no_mismatch_evidence",
-            Self::PossibleMismatch => "possible_mismatch",
-            Self::ProbableMismatch => "probable_mismatch",
-            Self::InsufficientEvidence => "insufficient_evidence",
-            Self::AdversarialOrUntrustedInstruction => "adversarial_or_untrusted_instruction",
-            Self::Unsupported => "unsupported",
+            Self::NoMismatchEvidence => "model.no_mismatch_evidence",
+            Self::PossibleMismatch => "model.possible_mismatch",
+            Self::ProbableMismatch => "model.probable_mismatch",
+            Self::InsufficientEvidence => "model.insufficient_evidence",
+            Self::AdversarialOrUntrustedInstruction => "model.adversarial_or_untrusted_instruction",
+            Self::Unsupported => "model.unsupported",
         }
     }
 
