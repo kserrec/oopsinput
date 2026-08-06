@@ -13,6 +13,7 @@
 //!   1  = internal error (plugin fails open)
 
 mod events;
+mod lexer;
 mod proposal;
 
 use std::process::ExitCode;
@@ -30,7 +31,9 @@ const DET_DEADLINE_MS: u64 = 150;
 struct Decision {
     decision: &'static str,
     reason_code: &'static str,
-    evidence: Vec<String>,
+    /// Stable evidence codes only (lexer uncertainty, input caps) — never
+    /// raw command text.
+    evidence: Vec<&'static str>,
     timings_us: Timings,
 }
 
@@ -97,12 +100,27 @@ fn check(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     };
 
-    // M1 shadow: no layers yet — always allow, always record.
+    // Shadow analysis: lex for structure and honest uncertainty (SPEC §13);
+    // the decision layers land next — for now always allow, always record.
+    let lexed = lexer::lex(&proposal.buffer);
+    let cmd_expands = lexer::command_words(&lexed)
+        .first()
+        .is_some_and(|w| w.expands);
+    let word_count = lexed
+        .tokens
+        .iter()
+        .filter(|t| matches!(t, lexer::Token::Word(_)))
+        .count();
+    let mut evidence = lexed.uncertainty;
+    if proposal.capped {
+        evidence.push("input.capped");
+    }
+
     let duration_us = started.elapsed().as_micros();
     let decision = Decision {
         decision: "allow",
         reason_code: "shadow.observed",
-        evidence: Vec::new(),
+        evidence,
         timings_us: Timings { total: duration_us },
     };
 
@@ -110,9 +128,11 @@ fn check(args: &[String]) -> ExitCode {
         ts_ms: events::now_ms(),
         decision: decision.decision,
         reason_code: decision.reason_code,
+        evidence: decision.evidence.clone(),
         res_kind: proposal.res_kind.as_str(),
+        cmd_expands,
         buffer_bytes: proposal.buffer.len(),
-        word_count: proposal.buffer.split_whitespace().count(),
+        word_count,
         duration_us,
     });
 

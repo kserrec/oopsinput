@@ -16,8 +16,12 @@ pub struct Event {
     pub ts_ms: u64,
     pub decision: &'static str,
     pub reason_code: &'static str,
+    /// stable evidence codes (static strings by type — can't carry raw text)
+    pub evidence: Vec<&'static str>,
     /// closed-vocabulary resolution kind of the command word
     pub res_kind: &'static str,
+    /// first command word contains an expansion/substitution/glob
+    pub cmd_expands: bool,
     /// structural size features — never content
     pub buffer_bytes: usize,
     pub word_count: usize,
@@ -103,7 +107,9 @@ mod tests {
                                 ts_ms: t * 1000 + i,
                                 decision: "allow",
                                 reason_code: "shadow.observed",
+                                evidence: vec!["syntax.heredoc"],
                                 res_kind: "command",
+                                cmd_expands: false,
                                 buffer_bytes: 10,
                                 word_count: 2,
                                 duration_us: 1,
@@ -132,7 +138,9 @@ mod tests {
             ts_ms: 1,
             decision: "allow",
             reason_code: "shadow.observed",
+            evidence: vec!["syntax.opaque_substitution"],
             res_kind: "command",
+            cmd_expands: true,
             buffer_bytes: 9,
             word_count: 2,
             duration_us: 42,
@@ -140,6 +148,7 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"decision\":\"allow\""));
         assert!(json.contains("\"buffer_bytes\":9"));
+        assert!(json.contains("\"evidence\":[\"syntax.opaque_substitution\"]"));
         // The event type has no field that could carry buffer content; this
         // test documents that invariant for future editors.
         assert!(!json.contains("buffer_text"));
