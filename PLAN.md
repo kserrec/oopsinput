@@ -4,77 +4,27 @@ Milestones are sized to complete in one focused session each. A milestone is
 done when its acceptance checks pass. SPEC.md is canonical; check items off
 here as they land.
 
-Completed milestones: M0 (skeleton and governance), M1 (zsh capture + shadow
-passthrough; overhead p50 5 ms / p95 6 ms), and Post-M1 hardening — all
-✅ 2026-08-05 → archived verbatim in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
-That archive also holds the name decision (2026-08-05: "oopsinput" verified
-clear on GitHub/crates.io/npm/PyPI/domains; `noops`, `oopsh`, `oopsys`,
-`nooops` rejected — settled, don't re-litigate).
+Completed milestones, all archived verbatim in
+[PLAN-ARCHIVE.md](PLAN-ARCHIVE.md): M0 (skeleton and governance), M1 (zsh
+capture + shadow passthrough), Post-M1 hardening — ✅ 2026-08-05 — and M2
+(lexer + typo layer, the first user-visible value, with its refactor/bughunt/
+audit passes) — ✅ 2026-08-06. Current measured cost, release build including
+spawn: p50 3.6 ms / p95 4.4 ms on the common path, p50 16.3 ms / p95 19.5 ms
+on the typo path (budgets 25 / 75). The archive also holds the 2026-08-05
+name decision — settled, don't re-litigate.
 
-## M2 — Lexer + typo layer (first visible value)
+Standing rules carried out of archived milestones:
 
-- [x] lexer.rs: conservative lexer per SPEC §13, fuzz smoke test, never
-      panics; uncertainty codes (`syntax.*`) + `input.capped` wired into
-      decision evidence and shadow events, so the SPEC §11 unsupported-syntax
-      rate is measurable from shadow data (2026-08-05; in-binary check p50
-      ~240 µs with lexing)
-- [x] Deferred bughunt finding: the 1 MB input cap errors (fail-open, event
-      lost) when it lands mid-UTF-8-character — read bytes and truncate at a
-      char boundary so oversized input is capped-and-analyzed instead
-      (2026-08-05)
-- [x] layers/typo.rs: exact resolution check, bounded edit distance vs PATH +
-      plugin-supplied names (2026-08-06: fires only on res=none with a literal
-      first word; bounded OSA distance ≤1/≤2 by length; PATH scanned by
-      readdir with x-bit verification and hard caps; plugin ships the
-      alias/function/builtin/resword pool NUL-separated on stdin, only on the
-      already-failing none path; shadow evidence `typo.candidate_d1/_d2`,
-      names never logged; typo path ~9 ms p50 in-binary, resolving path
-      unchanged ~240 µs)
-- [x] ui.rs: /dev/tty single-key prompts; escaping pass (control/ANSI/OSC/bidi
-      neutralized) + fuzz target (2026-08-06: escaper neutralizes all Cc
-      controls, bidi embeddings/overrides/isolates, zero-width/invisible
-      formatting — caret notation for C0, visible \u{...} otherwise; fuzz
-      smoke asserts nothing active survives + idempotence; single-key prompt
-      via stty on /dev/tty — -icanon -echo -isig, VTIME timeout 10 s → `n`,
-      Ctrl-C read as 0x03 = cancel, stty -g state restored by Drop guard;
-      real-tty PTY tests via debug-only `__prompt-typo-test` seam; caller
-      contract: neutralize watchdog before prompting — enforced at wiring,
-      next item)
-- [x] `y` runs correction / `n` runs original / Ctrl-C cancels; replacement
-      returns on fd 3, never argv/stdout — **security-critical channel** (audit
-      2026-08-05): the one path where binary output becomes an executed
-      command; same rigor as the event log (exact bytes, no interpretation,
-      pinned tests) (2026-08-06: replacement_buffer() swaps only the command
-      word with pinned byte-exactness tests, refuses on any boundary
-      disagreement; fd 3 reopened via /dev/fd/3 (no-unsafe rule) and routed
-      to the plugin through `3>&1` capture; exact bytes + one NUL sentinel —
-      survives $()'s newline stripping and doubles as truncation guard,
-      plugin runs replacement only with sentinel intact, else fails open;
-      exit 10 only after a complete successful write; watchdog retires via
-      PROMPT_ACTIVE once a prompt is on screen (PTY-tested past the
-      deadline); minimal SPEC §15 mode gate landed early: $OOPSINPUT_MODE >
-      config `mode` key > shadow, closed vocabulary; PTY tests cover
-      y/n/Ctrl-C end-to-end incl. event outcomes typo.accepted / declined /
-      cancelled)
-- [x] `suggest` mode enabled by default post-install (2026-08-06: install.zsh
-      writes `mode = suggest` to $XDG_CONFIG_HOME/oopsinput/config (or
-      ~/.config) with 0700/0600 perms, never touching an existing config;
-      uninstall message covers config removal; tests/install.rs covers fresh
-      default + perms, existing-config untouched, idempotency; PTY test
-      proves the exact installed config artifact enables prompts through the
-      real config path)
-- [x] Acceptance: golden typo cases pass; command words that resolve NEVER
-      prompt; p95 within budget (2026-08-06: eval/golden/typo.json — 19 cases,
-      42% counterfactual pairs (≥30% ratio asserted in the runner), hermetic
-      via analyze_with_path with empty PATH, pinning candidate + exact
-      evidence assembly; PTY test proves alias/builtin/command/chain words
-      never prompt in suggest mode; release end-to-end incl. spawn:
-      deterministic p50 3.6 ms / p95 4.4 ms (budget 25), typo path with 2k
-      names + full PATH scan p50 16.3 ms / p95 19.5 ms (budget 75))
-
-**M2 complete 2026-08-06** — typing a misspelled command in suggest mode
-prompts with the nearest real command; `y` runs it, `n`/timeout runs the
-original, Ctrl-C cancels; resolving words never prompt.
+- **Any channel where binary output can become an executed command, or land
+  in the user's buffer, gets event-log rigor**: exact bytes, no
+  interpretation, an integrity check, pinned tests (audit 2026-08-05, built
+  in M2 for the fd-3 correction channel; applies to every later milestone).
+- **Every external helper: absolute path, fixed argv, hard timeout** — never
+  resolved through $PATH (audit 2026-08-06; see M6's SECURITY.md item for
+  why).
+- **Word boundaries follow the shell, not Unicode**: `lexer::is_shell_whitespace`
+  (space/tab/newline only) governs every decision about where a word starts
+  or ends (bughunt 2026-08-06).
 
 ## M3 — Danger + context layers, policy, warning UI
 
@@ -82,7 +32,10 @@ original, Ctrl-C cancels; resolving words never prompt.
 - [ ] layers/context.rs: git facts, target facts, recency relation, near-miss
       targets — all hard-capped syscall collectors
 - [ ] policy.rs: evidence → decision matrix; direct-catastrophic subset;
-      intervention budget + per-rule cooldown; shadow conversion
+      intervention budget + per-rule cooldown; shadow conversion. Note a
+      minimal config reader already exists from M2 ($OOPSINPUT_MODE > config
+      `mode` key > shadow, unknown values → shadow); this expands it to the
+      full SPEC §15 surface incl. warn-once on unknown keys
 - [ ] Warning UI: anatomy per SPEC §7; e/edit c/cancel r/run-once; exact
       buffer restore on edit (PTY-tested). Deferred bughunt finding
       (2026-08-06, deferred because this item rebuilds the prompt key
@@ -116,7 +69,13 @@ original, Ctrl-C cancels; resolving words never prompt.
       interventions from shadow data
 - [ ] `oopsinput purge`; retention pruning
 - [ ] Author pilot: ≥1,000 natural commands in shadow+suggest; review top
-      candidates + random allow sample; findings → regression fixtures
+      candidates + random allow sample; findings → regression fixtures.
+      **Purge the event log before starting** (`rm ~/.local/state/oopsinput/
+      events.jsonl`): the dev machine's log contains ~435 synthetic events
+      written by benchmark loops and probes on 2026-08-06 that ran the real
+      binary without `OOPSINPUT_STATE_DIR` set, so accumulated data is not
+      all natural. For the same reason, always set `OOPSINPUT_STATE_DIR` to
+      a temp dir when probing `check` by hand
 - [ ] Tune budgets/thresholds from pilot data; graduate first warn category if
       evidence supports it
 - [ ] Acceptance: pilot writeup in eval/; decision recorded per category
@@ -134,10 +93,10 @@ original, Ctrl-C cancels; resolving words never prompt.
       directory on $PATH is trusted — the typo layer fires on *unresolvable*
       commands, so any helper resolved by name turns any typo into execution
       of a predictable name from whatever directory leads $PATH (`.`, or a
-      repo's ./bin added by direnv). Every external helper: absolute path,
-      fixed argv, hard timeout. Also record: install.zsh leaves any existing
-      path (dangling symlinks included) untouched rather than writing
-      through it.
+      repo's ./bin added by direnv); document the external-helper rule that
+      follows from it (see header). Also record: install.zsh leaves any
+      existing path (dangling symlinks included) untouched rather than
+      writing through it.
 - [ ] `oopsinput doctor` covers: plugin installed, widgets wrapped, config
       valid, model reachable (optional), state perms
 - [ ] Clean-machine test: fresh user → install → shadow → report → uninstall
