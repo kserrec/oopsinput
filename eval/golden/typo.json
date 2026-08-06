@@ -114,6 +114,14 @@
     "expect_evidence": []
   },
   {
+    "name": "nbsp-prefix-stays-in-the-word",
+    "buffer": " gti status",
+    "res": "none",
+    "names": ["git"],
+    "expect_candidate": null,
+    "expect_evidence": []
+  },
+  {
     "name": "quoted-word-not-analyzed",
     "buffer": "'gti' status",
     "res": "none",

@@ -34,6 +34,17 @@ pub struct Lexed {
     pub uncertainty: Vec<&'static str>,
 }
 
+/// The characters zsh itself treats as word separators: space, tab, newline.
+/// NOT `char::is_whitespace()` — Unicode blanks like the no-break space are
+/// literal word characters to the shell, and this lexer must tokenize the way
+/// the shell will, or the typo layer can analyze (and "correct") a different
+/// word than the one the shell resolved. Regression (bughunt 2026-08-06):
+/// `\u{A0}gti` was analyzed as `gti`, and consenting to the correction ran
+/// `\u{A0}git` — another command-not-found.
+pub fn is_shell_whitespace(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n')
+}
+
 pub fn lex(input: &str) -> Lexed {
     let mut lx = Lexer {
         chars: input.chars().collect(),
@@ -121,7 +132,7 @@ impl Lexer {
     fn run(&mut self) {
         while let Some(c) = self.cur() {
             match c {
-                c if c.is_whitespace() => self.i += 1,
+                c if is_shell_whitespace(c) => self.i += 1,
                 '&' | '|' | ';' => self.lex_control(c),
                 '<' | '>' if self.peek(1) == Some('(') => self.lex_word(), // <(cmd)
                 '<' | '>' => self.lex_redirect(0),
@@ -263,7 +274,7 @@ impl Lexer {
         let mut has = false;
         while let Some(c) = self.cur() {
             match c {
-                c if c.is_whitespace() => break,
+                c if is_shell_whitespace(c) => break,
                 '&' | '|' | ';' | ')' => break,
                 '<' | '>' => {
                     if self.peek(1) == Some('(') {

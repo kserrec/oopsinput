@@ -120,6 +120,16 @@ fn best_candidate(word: &str, path: &str, extra_names: &[String]) -> Option<Sugg
             };
             // A PATH entry only counts if it would actually run — a plain
             // file merely named like a command resolves to nothing.
+            //
+            // An exact-name match is checked outside the stat budget
+            // (bughunt 2026-08-06: budget exhaustion once skipped the
+            // suppression rule); it is bounded by one stat per PATH dir.
+            if d == 0 {
+                if is_executable_file(&entry.path()) {
+                    search.accept(0, name);
+                }
+                continue;
+            }
             if stats >= MAX_STATS {
                 continue;
             }
@@ -150,7 +160,9 @@ pub fn replacement_buffer(buffer: &str, typed: &str, candidate: &str) -> Option<
     if typed.is_empty() || candidate.is_empty() {
         return None;
     }
-    let start = buffer.find(|c: char| !c.is_whitespace())?;
+    // Shell whitespace only, matching the lexer and zsh itself — Unicode
+    // blanks are word characters to the shell (bughunt 2026-08-06).
+    let start = buffer.find(|c: char| !crate::lexer::is_shell_whitespace(c))?;
     let rest = &buffer[start..];
     if !rest.starts_with(typed) {
         return None;
@@ -159,7 +171,9 @@ pub fn replacement_buffer(buffer: &str, typed: &str, candidate: &str) -> Option<
     // The word must end here too: whitespace, an operator, or end-of-buffer.
     // starts_with alone would let "gti" match into "gtifoo" if this check and
     // the lexer ever disagreed on word boundaries.
-    if !after.is_empty() && !after.starts_with(|c: char| c.is_whitespace() || "|&;<>()".contains(c))
+    if !after.is_empty()
+        && !after
+            .starts_with(|c: char| crate::lexer::is_shell_whitespace(c) || "|&;<>()".contains(c))
     {
         return None;
     }
@@ -187,7 +201,7 @@ impl Search {
     /// Distance to `name` if within budget AND it would improve the current
     /// best (so callers can skip verification work for losers).
     fn distance_if_useful(&self, name: &str) -> Option<usize> {
-        if name.len() > MAX_NAME_BYTES {
+        if name.len() > MAX_NAME_BYTES || !is_plausible_command_name(name) {
             return None;
         }
         let cand: Vec<char> = name.chars().collect();
@@ -209,6 +223,18 @@ impl Search {
             self.best = Some((d, name.to_string()));
         }
     }
+}
+
+/// A candidate must be typable as one bare command word, because on `y` it is
+/// spliced verbatim into an executed buffer. zsh accepts alias names like
+/// `'foo bar'` (bughunt 2026-08-06): suggesting one would run command `foo`
+/// with argument `bar` — a different parse than the prompt promised. Reject
+/// any name carrying whitespace or a shell metacharacter.
+fn is_plausible_command_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.chars().any(|c| {
+            crate::lexer::is_shell_whitespace(c) || "\r'\"\\$`&|;<>(){}*?[]#~!=".contains(c)
+        })
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -435,6 +461,76 @@ mod tests {
         assert_eq!(replacement_buffer("gti x", "", "git"), None);
         assert_eq!(replacement_buffer("gti x", "gti", ""), None);
         assert_eq!(replacement_buffer("   ", "gti", "git"), None);
+    }
+
+    #[test]
+    fn unicode_blank_is_part_of_the_word_like_zsh_says() {
+        // Regression (bughunt 2026-08-06): a pasted no-break space before a
+        // typo ("\u{A0}gti") was analyzed as "gti" while the shell resolved
+        // "\u{A0}gti", and consenting to the correction ran "\u{A0}git" —
+        // another command-not-found. Tokenization must match the shell's.
+        let lexed = lex("\u{A0}gti status");
+        assert_eq!(
+            literal_command_word(&lexed),
+            Some("\u{A0}gti"),
+            "the shell keeps the NBSP in the word; so must we"
+        );
+        // ...and that word is nowhere near 'git', so nothing is suggested.
+        let names = vec!["git".to_string()];
+        assert!(best_candidate("\u{A0}gti", "", &names).is_none());
+        // A replacement can never be built against the bare word either.
+        assert_eq!(replacement_buffer("\u{A0}gti status", "gti", "git"), None);
+    }
+
+    #[test]
+    fn implausible_candidate_names_are_never_suggested() {
+        // zsh accepts alias names like 'foo bar'; splicing one into the
+        // buffer would run command `foo` with argument `bar` — a different
+        // parse than the prompt promised (bughunt 2026-08-06).
+        for name in ["foo bar", "foo'x", "a$b", "a\"b", "a;b", "a*", "a=b", ""] {
+            let names = vec![name.to_string()];
+            assert!(
+                best_candidate("fooxbar", "", &names).is_none(),
+                "name {name:?} must never become a suggestion"
+            );
+        }
+        // sanity: a plausible name still wins
+        let names = vec!["fooxxbar".to_string()];
+        assert!(best_candidate("fooxbar", "", &names).is_some());
+    }
+
+    #[test]
+    fn exact_match_suppresses_even_past_the_stat_budget() {
+        // Regression (bughunt 2026-08-06): the exact-name suppression rule
+        // once sat behind the stat budget, so 200+ near-matches could skip it.
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("oopsinput-statcap-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mk = |name: &str| {
+            let p = dir.join(name);
+            fs::write(&p, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // 250+ distinct executables within distance 2 of the typed word, so
+        // the stat budget is guaranteed to run out in this directory...
+        let mut near = 0;
+        'outer: for a in 'a'..='z' {
+            for b in 'a'..='z' {
+                mk(&format!("statcap{a}{b}"));
+                near += 1;
+                if near > MAX_STATS + 50 {
+                    break 'outer;
+                }
+            }
+        }
+        // ...plus the exact match, which must still be honored.
+        mk("statcap");
+        let path = dir.to_str().unwrap();
+        assert!(
+            best_candidate("statcap", path, &[]).is_none(),
+            "an exact executable match must suppress regardless of stat budget"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

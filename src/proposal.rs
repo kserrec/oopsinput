@@ -116,15 +116,16 @@ impl Proposal {
 /// contain it. Returns (buffer, buffer_capped, names, names_capped).
 fn parse_payload(mut bytes: Vec<u8>) -> Result<(String, bool, Vec<String>, bool), ReadError> {
     let cap = MAX_INPUT_BYTES as usize;
-    let search_end = bytes.len().min(cap);
-    let Some(pos) = bytes[..search_end].iter().position(|&b| b == 0) else {
+    // Search the full read (up to cap + 1 bytes), not just the capped prefix:
+    // a NUL landing exactly on the cap boundary is still a complete buffer
+    // with a (lost) names section, not a capped buffer (bughunt 2026-08-06).
+    let Some(pos) = bytes.iter().position(|&b| b == 0) else {
         // No names section: the whole payload is the buffer.
         let (buffer, capped) = buffer_from_bytes(bytes)?;
         return Ok((buffer, capped, Vec::new(), false));
     };
 
     let over_cap = bytes.len() > cap;
-    bytes.truncate(cap);
     let names_bytes = bytes.split_off(pos + 1);
     bytes.pop(); // the NUL separator
 
@@ -292,6 +293,22 @@ mod tests {
             vec!["alpha", "beta"],
             "cut final name must be dropped"
         );
+    }
+
+    #[test]
+    fn nul_exactly_at_cap_is_a_complete_buffer() {
+        // Regression (bughunt 2026-08-06): the NUL search once stopped at the
+        // cap, so a buffer of exactly MAX bytes followed by the separator was
+        // mislabeled as capped.
+        let mut bytes = vec![b'a'; MAX];
+        bytes.push(0);
+        let Ok((buffer, capped, names, names_capped)) = parse_payload(bytes) else {
+            panic!("boundary payload must parse");
+        };
+        assert_eq!(buffer.len(), MAX);
+        assert!(!capped, "buffer ended at the separator — not capped");
+        assert!(names.is_empty());
+        assert!(names_capped, "the names section itself was beyond the read");
     }
 
     #[test]

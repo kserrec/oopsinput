@@ -84,7 +84,12 @@ original, Ctrl-C cancels; resolving words never prompt.
 - [ ] policy.rs: evidence → decision matrix; direct-catastrophic subset;
       intervention budget + per-rule cooldown; shadow conversion
 - [ ] Warning UI: anatomy per SPEC §7; e/edit c/cancel r/run-once; exact
-      buffer restore on edit (PTY-tested)
+      buffer restore on edit (PTY-tested). Deferred bughunt finding
+      (2026-08-06, deferred because this item rebuilds the prompt key
+      handling): the single-byte prompt read treats a multi-byte key
+      sequence (arrow keys: ESC [ A) as ESC + leftover bytes, which leak
+      into the next ZLE buffer as stray characters — the new key reader
+      must consume complete escape sequences
 - [ ] eval/golden: paired counterfactual cases for every danger rule (≥30%
       pairs); CI runs the corpus
 - [ ] Acceptance: flagship pair behaves (dirty `git reset --hard` warns; clean

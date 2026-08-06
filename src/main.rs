@@ -233,13 +233,14 @@ fn check(args: &[String]) -> ExitCode {
         duration_us,
     });
 
-    match serde_json::to_string(&decision) {
-        Ok(json) => {
-            println!("{json}");
-            ExitCode::from(exit_code)
-        }
-        Err(_) => ExitCode::from(1),
+    // The decision JSON is diagnostics; the exit code is the contract. Once
+    // the replacement is on fd 3 the code MUST be 10 — a print failure here
+    // must not flip a consented correction back into fail-open (bughunt
+    // 2026-08-06; unreachable today with all-static fields, pinned anyway).
+    if let Ok(json) = serde_json::to_string(&decision) {
+        println!("{json}");
     }
+    ExitCode::from(exit_code)
 }
 
 /// Assemble the decision's evidence codes in stable order: lexer uncertainty
@@ -324,28 +325,36 @@ fn doctor() -> ExitCode {
         zsh.as_deref().unwrap_or("NOT FOUND in PATH")
     );
 
+    // Regression (bughunt 2026-08-06): this line once hardcoded
+    // ~/.config, contradicting the mode line below whenever
+    // XDG_CONFIG_HOME pointed elsewhere. Both must resolve identically.
+    match config_path() {
+        None => println!("  config:     HOME is unset — cannot locate config"),
+        Some(config) => {
+            let config_exists = std::fs::metadata(&config).is_ok();
+            println!(
+                "  config:     {} {}",
+                config.display(),
+                if config_exists {
+                    "(present)"
+                } else {
+                    "(absent — defaults in effect)"
+                }
+            );
+            println!(
+                "  mode:       {}",
+                match resolve_mode() {
+                    Mode::Shadow => "shadow",
+                    Mode::Suggest => "suggest (L1 typo prompts)",
+                }
+            );
+        }
+    }
+
     let home = std::env::var("HOME").unwrap_or_default();
     if home.is_empty() {
-        println!("  config:     HOME is unset — cannot locate config or plugin");
+        println!("  plugin:     HOME is unset — cannot locate ~/.zshrc");
     } else {
-        let config = format!("{home}/.config/oopsinput/config");
-        let config_exists = std::fs::metadata(&config).is_ok();
-        println!(
-            "  config:     {config} {}",
-            if config_exists {
-                "(present)"
-            } else {
-                "(absent — defaults in effect)"
-            }
-        );
-        println!(
-            "  mode:       {}",
-            match resolve_mode() {
-                Mode::Shadow => "shadow",
-                Mode::Suggest => "suggest (L1 typo prompts)",
-            }
-        );
-
         let zshrc = format!("{home}/.zshrc");
         let plugin_installed = std::fs::read_to_string(&zshrc)
             .map(|s| s.contains(">>> oopsinput >>>"))
