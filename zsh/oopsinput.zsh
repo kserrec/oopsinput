@@ -22,6 +22,9 @@ if [[ ! -x $_OOPSINPUT_BIN ]]; then
     return 0
 fi
 
+# history/aliases/functions introspection (recency + typo candidate pool).
+zmodload zsh/parameter 2>/dev/null
+
 # Every ZLE widget that submits the buffer for execution.
 typeset -ga _OOPSINPUT_WIDGETS
 _OOPSINPUT_WIDGETS=(
@@ -73,23 +76,53 @@ _oopsinput_handle() {
         esac
     fi
 
-    # When the command word resolves to nothing — L1 typo territory — the
-    # payload also carries the candidate pool (every name only the live shell
-    # can see: aliases, functions, builtins, reserved words) after a NUL
-    # separator; zsh strings can never contain NUL, so the separator is
-    # collision-free. Only that already-failing path pays the cost.
-    [[ $kind == none ]] && zmodload zsh/parameter 2>/dev/null
+    # Recency relation (SPEC §5-L3): structural summaries of the last few
+    # commands, computed HERE so no raw history text ever crosses to the
+    # binary — per entry only: age, a shares-a-word bit (does the entry share
+    # a non-command word with the current buffer, e.g. a target path typed
+    # moments ago), and the first two words sanitized to [A-Za-z0-9_-]{1,32};
+    # anything else — quoted words, URLs, values — collapses to "_". A secret
+    # cannot survive that shape.
+    local -a _oi_recency=() _oi_bufrest=( ${_oi_words[2,-1]} )
+    local -a _oi_hkeys=( ${(Onk)history} ) _oi_hw
+    local _oi_h _oi_w _oi_c1 _oi_c2
+    integer _oi_age _oi_share
+    for _oi_age in 1 2 3 4 5; do
+        _oi_h=${history[${_oi_hkeys[$_oi_age]:-0}]:-}
+        [[ -z $_oi_h ]] && continue
+        _oi_hw=( ${(z)_oi_h} )
+        _oi_share=0
+        for _oi_w in ${_oi_hw[2,-1]}; do
+            if (( ${_oi_bufrest[(Ie)$_oi_w]} <= ${#_oi_bufrest} )); then
+                _oi_share=1; break
+            fi
+        done
+        _oi_c1=${_oi_hw[1]:-}
+        _oi_c2=${_oi_hw[2]:-}
+        [[ -n $_oi_c1 && -z ${_oi_c1//[A-Za-z0-9_-]/} && ${#_oi_c1} -le 32 ]] || _oi_c1=_
+        [[ -n $_oi_c2 && -z ${_oi_c2//[A-Za-z0-9_-]/} && ${#_oi_c2} -le 32 ]] || _oi_c2=_
+        _oi_recency+=( "$_oi_age $_oi_share $_oi_c1 $_oi_c2" )
+    done
 
+    # Payload sections, NUL-separated (zsh strings can never contain NUL, so
+    # the separator is collision-free): buffer, typo candidate pool, recency.
+    # The candidate pool (every name only the live shell can see: aliases,
+    # functions, builtins, reserved words) is sent only when the command word
+    # resolves to nothing — L1 typo territory — so only that already-failing
+    # path pays its cost.
+    #
     # fd 3 is the replacement channel (SPEC §6): the binary's fd 3 is routed
     # into $captured; its stdout (decision JSON) and stderr are discarded.
     # Prompts reach the terminal via /dev/tty, not through these streams.
     local captured rc
     captured=$( {
         print -rn -- "$original"
+        print -rn -- $'\0'
         if [[ $kind == none ]]; then
-            print -rn -- $'\0'
             print -rl -- ${(k)aliases} ${(k)functions} ${(k)builtins} ${(k)reswords}
         fi
+        print -rn -- $'\0'
+        (( ${#_oi_recency} )) && print -rl -- $_oi_recency
     } | "$_OOPSINPUT_BIN" check --res "$kind" 3>&1 >/dev/null 2>&1 )
     rc=$?
 

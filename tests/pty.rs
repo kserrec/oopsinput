@@ -100,19 +100,51 @@ impl Session {
     /// Needed wherever timing matters — e.g. a 0x03 sent before the binary's
     /// terminal mode switch would become SIGINT instead of a key. `exit` is
     /// appended automatically.
+    ///
+    /// A missing marker panics with the transcript instead of hanging the
+    /// suite: reads run on a helper thread and the wait is bounded (probed
+    /// 2026-08-06 — a marker typo hung `cargo test` for its full timeout).
     fn run_staged(&self, stages: &[(&str, u64, &str)]) -> String {
         use std::io::Read;
+        use std::sync::mpsc;
         let mut child = self.spawn_zsh();
 
         let mut stdin = child.stdin.take().unwrap();
         let mut stdout = child.stdout.take().unwrap();
-        let mut seen: Vec<u8> = Vec::new();
-        let mut chunk = [0u8; 4096];
-        for (wait_for, delay_ms, send) in stages {
-            while !String::from_utf8_lossy(&seen).contains(wait_for) {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let reader = std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
                 match stdout.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => seen.extend_from_slice(&chunk[..n]),
+                    Ok(n) => {
+                        if tx.send(chunk[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut seen: Vec<u8> = Vec::new();
+        for (wait_for, delay_ms, send) in stages {
+            while !String::from_utf8_lossy(&seen).contains(wait_for) {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                assert!(
+                    !left.is_zero(),
+                    "marker {wait_for:?} never appeared; transcript so far:\n{}",
+                    String::from_utf8_lossy(&seen)
+                );
+                match rx.recv_timeout(left) {
+                    Ok(bytes) => seen.extend_from_slice(&bytes),
+                    Err(_) => {
+                        let _ = child.kill();
+                        panic!(
+                            "marker {wait_for:?} never appeared; transcript so far:\n{}",
+                            String::from_utf8_lossy(&seen)
+                        );
+                    }
                 }
             }
             if *delay_ms > 0 {
@@ -122,8 +154,12 @@ impl Session {
         }
         let _ = stdin.write_all(b"exit\r");
         drop(stdin);
-        let _ = stdout.read_to_end(&mut seen);
+        // Drain whatever the session prints on its way out.
+        while let Ok(bytes) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            seen.extend_from_slice(&bytes);
+        }
         let _ = child.wait();
+        let _ = reader.join();
         String::from_utf8_lossy(&seen).into_owned()
     }
 }
@@ -692,6 +728,34 @@ fn warn_mode_clean_reset_is_silently_allowed() {
     assert!(
         log.contains("policy.context_clear"),
         "silent allow not recorded with its reason:\n{log}"
+    );
+}
+
+#[test]
+fn warning_names_the_previous_command_from_recency() {
+    // SPEC §5-L3 flagship phrasing: "git reset --hard … right after git
+    // diff". The recency relation is computed in the plugin (no raw history
+    // text crosses) and surfaces as a "previous command:" line.
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "warn"), ("GIT_PAGER", "cat")]);
+    let repo = make_repo(&s, true);
+    let cd = format!("cd {repo:?}\recho marker-p1\r");
+    let out = s.run_staged(&[
+        ("PTYTEST%", 0, &cd),
+        // `git diff` output proves completion without adding another history
+        // entry in between. Wait on the deletion line: color rendering keeps
+        // "-clean" in one ANSI span, while "+DIRTY" gets split by the
+        // added-whitespace highlight (probed: the first marker hung).
+        ("marker-p1", 0, "git diff\r"),
+        ("-clean", 0, "git reset --hard\r"),
+        ("[e]dit", 0, "cecho marker-p2\r"),
+    ]);
+    assert!(
+        out.contains("previous command: git diff"),
+        "recency line missing from warning:\n{out}"
+    );
+    assert!(
+        out.contains("marker-p2"),
+        "session did not continue:\n{out}"
     );
 }
 

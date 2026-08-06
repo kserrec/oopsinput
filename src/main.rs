@@ -165,6 +165,7 @@ fn check(args: &[String]) -> ExitCode {
         suggestion.as_ref(),
         &danger,
         context.as_ref(),
+        &proposal.recency,
     );
 
     // Analysis-only duration: the prompt below waits on a human and must not
@@ -185,7 +186,7 @@ fn check(args: &[String]) -> ExitCode {
                 policy::cap_for_mode(policy::warranted(&danger, context.as_ref()), cfg.mode);
             match capped.verdict {
                 policy::Verdict::Warn | policy::Verdict::Confirm => {
-                    warning_intervention(capped, &danger, context.as_ref(), &cfg)
+                    warning_intervention(capped, &danger, context.as_ref(), &proposal.recency, &cfg)
                 }
                 _ => (capped.verdict.as_str(), capped.reason, 0u8, None),
             }
@@ -240,6 +241,7 @@ fn build_evidence(
     suggestion: Option<&layers::typo::Suggestion>,
     danger: &layers::danger::Analysis,
     context: Option<&layers::context::Context>,
+    recency: &[proposal::RecencyEntry],
 ) -> Vec<&'static str> {
     let mut evidence = lexer_uncertainty;
     if capped {
@@ -290,6 +292,11 @@ fn build_evidence(
             }
         }
     }
+    // Recency (SPEC §5-L3): only candidate events carry it — on benign
+    // commands word overlap with recent history is routine, not evidence.
+    if !danger.codes.is_empty() && recency.iter().any(|r| r.shares_word) {
+        evidence.push("recency.target_overlap");
+    }
     evidence
 }
 
@@ -328,6 +335,7 @@ fn warning_intervention(
     assessment: policy::Assessment,
     danger: &layers::danger::Analysis,
     context: Option<&layers::context::Context>,
+    recency: &[proposal::RecencyEntry],
     cfg: &policy::Config,
 ) -> (&'static str, &'static str, u8, Option<&'static str>) {
     let rule = policy::primary_code(danger);
@@ -350,7 +358,7 @@ fn warning_intervention(
         return (gated.verdict.as_str(), gated.reason, 0, None);
     }
 
-    let lines = warning_lines(gated.reason, danger, context);
+    let lines = warning_lines(gated.reason, danger, context, recency);
     let pausing = gated.verdict == policy::Verdict::Confirm;
     PROMPT_ACTIVE.store(true, Ordering::SeqCst);
     let choice = ui::prompt_warning(&lines, pausing);
@@ -378,6 +386,7 @@ fn warning_lines(
     reason: &str,
     danger: &layers::danger::Analysis,
     context: Option<&layers::context::Context>,
+    recency: &[proposal::RecencyEntry],
 ) -> Vec<String> {
     let has = |code: &str| danger.codes.contains(&code);
     let git = context.and_then(|c| c.git.as_ref());
@@ -413,10 +422,25 @@ fn warning_lines(
             if git.and_then(|g| g.untracked) == Some(true) {
                 facts.push("untracked files present".to_string());
             }
-            vec![
+            let mut lines = vec![
                 action.to_string(),
                 format!("right now: {}", facts.join(", ")),
-            ]
+            ];
+            // "right after git diff" (SPEC §5-L3): name the previous command
+            // when its words were clean enough to survive sanitization —
+            // charset-enforced in proposal.rs, so inert on a terminal.
+            if let Some(prev) = recency.first()
+                && prev.age == 1
+                && prev.cmd != "_"
+            {
+                let mut line = format!("previous command: {}", prev.cmd);
+                if prev.sub != "_" {
+                    line.push(' ');
+                    line.push_str(&prev.sub);
+                }
+                lines.push(line);
+            }
+            lines
         }
         "policy.main_branch_force" => vec![
             "force-push will rewrite the remote branch's history".to_string(),
@@ -644,6 +668,7 @@ mod tests {
                 suggestion.as_ref(),
                 &danger,
                 None,
+                &[],
             );
             assert_eq!(
                 evidence,
@@ -726,7 +751,7 @@ mod tests {
             }),
             targets: vec![],
         };
-        let lines = warning_lines("policy.dirty_work_at_risk", &danger, Some(&ctx));
+        let lines = warning_lines("policy.dirty_work_at_risk", &danger, Some(&ctx), &[]);
         let joined = lines.join("\n");
         assert!(joined.contains("git reset --hard"), "{joined}");
         assert!(joined.contains("17 modified tracked files"), "{joined}");
@@ -734,13 +759,13 @@ mod tests {
 
         // catastrophic home delete names what dies
         let danger = layers::danger::analyze_with_home(&lexer::lex("rm -rf ~"), None);
-        let joined = warning_lines("policy.direct_catastrophic", &danger, None).join("\n");
+        let joined = warning_lines("policy.direct_catastrophic", &danger, None, &[]).join("\n");
         assert!(joined.contains("home directory"), "{joined}");
 
         // hostile target text is escaped before display (SPEC §9-5)
         let danger =
             layers::danger::analyze_with_home(&lexer::lex("rm -rf ./x\u{1b}EVIL\u{7}y"), None);
-        let joined = warning_lines("policy.target_context", &danger, None).join("\n");
+        let joined = warning_lines("policy.target_context", &danger, None, &[]).join("\n");
         assert!(!joined.contains('\u{1b}'), "raw ESC in warning: {joined:?}");
         assert!(joined.contains("./x^[EVIL^Gy"), "{joined}");
     }

@@ -634,6 +634,15 @@ in their module headers:
   prompt key reader now consumes complete escape sequences, fixing the
   stray-bytes-after-arrow-keys bug (bughunt 2026-08-06).
 
-Still ahead in M3: the recency relation (plugin-supplied). Files SPEC §16
-lists for later milestones (`model.rs`, `layers/infer.rs`) don't exist yet
-by design — modules are created when their milestone starts.
+- **The recency relation** (plugin + `src/proposal.rs`) — the plugin
+  computes structural summaries of the last 5 commands *in the shell*, so no
+  raw history text ever crosses to the binary: per entry only an age, a
+  shares-a-word bit, and the first two words sanitized to
+  `[A-Za-z0-9_-]{1,32}` (anything else becomes `_`). They ride a third
+  NUL-separated payload section, are re-sanitized on parse, and surface as
+  `recency.target_overlap` evidence plus the "previous command: git diff"
+  line in warnings.
+
+M3 is complete. Files SPEC §16 lists for later milestones (`model.rs`,
+`layers/infer.rs`) don't exist yet by design — modules are created when
+their milestone starts.

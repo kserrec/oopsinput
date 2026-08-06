@@ -68,19 +68,24 @@ Standing rules carried out of archived milestones:
       arrow_keys_at_a_prompt_leave_no_stray_bytes. Both flagship acceptance
       halves PTY-proven: dirty reset warns with facts named and cancel has
       zero side effects; clean reset passes silently
-- [ ] recency relation (rest of SPEC §5-L3): plugin-supplied structural
-      summaries of recent commands, secrets stripped in the plugin — zsh
-      plugin change, so PTY tests required. (Reordered after policy + UI,
-      2026-08-06: it had no consumer until policy existed, the M3 acceptance
-      doesn't depend on it, and its plugin protocol should be shaped by what
-      policy actually consumes)
-- [ ] eval/golden: paired counterfactual cases for every danger rule (≥30%
-      pairs); CI runs the corpus. Partially covered 2026-08-06: danger.json
-      (34 command-shape cases) + policy.json (19 context-flip cases incl.
-      the flagship pair) both enforce the ≥30% pair ratio in cargo test;
-      remaining: pairs for every not-yet-paired danger rule, CI itself is M6
-- [ ] Acceptance: flagship pair behaves (dirty `git reset --hard` warns; clean
-      scratch-branch reset silent); corpus green; zero side effects on cancel
+- [x] recency relation (rest of SPEC §5-L3) — ✅ 2026-08-06, stronger than
+      spec'd: instead of stripping secrets from history text, the plugin
+      computes the relation itself and sends only sanitized summaries (age,
+      shares-a-word bit, first two words constrained to [A-Za-z0-9_-]{1,32},
+      else "_") — no raw history text ever crosses; the binary re-sanitizes.
+      Payload gained a third NUL section; surfaces as
+      recency.target_overlap evidence and the "previous command: git diff"
+      warning line (PTY-proven). Also hardened run_staged: a missing marker
+      now panics with the transcript instead of hanging the suite
+- [x] eval/golden: paired counterfactual cases for every danger rule (≥30%
+      pairs) — ✅ 2026-08-06: danger.json 42 command-shape cases +
+      policy.json 19 context-flip cases; every danger rule has a paired
+      presence; both corpora enforce the ratio in cargo test (CI itself: M6)
+- [x] Acceptance — ✅ 2026-08-06, all PTY-proven: dirty `git reset --hard`
+      warns with facts named / clean reset silent; corpus green; cancel has
+      zero side effects (dirty bytes verified untouched on disk)
+
+**M3 complete.**
 
 ## M4 — Inference layer
 

@@ -70,8 +70,15 @@
   },
   {
     "name": "git-push-delete-refspec",
+    "pair": "push-delete",
     "buffer": "git push origin :feature",
     "expect_evidence": ["git.push_delete"]
+  },
+  {
+    "name": "git-push-branch-counterfactual",
+    "pair": "push-delete",
+    "buffer": "git push origin feature",
+    "expect_evidence": []
   },
   {
     "name": "git-branch-force-delete",
@@ -87,8 +94,39 @@
   },
   {
     "name": "git-filter-branch",
+    "pair": "history-rewrite",
     "buffer": "git filter-branch --tree-filter 'rm -f secrets.txt' HEAD",
     "expect_evidence": ["git.filter_branch"]
+  },
+  {
+    "name": "git-log-counterfactual",
+    "pair": "history-rewrite",
+    "buffer": "git log --oneline -20",
+    "expect_evidence": []
+  },
+  {
+    "name": "mv-force-overwrite",
+    "pair": "mv",
+    "buffer": "mv -f build.cfg deploy.cfg",
+    "expect_evidence": ["fs.force_overwrite"]
+  },
+  {
+    "name": "mv-plain-counterfactual",
+    "pair": "mv",
+    "buffer": "mv notes.txt archive.txt",
+    "expect_evidence": []
+  },
+  {
+    "name": "chown-recursive",
+    "pair": "chown",
+    "buffer": "sudo chown -R www-data:www-data /srv/app",
+    "expect_evidence": ["fs.chown_recursive", "priv.sudo"]
+  },
+  {
+    "name": "chown-single-counterfactual",
+    "pair": "chown",
+    "buffer": "sudo chown kyle notes.txt",
+    "expect_evidence": []
   },
   {
     "name": "sudo-rm-rf-home",
