@@ -35,6 +35,17 @@ runs four layers â€” typo, danger, context, and optional local-model inference â
 Shadow mode (observe, never interrupt) is the default until the data says a
 category has earned the right to speak.
 
+## Developing
+
+[ARCHITECTURE.md](ARCHITECTURE.md) is the developer guide: what each piece
+does, how a command flows through, and how it's all tested. Quick start
+(needs [rustup](https://rustup.rs), zsh, and util-linux `script`):
+
+```
+cargo build --release
+cargo test
+```
+
 ## License
 
 Apache-2.0
