@@ -52,9 +52,11 @@ conservative command lexer, the typo layer with its single-key prompt, the
 danger and context layers, the policy engine with its intervention budget,
 the warning interface (edit / cancel / run-once), local event recording, and
 the opt-in local-model layer (loopback Ollama, advisory-only, fully tested
-against a misbehaving model). Not yet done: the shadow-mode pilot that
-decides which warnings earn the right to appear by default, and release
-engineering (CI, `SECURITY.md`, the `report` command).
+against a misbehaving model). The local `report` and zero-argument `purge`
+commands are built, as is 30-day on-write retention. Not yet done: the
+shadow-mode pilot that decides which warnings earn the right to appear by
+default, and release engineering (CI, `SECURITY.md`, and share-ready install
+and update behavior).
 
 See [SPEC.md](SPEC.md) for the full design, [PLAN.md](PLAN.md) for
 milestone-by-milestone progress, and
@@ -97,6 +99,11 @@ To also see danger warnings, set this in `~/.config/oopsinput/config`:
 ```
 mode = warn
 ```
+
+`oopsinput report` summarizes recorded decisions without exposing command
+text. `oopsinput purge` deletes all oopsinput-owned recorded state while
+keeping configuration; run it before `zsh/uninstall.zsh` if you want that
+state removed as part of leaving.
 
 ## License
 

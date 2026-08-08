@@ -13,9 +13,9 @@ How it relates to the other documents:
 - **This document** covers *how the code works right now*. That is the whole
   deterministic product: command capture in zsh, the lexer, all three
   deterministic analysis layers (typo, danger, context), the policy engine,
-  both visible prompts, event logging, and the test harness that proves your
-  buffer survives intact. The optional local-model layer (L4) is fully
-  wired: with a model configured (default: none — deterministic-only),
+  both visible prompts, event logging and reporting, and the test harness that
+  proves your buffer survives intact. The optional local-model layer (L4) is
+  fully wired: with a model configured (default: none — deterministic-only),
   `check` consults loopback Ollama on the rare ambiguous danger candidate,
   measured at 0.27% of replayed natural commands.
 
@@ -47,7 +47,9 @@ of those cases the user's original command runs unchanged ("fail open").
 
 Prerequisites:
 
-- **Rust** via [rustup](https://rustup.rs) (user-level install, no root). If
+- **Rust 1.89 or newer** via [rustup](https://rustup.rs) (user-level install,
+  no root). The minimum is where standard-library cross-process file locking
+  stabilized. If
   `cargo` isn't found in a fresh shell:
 
 ```
@@ -229,13 +231,13 @@ All were real bugs, now pinned by tests:
 
 ## 4. The Rust side, ground-up
 
-Twelve modules. Analysis runs strictly cheapest-first, and each layer can be
+The Rust modules run analysis strictly cheapest-first, and each layer can be
 read on its own:
 
 ### 4.1 `src/main.rs` — dispatch, watchdog, the `check` path
 
 Hand-rolled subcommand dispatch (no CLI-parsing dependency; SPEC §12):
-`version`, `check`, `doctor`, `help`.
+`version`, `check`, `report`, `purge`, `doctor`, `help`.
 
 `check` is the command the plugin runs. It reads the config file first (a
 small, capped, local read), then immediately calls `arm_watchdog()`: a thread
@@ -322,6 +324,13 @@ failed, raw text still couldn't become a stored value. Unknown `check` flags
 are ignored — forward compatibility for the future agent-adapter seam
 (SPEC §6).
 
+That seam is only a foundation today: `check` writes a structured JSON
+decision, but its request is still this Zsh-specific stdin/flag format. There
+is no JSON request, serialized origin, task goal, or provenance yet, and
+non-interactive coding-agent subprocesses bypass ZLE entirely. Agent support
+therefore requires a real request contract plus an adapter and approval path;
+it is not activated by installing the current plugin.
+
 ### 4.3 `src/lexer.rs` — the conservative lexer
 
 Implements SPEC §13: it turns the buffer into words (with quoting resolved
@@ -347,7 +356,7 @@ made the lexer analyze `gti` while the shell had actually resolved
 command-not-found. Any code that decides where a word starts or ends must
 use this same function.
 
-### 4.4 `src/events.rs` — the shadow event log
+### 4.4 `src/events.rs` + `src/state.rs` — logs, report, retention, purge
 
 Appends one JSON line per command to `events.jsonl` in the state directory
 (resolution order: `$OOPSINPUT_STATE_DIR` override — used by tests — then
@@ -358,19 +367,58 @@ The invariants, all test-pinned:
 - **Structural fields only.** Timestamp, decision, reason code, evidence
   codes, resolution kind, buffer byte count, word count, duration, plus
   optional context *counts* (dirty file count, largest directory entry
-  count) and the user's outcome at a visible warning (`edited`, `cancelled`,
-  `ran_unchanged`). The `Event` struct has no field that *could* carry
-  command text — the type system is the redaction.
+  count), model state immediately before L4 inference (`warm`, `cold`, or
+  `unknown`), and the user's outcome at a visible warning (`edited`,
+  `cancelled`, `ran_unchanged`). The `Event` struct has no field that *could*
+  carry command text — the type system is the redaction.
 - **User-only permissions**: directory `0700`, file `0600`.
-- **One write syscall per event.** The line and its trailing newline are
-  joined into a single buffer before writing, because `O_APPEND` atomicity
-  holds per write call — two concurrent shells appending with separate
-  newline writes would interleave and corrupt the JSONL stream (a real bug
-  found by review, now pinned by a 16-thread hammer test).
+- **One locked, buffered append per event.** The line and its trailing newline
+  are joined before writing. Every event and policy writer takes the same
+  stable cross-process lock, so two shells cannot interleave a line or race a
+  retention rewrite (pinned by 16-thread event and 8-thread policy hammers).
 - **Never written through a symlink.** If the log path is a symbolic link,
   the append is refused rather than growing onto whatever it points at.
 - **Failures are swallowed.** Logging must never cost the user their command
   or their prompt.
+
+`oopsinput report` streams that JSONL file and summarizes the data without
+recomputing policy. It reports decision and intervention rates, ranked evidence
+codes and hypothetical policy reasons, visible-warning outcomes, and nearest-
+rank p50/p95/p99 analysis latency. An `observe` event whose reason starts with
+`policy.` is the persisted shadow conversion and counts as a hypothetical
+intervention. Any `model.*` evidence code keeps that event out of the
+deterministic latency bucket; the event's model state then chooses warm, cold,
+or unknown. That last bucket is important for old logs and failed status
+queries: absent metadata must not quietly become either a deterministic or a
+cold measurement. A torn or malformed line is counted and skipped, while
+valid neighboring events remain usable. Codes read from disk pass through the
+display escaper before reaching the terminal.
+
+`state.rs` owns the shared mechanics. On each append it reads a tiny marker;
+at most once per 24 hours per log, it streams valid records at or inside the
+30-day window to a private `0600` temporary file and atomically renames it over
+the old log. Expired and malformed/torn records are dropped. The stable lock
+anchor matters: locking the log itself would stop protecting writers the
+moment atomic rename created a new inode. Readers need no lock because they
+see one complete inode or the other. A sweep can lag the exact cutoff by less
+than a day, and no write means no sweep.
+
+Analysis-time state writes wait for that lock under the existing process
+watchdog, so normal concurrent shells lose no records without adding an
+unbounded hold on the command. Once the user has answered a prompt, each
+remaining state write waits no more than 25 ms; if contention outlives the
+bound, the record is omitted rather than delaying or overriding the user's
+edit/cancel/run choice. Explicit `purge` is different—it blocks for the lock
+because deletion is the only effect the user asked that command to perform.
+
+`oopsinput purge` takes that same lock and removes only oopsinput's named data,
+markers, abandoned temp files, and the lock itself; configuration is outside
+the state directory and stays. It refuses to enter a symlinked state directory
+or recursively delete a directory found at a file name. Known symlink entries
+are unlinked without following them; unknown entries stay, and keep the state
+directory from being removed. A waiting writer compares the inode it locked
+with the current anchor and retries if purge replaced it, so concurrent shells
+cannot split into two unsynchronized groups.
 
 ### 4.5 `src/layers/typo.rs` — L1, the typo layer
 
@@ -546,14 +594,13 @@ a cooldown a day — so a long-lived file costs a bounded read; a torn or
 partial line simply fails to parse and is skipped, and the path is never
 written through a symlink.
 
-**Append-only is load-bearing, not a style choice.** The first version was a
+**Append semantics are load-bearing, not a style choice.** The first version was a
 JSON blob loaded, modified and written back, which meant two shells finishing
 warnings in the same instant each recorded a spend and the second write
 dropped the first: the hourly cap silently under-counted and a cooldown could
-disappear. The event log had already solved that exact problem with one
-atomic append per line, and this is the same fix — the race is gone by
-construction rather than held off by a lock. An 8-thread test fails if anyone
-reintroduces read-modify-write here.
+disappear. New outcomes therefore append under the stable state lock; the only
+rewrite is retention's locked atomic replacement of expired records. An
+8-thread test fails if anyone reintroduces an uncoordinated read-modify-write.
 
 ### 4.9 `src/ui.rs` — prompts, message building, and the display escaper
 
@@ -619,7 +666,7 @@ value, so no path out of the prompt leaves your terminal in raw mode.
 
 ### 4.10 `src/model.rs` — the loopback HTTP client (L4 transport)
 
-The first piece of the inference layer: a self-written HTTP/1.1 POST over
+The first piece of the inference layer: a self-written HTTP/1.1 GET/POST over
 `std::net::TcpStream` (SPEC §12 rejects an HTTP crate for this — loopback
 needs no TLS, no redirects, no connection reuse). It refuses any non-loopback
 address before opening a socket, and the target is fixed at Ollama's default
@@ -648,8 +695,9 @@ It speaks enough HTTP to talk to Ollama and nothing more: status line,
 `Content-Length` / chunked / connection-close framing. Every failure —
 unreachable, timeout, oversized, malformed, non-2xx — is a distinct error the
 caller maps to "model evidence unavailable" (SPEC §9-6); nothing in this
-module can block a command. Today `doctor` is its only caller; the inference
-layer (prompt assembly, schema validation, the candidate gate) comes next.
+module can block a command. `doctor` uses `POST /api/show`; the inference layer
+uses `GET /api/ps` for pre-chat model state and `POST /api/chat` for advisory
+evidence. Every connection independently verifies the peer before sending.
 
 ### 4.11 `src/layers/infer.rs` — L4, the inference layer
 
@@ -670,6 +718,14 @@ consultation legitimately outlives the 150 ms deterministic deadline, the
 check path arms a one-shot watchdog extension (`model_timeout_ms` + margin)
 before the first socket call; the probe for that test showed the process
 watchdog-killed mid-consultation without it.
+
+Immediately before chat, the product queries Ollama's read-only `/api/ps`
+endpoint to record whether the configured model was already loaded. The query
+carries no proposal or command text, has a small slice of the existing model
+deadline, and the following chat shares that original overall deadline. A
+failed or malformed status response yields `unknown` but does not prevent the
+chat; a status query can classify performance, never decide whether model
+evidence is available.
 
 The prompt keeps computed facts and human text strictly apart (SPEC §5-L4).
 The request's user message is one JSON document: everything under
@@ -735,13 +791,13 @@ You type `git status` and press Enter:
    there is no candidate, the context layer never runs. Decision: `allow` /
    `shadow.observed`.
 5. It appends one structural line to `~/.local/state/oopsinput/events.jsonl`
-   (`src/events.rs:69`), prints the decision JSON on stdout (discarded by the
+   (`events::append` through `state::append_jsonl`), prints the decision JSON on stdout (discarded by the
    plugin), and exits 0.
 6. The plugin sees exit 0, restores `BUFFER=$original`, and delegates to the
    real `accept-line`. zsh executes `git status` exactly as typed.
 
 Measured on the dev machine, release build, including process spawn:
-**p50 2.4 ms, p95 4.4 ms** — against a 25 ms p95 budget (SPEC §10). If steps
+**p50 2.14 ms, p95 3.13 ms** — against a 25 ms p95 budget (SPEC §10). If steps
 3–5 fail *in any way* — binary missing, crash, watchdog fired, weird exit
 code — step 6 still happens identically.
 
@@ -813,13 +869,15 @@ prompt is shown at all, and the command runs in silence. The event log still
 records the reason, which is what makes the decision auditable later.
 
 Measured on the candidate path (release, including both our spawn and git's):
-**p50 15.0 ms, p95 18.1 ms**, against the same 75 ms p95 budget.
+**p50 7.44 ms, p95 9.09 ms**, against the same 75 ms p95 budget.
 
 ## 6. How it's tested
 
 The testing philosophy: **buffer exactness and fail-open behavior are the
 product**, so the highest-value tests drive a real interactive zsh, not mocks.
-165 tests across five suites today, plus two gates that run separately.
+227 automated tests today (226 passing by default plus one ignored live-model
+harness) across unit and six integration suites, plus two gates that run
+separately.
 
 - **Unit tests** live inside each `src/` module (`#[cfg(test)] mod tests`):
   the closed resolution vocabulary, payload parsing edge cases (including the
@@ -864,6 +922,11 @@ product**, so the highest-value tests drive a real interactive zsh, not mocks.
   installing twice doesn't duplicate the `~/.zshrc` block.
 - **`tests/doctor.rs`** — `doctor`'s config line and mode line must agree,
   including when `XDG_CONFIG_HOME` redirects the config elsewhere.
+- **`tests/report.rs`** — the shipped `report` command honors the selected
+  state directory and exposes its summary through the real CLI dispatch.
+- **`tests/purge.rs`** — exact destructive-command argv, empty-state success,
+  configuration/unknown-file preservation, known-symlink unlink safety, and
+  refusal to enter a symlinked directory or recurse into an unexpected one.
 - **`scripts/pty-gate.zsh`** — the volume acceptance gate: N unique
   submissions (default 10,000) through a PTY shell; every output must appear,
   nothing may hang. M1's run: 10,000/10,000, zero altered buffers, in 128 s.
@@ -929,7 +992,7 @@ Short versions — SPEC has the full arguments:
   built in the shell so raw history never crosses the boundary, and the
   binary re-checks the same restriction on arrival, because an adapter can be
   compromised or simply out of date.
-- **Sync only, lean style** (CLAUDE.md). No async runtime, plain data +
+- **Sync only, lean style** (AGENTS.md and CLAUDE.md). No async runtime, plain data +
   free functions, no `unwrap` outside tests, no `unsafe` without discussion.
 - **Shadow first** (SPEC §8). Nothing becomes visible to users until logged
   evidence says a category earns it. The decisive metric is false
@@ -982,11 +1045,10 @@ next; completed milestones are archived verbatim in
 [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md), including the findings from each
 refactor, bug-hunt, and security-audit pass.
 
-In short: the deterministic product is complete and tested — capture, lexing,
-all three deterministic layers, policy, and both prompts. What remains before
-a first release is the optional local-model layer, a shadow-mode pilot on
-real usage to decide which rule categories have earned the right to speak,
-and release engineering (continuous integration, `SECURITY.md`, a `report`
-command, and a clean-machine install test). Files SPEC §16 lists for later
-milestones (`model.rs`, `layers/infer.rs`) don't exist yet by design —
-modules are created when their milestone starts.
+In short: the deterministic product, optional local-model layer, and M5
+report, purge, and retention are complete and tested — capture, lexing, all
+four layers, policy, prompts,
+model gating and fallback, structural logging, and pilot-data summaries. What
+remains before a first release is M5's natural-command pilot and tuning,
+followed by M6 release engineering: continuous integration,
+`SECURITY.md`, a fuller `doctor`, and a clean-machine install test.

@@ -79,17 +79,18 @@ safety. An allowed command is "no intervention under current evidence," never
 ### Excluded from v1 (deferred, not rejected)
 
 Bash/Fish/other shells · daemon + socket protocol · SQLite · agent/tool-call
-adapters (the check seam is origin-tagged so these arrive later without a
-rewrite) · non-interactive scripts · cloud models · fine-tuning · persistent
-cross-session personalization · packaging beyond a repo install script ·
-Windows/macOS.
+adapters (the current check path emits structured decision JSON, but an agent
+request schema and origin/goal/provenance fields remain future work) ·
+non-interactive scripts · cloud models · fine-tuning · persistent cross-session
+personalization · packaging beyond a repo install script · Windows/macOS.
 
 ## 4. Vocabulary
 
 - **Proposal** — one submitted command buffer plus context (cwd, git state,
   recent history summaries, origin).
-- **Origin** — who proposed it: `human` in v1; the field exists so `agent` and
-  `script` adapters can be added later without schema surgery.
+- **Origin** — who proposed it. Version 1 only has an interactive Zsh adapter,
+  so origin is implicitly `human` and is not yet serialized. A future
+  agent/script request schema must add this field explicitly.
 - **Evidence** — a typed fact produced by analysis, with a stable code
   (e.g. `fs.target_is_cwd`, `git.dirty=14`, `typo.nearest=git`), a severity,
   and a reliability class. Facts, never speculation.
@@ -229,10 +230,12 @@ Key decisions:
   unable to exit at all (e.g. a thread wedged in uninterruptible disk I/O —
   state dir on a hung network filesystem) could still block the prompt; this
   is documented, not defended.
-- **`check --json` seam.** The same analysis is reachable as
-  `oopsinput check --json < proposal.json` → decision JSON on stdout. This is
-  the stable integration point future agent adapters use; proposals carry an
-  `origin` field from day one.
+- **Structured `check` seam.** Today `oopsinput check --res <kind>` reads the
+  Zsh adapter wire format (buffer plus NUL-separated metadata on stdin) and
+  writes decision JSON on stdout. That structured output is the foundation for
+  future adapters, but there is not yet a JSON request schema or serialized
+  origin/goal/provenance. Merely enabling the Zsh plugin does not intercept
+  commands launched by non-interactive agent subprocesses.
 
 ## 7. Interaction design
 
@@ -373,18 +376,42 @@ uncertainty, not as safety.
 ## 14. Storage and privacy
 
 - `~/.config/oopsinput/config` — plain `key = value`.
-- `~/.local/state/oopsinput/events.jsonl` — append-only structural events:
-  timestamp, decision, evidence codes, layer, timings, outcome, keyed
-  fingerprints. No raw commands, no paths, no goal text by default.
-- `~/.local/state/oopsinput/policy.jsonl` — append-only habituation state:
-  one line per *shown* intervention (timestamp, rule code, what the user
-  did), read tail-first to compute the budget and per-rule cooldown. Append-
-  only so concurrent shells cannot lose each other's writes.
+- `~/.local/state/oopsinput/events.jsonl` — structural events. New records
+  append one JSON line at a time: timestamp, decision, evidence codes, layer,
+  timings, outcome, keyed fingerprints, and (when L4 runs) model state
+  immediately before inference: `warm`, `cold`, or `unknown`. No raw commands,
+  paths, or goal text by default. Retention is the only rewrite.
+- `~/.local/state/oopsinput/policy.jsonl` — habituation state: one appended
+  line per *shown* intervention (timestamp, rule code, what the user did), read
+  tail-first to compute the budget and per-rule cooldown. Every writer uses a
+  stable cross-process state lock, so concurrent shells cannot lose each
+  other's appends when retention atomically replaces a compacted log.
 - `~/.local/state/oopsinput/key` — local random fingerprint key, 0600.
-- `oopsinput report` — rates, latencies, top evidence codes, hypothetical
-  interventions from shadow data.
-- `oopsinput purge` — one command, deletes all state.
-- Retention default 30 days (pruned on write).
+- `~/.local/state/oopsinput/.oopsinput.lock` plus two retention markers —
+  user-only coordination metadata; they contain no command data.
+- Analysis-time state writes wait for the coordination lock under the existing
+  process watchdog, preserving concurrent records without creating a new
+  unbounded wait. After a prompt answer, state writes wait at most 25 ms: if
+  the lock remains busy, that evidence record is omitted and the user's
+  edit/cancel/run choice takes effect unchanged. Explicit `purge` waits for the
+  lock because completing deletion is the command's sole requested effect.
+- `oopsinput report` — decision/model/intervention rates, deterministic and
+  warm/cold/unknown model latency percentiles, ranked evidence codes, and
+  hypothetical interventions from shadow data. A model consultation is
+  identified by its `model.*` evidence code; legacy events without an explicit
+  model state stay in the `unknown` model bucket rather than contaminating
+  deterministic percentiles.
+- `oopsinput purge` — one exact, zero-argument command that deletes every
+  oopsinput-owned state file and coordination marker, then removes the state
+  directory if empty. It never deletes configuration, follows a symlink, or
+  recursively removes an unknown entry; an unknown entry is kept and named in
+  the result only as an unrecognized entry (never echoed from disk).
+- Retention default 30 days, pruned on write. Each log checks a small marker on
+  every append and performs at most one full sweep per 24 hours. A sweep drops
+  records older than its cutoff plus malformed/torn records, then atomically
+  replaces the log under the shared state lock. With continuing writes, an
+  expired record can remain for less than one additional day; with no writes,
+  no sweep runs.
 - **No telemetry. No network beyond loopback Ollama. Ever.**
 
 ## 15. Config (initial surface)
@@ -409,21 +436,23 @@ oopsinput/
 ├── PLAN.md              # milestones and progress
 ├── PLAN-ARCHIVE.md      # completed milestones, archived verbatim
 ├── ARCHITECTURE.md      # how the pieces fit — the developer's map
-├── CLAUDE.md            # working agreement for coding sessions
+├── AGENTS.md            # Codex working agreement for coding sessions
+├── CLAUDE.md            # Claude working agreement; keep in sync
 ├── README.md
 ├── LICENSE              # Apache-2.0
 ├── Cargo.toml           # single binary crate — no workspace until earned
 ├── src/
-│   ├── main.rs          # dispatch: check / report / doctor / purge / version
-│   ├── proposal.rs      # input types + JSON seam          (M1)
+│   ├── main.rs          # dispatch: check/report/purge/doctor/help/version
+│   ├── proposal.rs      # Zsh proposal input + metadata    (M1)
 │   ├── lexer.rs         # conservative shell lexer          (M2)
 │   ├── distance.rs      # bounded edit distance, shared by typo + context (M3)
 │   ├── proc.rs          # bounded external-helper wait/kill loop (M3)
 │   ├── layers/          # typo.rs danger.rs context.rs infer.rs  (M2–M4)
 │   ├── policy.rs        # evidence → decision + budgets     (M3)
 │   ├── ui.rs            # /dev/tty prompts + escaping       (M2)
-│   ├── model.rs         # loopback HTTP + schema validation (M4)
-│   └── events.rs        # JSONL log + report                (M1, M5)
+│   ├── model.rs         # loopback HTTP transport            (M4)
+│   ├── events.rs        # JSONL log + report                (M1, M5)
+│   └── state.rs         # locking, retention, purge               (M5)
 ├── zsh/
 │   ├── oopsinput.zsh    # widget wrapper plugin
 │   ├── install.zsh
@@ -438,11 +467,12 @@ files.)
 
 ## 17. Beyond v1 (recorded so v1 doesn't paint us into corners)
 
-Agent adapter via the `check --json` seam with explicit goal context and
-provenance · bash/fish adapters · optional daemon if spawn cost ever matters ·
-richer personalization (transparent thresholds only — no silent learning) ·
-sandboxed effect-probing · additional context packs (kubectl/cloud/SQL) ·
-packaging (AUR/deb/homebrew). None of these may weaken §9 invariants.
+Agent request schema plus adapters over structured `check` decisions, with
+explicit origin, goal context, and provenance · bash/fish adapters · optional
+daemon if spawn cost ever matters · richer personalization (transparent
+thresholds only — no silent learning) · sandboxed effect-probing · additional
+context packs (kubectl/cloud/SQL) · packaging (AUR/deb/homebrew). None of these
+may weaken §9 invariants.
 
 ## 18. Success definition for v1
 

@@ -1,11 +1,12 @@
 //! Loopback HTTP/1.1 client for Ollama (SPEC §5-L4, §12). Transport only:
-//! POST a JSON body, get the response body bytes back. Prompt assembly and
-//! schema validation belong to the inference layer, not here.
+//! send a bounded JSON request, get the response body bytes back. Prompt
+//! assembly and schema validation belong to the inference layer, not here.
 //!
 //! Self-written on purpose — SPEC §12 rejects an HTTP crate for this:
-//! loopback needs no TLS, no redirects, no connection reuse; one POST per
-//! process. What it does need is the discipline every external helper
-//! already answers to: a single hard deadline covering *every* blocking
+//! loopback needs no TLS, no redirects, or connection reuse; each process
+//! makes only a small fixed request sequence. What it does need is the
+//! discipline every external helper already answers to: a single hard
+//! deadline covering *every* blocking
 //! call (connect, each write, each read — a server trickling one byte per
 //! poll must not evade it), and a cap on how much a broken or hostile
 //! server can make us buffer. On any error the caller treats model
@@ -55,11 +56,32 @@ pub(crate) enum ModelError {
 /// heads are a few hundred bytes.
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 
-/// POST `body` to `http://{addr}{path}`, return the response body on any
-/// 2xx. `deadline` bounds the whole exchange; `max_body` bounds the decoded
-/// response body.
+/// POST `body` to `http://{addr}{path}`, return the response body on any 2xx.
+/// `deadline` bounds the whole exchange; `max_body` bounds the decoded body.
 pub(crate) fn post_json(
     addr: SocketAddr,
+    path: &str,
+    body: &[u8],
+    deadline: Instant,
+    max_body: usize,
+) -> Result<Vec<u8>, ModelError> {
+    request_json(addr, "POST", path, body, deadline, max_body)
+}
+
+/// GET `http://{addr}{path}`, with the same peer verification, deadline, and
+/// response caps as POST. Used for Ollama's read-only running-model query.
+pub(crate) fn get_json(
+    addr: SocketAddr,
+    path: &str,
+    deadline: Instant,
+    max_body: usize,
+) -> Result<Vec<u8>, ModelError> {
+    request_json(addr, "GET", path, b"", deadline, max_body)
+}
+
+fn request_json(
+    addr: SocketAddr,
+    method: &str,
     path: &str,
     body: &[u8],
     deadline: Instant,
@@ -78,7 +100,7 @@ pub(crate) fn post_json(
     verify_peer(&stream, addr.port())?;
 
     let head = format!(
-        "POST {path} HTTP/1.1\r\n\
+        "{method} {path} HTTP/1.1\r\n\
          Host: {addr}\r\n\
          Content-Type: application/json\r\n\
          Accept: application/json\r\n\
@@ -393,6 +415,10 @@ pub(crate) mod testutil {
 
     /// Read our client's request: head, then exactly Content-Length bytes.
     pub(crate) fn read_full_request(s: &mut TcpStream) {
+        let _ = read_request(s);
+    }
+
+    pub(crate) fn read_request(s: &mut TcpStream) -> Vec<u8> {
         let mut got = Vec::new();
         let mut buf = [0u8; 4096];
         let head_end = loop {
@@ -415,6 +441,7 @@ pub(crate) mod testutil {
             assert!(n > 0);
             got.extend_from_slice(&buf[..n]);
         }
+        got
     }
 
     pub(crate) fn soon() -> Instant {
@@ -437,6 +464,22 @@ mod tests {
         );
         let body = post_json(addr, "/api/show", b"{}", soon(), 1024).unwrap();
         assert_eq!(body, b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn get_uses_the_documented_method_and_sends_no_body() {
+        let addr = serve_with(|mut s| {
+            let request = read_request(&mut s);
+            let head_end = find(&request, b"\r\n\r\n").unwrap();
+            let head = std::str::from_utf8(&request[..head_end]).unwrap();
+            assert!(head.starts_with("GET /api/ps HTTP/1.1\r\n"), "{head}");
+            assert!(head.contains("Content-Length: 0\r\n"), "{head}");
+            assert_eq!(request.len(), head_end + 4, "GET carried a request body");
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"models\":[]}")
+                .unwrap();
+        });
+        let body = get_json(addr, "/api/ps", soon(), 1024).unwrap();
+        assert_eq!(body, br#"{"models":[]}"#);
     }
 
     #[test]

@@ -93,21 +93,48 @@ fn evidence_codes(decision: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The one-shot server core: accept one connection, read the full request,
-/// wait `delay`, write `response` verbatim. Returns the port and a
-/// was-connected flag.
-fn mock_server(response: Vec<u8>, delay: Duration) -> (u16, Arc<AtomicBool>) {
+/// Minimal mock Ollama: answer the read-only `/api/ps` query first, then the
+/// `/api/chat` request. Returns the port and a was-connected flag.
+fn mock_server(chat_response: Vec<u8>, delay: Duration) -> (u16, Arc<AtomicBool>) {
+    mock_server_with_ps(chat_response, delay, br#"{"models":[]}"#.to_vec())
+}
+
+fn mock_server_with_ps(
+    chat_response: Vec<u8>,
+    delay: Duration,
+    ps: Vec<u8>,
+) -> (u16, Arc<AtomicBool>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let connected = Arc::new(AtomicBool::new(false));
     let flag = connected.clone();
     std::thread::spawn(move || {
-        if let Ok((mut s, _)) = listener.accept() {
-            flag.store(true, Ordering::SeqCst);
-            read_full_request(&mut s);
-            std::thread::sleep(delay);
-            let _ = s.write_all(&response);
-        }
+        let Ok((mut status, _)) = listener.accept() else {
+            return;
+        };
+        flag.store(true, Ordering::SeqCst);
+        let status_head = read_full_request(&mut status);
+        assert!(
+            status_head.starts_with("GET /api/ps HTTP/1.1"),
+            "{status_head}"
+        );
+        let _ = write!(
+            status,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            ps.len()
+        );
+        let _ = status.write_all(&ps);
+
+        let Ok((mut chat, _)) = listener.accept() else {
+            return;
+        };
+        let chat_head = read_full_request(&mut chat);
+        assert!(
+            chat_head.starts_with("POST /api/chat HTTP/1.1"),
+            "{chat_head}"
+        );
+        std::thread::sleep(delay);
+        let _ = chat.write_all(&chat_response);
     });
     (port, connected)
 }
@@ -134,13 +161,25 @@ fn mock_ollama(content: &str, delay: Duration) -> (u16, Arc<AtomicBool>) {
     mock_server(chat_http(content), delay)
 }
 
+fn mock_ollama_warm(content: &str) -> (u16, Arc<AtomicBool>) {
+    mock_server_with_ps(
+        chat_http(content),
+        Duration::ZERO,
+        br#"{"models":[{"name":"mock","model":"mock"}]}"#.to_vec(),
+    )
+}
+
+fn mock_ollama_unknown_state(content: &str) -> (u16, Arc<AtomicBool>) {
+    mock_server_with_ps(chat_http(content), Duration::ZERO, b"not json".to_vec())
+}
+
 /// Like `mock_ollama`, but the response is arbitrary raw bytes — for
 /// answers that are not well-formed chat responses at all.
 fn mock_ollama_raw(response: Vec<u8>) -> u16 {
     mock_server(response, Duration::ZERO).0
 }
 
-fn read_full_request(s: &mut TcpStream) {
+fn read_full_request(s: &mut TcpStream) -> String {
     let mut got = Vec::new();
     let mut buf = [0u8; 4096];
     let head_end = loop {
@@ -163,6 +202,12 @@ fn read_full_request(s: &mut TcpStream) {
         assert!(n > 0);
         got.extend_from_slice(&buf[..n]);
     }
+    head
+}
+
+fn last_event(env: &TestEnv) -> serde_json::Value {
+    let log = std::fs::read_to_string(env.base.join("state/events.jsonl")).unwrap();
+    serde_json::from_str(log.lines().last().unwrap()).unwrap()
 }
 
 const PROBABLE: &str =
@@ -189,6 +234,28 @@ fn ambiguous_candidate_consults_and_records_model_warn_in_shadow() {
         evidence_codes(&decision).contains(&"model.probable_mismatch".to_string()),
         "{decision}"
     );
+    assert_eq!(last_event(&env)["model_state"], "cold");
+}
+
+#[test]
+fn warm_and_unclassifiable_model_states_are_recorded_without_changing_policy() {
+    // M5 report correctness needs the state immediately before chat, while a
+    // missing/changed `/api/ps` response must never disable an otherwise good
+    // model. Both paths run through the real binary and two live loopback
+    // requests, so this pins the product seam rather than only the parser.
+    let warm = TestEnv::new("warm-state", CONFIG);
+    let (port, _) = mock_ollama_warm(PROBABLE);
+    let (decision, code, _) = run_check(&warm, "git reset --hard", port, None);
+    assert_eq!(code, 0);
+    assert_eq!(decision.unwrap()["reason_code"], "policy.model_mismatch");
+    assert_eq!(last_event(&warm)["model_state"], "warm");
+
+    let unknown = TestEnv::new("unknown-state", CONFIG);
+    let (port, _) = mock_ollama_unknown_state(PROBABLE);
+    let (decision, code, _) = run_check(&unknown, "git reset --hard", port, None);
+    assert_eq!(code, 0);
+    assert_eq!(decision.unwrap()["reason_code"], "policy.model_mismatch");
+    assert_eq!(last_event(&unknown)["model_state"], "unknown");
 }
 
 #[test]

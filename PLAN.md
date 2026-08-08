@@ -13,8 +13,10 @@ refactor/bughunt/audit passes — ✅ 2026-08-06. The archive also holds the
 2026-08-05 name decision — settled, don't re-litigate.
 
 Current measured cost, release build including process spawn (budgets 25 /
-75 p95): common path p50 2.4 ms / p95 4.4 ms; typo path p50 16.3 ms / p95
-19.5 ms; candidate path incl. the git helper p50 15.0 ms / p95 18.1 ms.
+75 p95): common path p50 2.14 ms / p95 3.13 ms; typo path p50 16.3 ms /
+p95 19.5 ms; candidate path incl. the git helper p50 7.44 ms / p95 9.09 ms.
+Common/candidate numbers are the 60-run M5 retention gate on 2026-08-07;
+the typo number is the latest dedicated measurement from 2026-08-06.
 
 Standing rules carried out of archived milestones:
 
@@ -52,16 +54,18 @@ Standing rules carried out of archived milestones:
 - **Word boundaries follow the shell, not Unicode**: `lexer::is_shell_whitespace`
   (space/tab/newline only) governs every decision about where a word starts
   or ends (bughunt 2026-08-06).
-- **Habituation state is append-only, and must stay that way** (fixed
-  2026-08-06 from a test-audit finding): the budget and cooldown once lived
+- **Habituation writes append, and uncoordinated read-modify-write must never
+  return** (fixed 2026-08-06 from a test-audit finding): the budget and
+  cooldown once lived
   in a JSON blob that was loaded, modified and written back, so two shells
   finishing warnings in the same instant each recorded a spend and the second
   write dropped the first — the hourly cap under-counted and a cooldown could
-  vanish. `policy.jsonl` now takes one atomic append per shown intervention
-  and the gates are a pure read over its tail, which removes the race by
-  construction rather than by locking. Pinned by an 8-thread test that fails
-  against the old read-modify-write shape. Any future per-command state gets
-  the same treatment; the event log had already proven the pattern.
+  vanish. `policy.jsonl` now takes one locked append per shown intervention
+  and the gates are a pure read over its tail. M5 retention is the sole
+  rewrite: every writer coordinates on a stable cross-process lock and the
+  compactor atomically replaces the log, so it cannot race away another
+  shell's append. Pinned by 8-thread policy and 16-thread event tests. Any
+  future per-command state gets the same treatment.
 - **Performance is gated, but only on the binary side** (test-audit
   2026-08-06): `scripts/perf-gate.zsh` enforces SPEC §10 budgets for the
   common and candidate paths, and `scripts/pty-gate.zsh` now enforces a
@@ -155,36 +159,78 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       answer → capped at Warn, invisible in shadow. Confirm is unreachable
       from model output even in confirm mode (e2e), and direct-catastrophic
       commands never consult at all (gate unit test + e2e never-connects
-      test, item 3). Done out of order — item 5 (paired corpus) is the one
-      M4 item left.
+      test, item 3). This landed before item 5; the paired-corpus comparison
+      above later completed M4.
 
 ## M5 — Shadow pilot + report
 
-- [ ] `oopsinput report`: rates, latencies, evidence-code ranking, hypothetical
-      interventions from shadow data. The mechanism it reads (built in M3):
-      a mode downgrade preserves the policy reason, so an event recorded as
-      `observe` with reason `policy.*` is an intervention that *would* have
-      fired — count those, don't recompute them. **Latency bucketing** (noted
-      during the M4 bughunt): an event's duration_us includes model
-      consultation time when one happened; report must split model-consulted
-      events (any `model.*` evidence code) from deterministic ones so the
-      SPEC §10 percentiles stay honest, and report model warm/cold separately
-- [ ] `oopsinput purge`; retention pruning
+- [x] `oopsinput report`: rates, latencies, evidence-code ranking, hypothetical
+      interventions from shadow data — ✅ 2026-08-07. Streams the JSONL log;
+      reports decision/model/visible/hypothetical rates, ranked evidence and
+      policy reasons, visible-warning outcomes, and nearest-rank p50/p95/p99
+      latency. It counts persisted `observe` + `policy.*` shadow conversions
+      rather than recomputing policy, and any `model.*` evidence keeps that
+      event out of deterministic percentiles. L4 now records `warm`/`cold`
+      from a bounded, read-only Ollama `/api/ps` query immediately before chat;
+      failed status queries and legacy events report as `unknown`, never cold
+      or deterministic. Malformed/torn lines are counted and skipped, and all
+      codes loaded from disk pass through the terminal escaper.
+- [x] `oopsinput purge`; retention pruning — ✅ 2026-08-07. Exact
+      zero-argument CLI deletes events, habituation history, the fingerprint
+      key, config-warning/retention markers, abandoned private temp files, and
+      its coordination lock; config is deliberately kept. It refuses a
+      symlinked state directory and recursive deletion, unlinks known symlink
+      entries without touching their targets, preserves unknown entries, and
+      is a clean success when no state exists. Both JSONL logs enforce the
+      30-day cutoff on write with at most one sweep per day: malformed/torn
+      and expired records are streamed into a 0600 temp file and atomically
+      replaced under a stable `File::lock`, while every append takes that same
+      lock. Analysis-time writes remain complete under normal concurrency and
+      are bounded by the existing watchdog; only post-prompt writes abandon a
+      busy lock after 25 ms, so state work cannot hold or override the user's
+      chosen action. Purge, whose requested effect is deletion itself, waits.
+      Waiters verify the lock inode, so purge can remove the anchor without
+      splitting concurrent writers. No dependency added; Rust 1.89 is now the
+      declared minimum because its standard library stabilized file locking.
+      Real-CLI probes and tests pin symlink/unknown/config ownership, exact
+      argv, empty state, refusal to recurse, bounded post-prompt contention,
+      and non-regular-path refusal; existing concurrent append hammers pass
+      through the compaction path. A rejected first attempt bounded *every*
+      writer at 25 ms and lost 1/800 events in 1 of 7 full-suite runs under
+      scheduler load (despite 0/20 isolated failures); the scoped design above
+      passed 7/7 full-suite runs with all records present.
 - [ ] Author pilot: ≥1,000 natural commands in shadow+suggest; review top
       candidates + random allow sample; findings → regression fixtures.
-      **Purge the event log before starting** (`rm ~/.local/state/oopsinput/
-      events.jsonl`): the dev machine's log contains ~435 synthetic events
-      written by benchmark loops and probes on 2026-08-06 that ran the real
+      This may run in parallel with a self-recruiting outside alpha once
+      `report`, `purge`, and the minimum M6 trust/install surface are ready.
+      It gates graduating warning categories, not inviting voluntary users to
+      test shadow/suggest; personally recruiting testers is not a prerequisite.
+      **Run `oopsinput purge` before starting**: the dev machine's state
+      contains ~435 synthetic events written by benchmark loops and probes on
+      2026-08-06 that ran the real
       binary without `OOPSINPUT_STATE_DIR` set, so accumulated data is not
-      all natural. For the same reason, always set `OOPSINPUT_STATE_DIR` to
-      a temp dir when probing `check` by hand
+      all natural. Purge also resets habituation and warning-marker state but
+      keeps config, which is the intended clean pilot baseline. For the same
+      reason, always set `OOPSINPUT_STATE_DIR` to a temp dir when probing
+      `check` by hand.
+      **Pilot status at the 2026-08-07 wrap-up: not started.** The
+      `oopsinput` currently found on `PATH` is an older installed build;
+      `oopsinput purge` returned `unknown command 'purge'`. The next pass must
+      first install the verified current release binary and confirm that both
+      the interactive shell and plugin resolve to it, then run the current
+      binary's purge before natural-command collection begins.
 - [ ] Tune budgets/thresholds from pilot data; graduate first warn category if
       evidence supports it
 - [ ] Acceptance: pilot writeup in eval/; decision recorded per category
 
 ## M6 — Share-ready polish
 
-- [ ] README: honest pitch, install, what it does/doesn't do, uninstall
+- [ ] README: honest pitch, install, what it does/does not do, uninstall, and a
+      self-serve shadow/suggest testing protocol
+- [ ] Shareable install: copy both the binary and plugin to stable user-owned
+      locations. The current installer writes a `.zshrc` source line pointing
+      into the repository checkout, so moving/deleting the clone breaks the
+      installed hook. Pin install/update/uninstall behavior with tests
 - [ ] CI (audit 2026-08-05): fmt --check, clippy -D warnings, cargo test, and
       cargo-deny (supply-chain + license check; also vets unfamiliar
       transitive deps like serde_json's `zmij`) on every push
@@ -220,11 +266,17 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       state perms
 - [ ] Clean-machine test: fresh user → install → shadow → report → uninstall
       leaves no trace
-- [ ] Cut v0.1.0 tag; send to first outside testers
+- [ ] Cut v0.1.0 tag; publish a self-recruiting public alpha and invite
+      voluntary shadow/suggest testers. Do not make personally recruited
+      testers a release gate; keep ungraduated warning categories silent
 
 ## Later (v2+ candidates — see SPEC §17)
 
-- [ ] Agent adapter over `check --json` with goal context + provenance
+- [ ] Agent request schema + one named-agent adapter. The current check path
+      emits decision JSON but accepts the Zsh-oriented stdin/flag format and
+      carries no origin, goal, or provenance. Add a promptless non-interactive
+      contract and explicit human-approval routing; enabling the Zsh plugin
+      alone does not intercept agent subprocesses
 - [ ] Bash adapter
 - [ ] Daemon (only if spawn cost measurably matters)
 - [ ] Context packs: kubectl / cloud / SQL

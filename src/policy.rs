@@ -198,15 +198,15 @@ pub fn cap_for_mode(assessment: Assessment, mode: Mode) -> Assessment {
 // ---- habituation control: budget + cooldown (SPEC §7) ---------------------
 
 /// One intervention that was actually shown, and what the user did about it.
-/// Appended as a single line and never rewritten.
+/// Each new record is appended as one line. The only rewrite is the M5
+/// retention sweep, which atomically removes expired records under the same
+/// cross-process state lock every writer takes.
 ///
-/// Append-only is the entire point (test-audit 2026-08-06, proven): the
-/// previous design loaded a JSON blob, modified it, and wrote it back, so two
-/// shells finishing warnings in the same instant each recorded a spend and
-/// the second write dropped the first — the hourly cap silently under-counted
-/// and a cooldown could vanish. The event log already solved this exact class
-/// with one atomic append per line; this is the same fix, and it removes the
-/// race by construction rather than by locking.
+/// Appending without an uncoordinated read-modify-write is the point
+/// (test-audit 2026-08-06, proven): the previous JSON blob let two shells each
+/// overwrite the other's outcome, so the hourly cap under-counted and a
+/// cooldown could vanish. The stable state lock now also makes retention
+/// compaction safe without weakening that invariant.
 #[derive(Serialize, Deserialize)]
 struct Intervention {
     ts_ms: u64,
@@ -299,7 +299,7 @@ const HISTORY_TAIL_BYTES: u64 = 64 * 1024;
 const MAX_HISTORY_RECORDS: usize = 2_048;
 
 pub fn load_history() -> History {
-    match crate::events::state_dir() {
+    match crate::state::state_dir() {
         Some(dir) => load_history_from(&dir),
         None => History::default(),
     }
@@ -311,6 +311,9 @@ pub fn load_history() -> History {
 /// the caps from the old loader and watched the old test pass anyway.)
 pub(crate) fn load_history_from(dir: &std::path::Path) -> History {
     let path = dir.join("policy.jsonl");
+    if !std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
+        return History::default();
+    }
     let Ok(mut f) = std::fs::File::open(&path) else {
         return History::default();
     };
@@ -337,69 +340,41 @@ pub(crate) fn load_history_from(dir: &std::path::Path) -> History {
     History { shown }
 }
 
-/// Record what the user did at a warning we actually showed. One line, one
-/// write syscall, `O_APPEND` — so concurrent shells interleave safely instead
-/// of overwriting each other (test-audit 2026-08-06).
+/// Record what the user did at a warning we actually showed. One buffered
+/// append under the shared state lock keeps concurrent shells from
+/// interleaving or overwriting each other (test-audit 2026-08-06).
 pub fn record_outcome(code: &str, ran_unchanged: bool, now_ms: u64) {
-    let Some(dir) = crate::events::state_dir() else {
+    let Some(dir) = crate::state::state_dir() else {
         return;
     };
-    append_outcome_to(&dir, code, ran_unchanged, now_ms);
+    let Some(line) = outcome_line(code, ran_unchanged, now_ms) else {
+        return;
+    };
+    let _ = crate::state::append_jsonl_after_prompt(&dir, "policy.jsonl", line.as_bytes(), now_ms);
 }
 
+#[cfg(test)]
 pub(crate) fn append_outcome_to(
     dir: &std::path::Path,
     code: &str,
     ran_unchanged: bool,
     now_ms: u64,
 ) {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    if std::fs::create_dir_all(dir).is_err() {
+    let Some(line) = outcome_line(code, ran_unchanged, now_ms) else {
         return;
-    }
-    let Ok(mut line) = serde_json::to_string(&Intervention {
+    };
+    let _ = crate::state::append_jsonl(dir, "policy.jsonl", line.as_bytes(), now_ms);
+}
+
+fn outcome_line(code: &str, ran_unchanged: bool, now_ms: u64) -> Option<String> {
+    let mut line = serde_json::to_string(&Intervention {
         ts_ms: now_ms,
         rule: code.to_string(),
         ran_unchanged,
-    }) else {
-        return;
-    };
+    })
+    .ok()?;
     line.push('\n');
-
-    // Never append through a symlink someone else placed in our state dir
-    // (audit 2026-08-06; the same rule the installer and event log follow).
-    let path = dir.join("policy.jsonl");
-    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return;
-    }
-    let Ok(mut f) = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .open(&path)
-    else {
-        return;
-    };
-    let _ = f.write_all(line.as_bytes());
-}
-
-/// Write a small state file, refusing to write *through* a symlink — the same
-/// rule the installer follows (audit 2026-08-06): a path in our state dir that
-/// someone else turned into a link to their file is not a path we truncate.
-fn write_user_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(std::io::Error::other("state path is a symlink"));
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(bytes)
+    Some(line)
 }
 
 // ---- config (SPEC §15) ----------------------------------------------------
@@ -575,20 +550,20 @@ pub fn emit_config_warnings_once(cfg: &Config) {
     if cfg.warnings.is_empty() {
         return;
     }
-    let Some(dir) = crate::events::state_dir() else {
+    let Some(dir) = crate::state::state_dir() else {
         return;
     };
     let fp = warnings_fingerprint(&cfg.warnings);
     let marker = dir.join("config_warned");
-    if std::fs::read_to_string(&marker).is_ok_and(|prev| prev == fp) {
+    if std::fs::symlink_metadata(&marker).is_ok_and(|meta| meta.is_file())
+        && std::fs::read_to_string(&marker).is_ok_and(|prev| prev == fp)
+    {
         return;
     }
     for w in &cfg.warnings {
         eprintln!("oopsinput: config: {w}");
     }
-    if std::fs::create_dir_all(&dir).is_ok() {
-        let _ = write_user_only(&marker, fp.as_bytes());
-    }
+    let _ = crate::state::replace_small_file(&dir, "config_warned", fp.as_bytes());
 }
 
 fn warnings_fingerprint(warnings: &[String]) -> String {
@@ -1009,15 +984,18 @@ mod tests {
             "an intervention was appended through a symlink"
         );
 
-        // The config-warning marker takes the same path through write_user_only.
+        // The config-warning marker takes the same locked, atomic state path.
         let link = dir.join("marker");
         std::os::unix::fs::symlink(&victim, &link).unwrap();
-        assert!(write_user_only(&link, b"x").is_err(), "write not refused");
+        assert!(
+            crate::state::replace_small_file(&dir, "marker", b"x").is_err(),
+            "write not refused"
+        );
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "PRECIOUS\n");
 
         // A normal path still writes, user-only.
         let plain = dir.join("plain");
-        assert!(write_user_only(&plain, b"{}").is_ok());
+        assert!(crate::state::replace_small_file(&dir, "plain", b"{}").is_ok());
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777,

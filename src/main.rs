@@ -22,6 +22,7 @@ mod model;
 mod policy;
 mod proc;
 mod proposal;
+mod state;
 mod ui;
 
 use std::io::Write;
@@ -56,6 +57,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("check") => check(&args[1..]),
+        Some("report") => report(),
+        Some("purge") => purge(&args[1..]),
         Some("doctor") => doctor(),
         // Test seam (debug builds only): exercise the real /dev/tty + stty
         // prompt path under a PTY, without needing the full suggest-mode flow.
@@ -80,6 +83,10 @@ fn main() -> ExitCode {
 /// control, so the analysis deadline no longer applies (ui.rs caller
 /// contract). The prompt bounds itself via the terminal-level read timeout.
 static PROMPT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn prompt_is_active() -> bool {
+    PROMPT_ACTIVE.load(Ordering::SeqCst)
+}
 
 /// One-shot deadline extension for the model path (SPEC §6: "the model path
 /// gets its own longer deadline"). Zero until the L4 gate opens; the check
@@ -186,7 +193,7 @@ fn check(args: &[String]) -> ExitCode {
         &danger,
         context.as_ref(),
         &proposal.recency,
-        consulted.as_ref(),
+        consulted.as_ref().map(|c| &c.outcome),
     );
 
     // Analysis-only duration: the prompt below waits on a human and must not
@@ -200,7 +207,7 @@ fn check(args: &[String]) -> ExitCode {
     // warning, not a chat about gti (bughunt 2026-08-06). Otherwise: the
     // typo prompt in suggest mode and up, else record silently with the
     // policy reason preserved (the shadow conversion).
-    let assessed = policy::apply_model_evidence(warranted, consulted.as_ref());
+    let assessed = policy::apply_model_evidence(warranted, consulted.as_ref().map(|c| &c.outcome));
     let capped = policy::cap_for_mode(assessed, cfg.mode);
     let (decision_str, reason_code, exit_code, outcome) = match capped.verdict {
         policy::Verdict::Warn | policy::Verdict::Confirm => warning_intervention(
@@ -208,9 +215,7 @@ fn check(args: &[String]) -> ExitCode {
             &danger,
             context.as_ref(),
             &proposal.recency,
-            consulted
-                .as_ref()
-                .and_then(layers::infer::Consult::evidence),
+            consulted.as_ref().and_then(|c| c.outcome.evidence()),
             &cfg,
         ),
         _ => match &suggestion {
@@ -239,6 +244,7 @@ fn check(args: &[String]) -> ExitCode {
         buffer_bytes: proposal.buffer.len(),
         word_count,
         duration_us,
+        model_state: consulted.as_ref().map(|c| c.state.as_str()),
         ctx_git_dirty: context
             .as_ref()
             .and_then(|c| c.git.as_ref())
@@ -350,13 +356,13 @@ fn consult_model_if_gated(
     proposal: &Proposal,
     danger: &layers::danger::Analysis,
     context: Option<&layers::context::Context>,
-) -> Option<layers::infer::Consult> {
+) -> Option<layers::infer::Consultation> {
     let name = cfg.model.as_ref()?;
     if !policy::l4_gate(danger, warranted) {
         return None;
     }
     MODEL_EXTENSION_MS.store(cfg.model_timeout_ms + 1_000, Ordering::SeqCst);
-    Some(layers::infer::consult(
+    Some(layers::infer::consult_with_state(
         name,
         cfg.model_timeout_ms,
         proposal,
@@ -432,7 +438,7 @@ fn warning_intervention(
         ui::WarnChoice::RunOnce => ("ran_unchanged", true, 0),
     };
     // Recorded only now, because only a prompt the user actually saw spends
-    // budget — and one atomic append keeps concurrent shells honest.
+    // budget — and the locked append keeps concurrent shells honest.
     if let Some(code) = rule {
         policy::record_outcome(code, ran_unchanged, events::now_ms());
     }
@@ -459,6 +465,57 @@ fn write_replacement_fd3(replacement: &str) -> std::io::Result<()> {
     f.write_all(replacement.as_bytes())?;
     f.write_all(b"\0")?;
     f.flush()
+}
+
+fn report() -> ExitCode {
+    match events::report_text() {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!(
+                "oopsinput report: {}",
+                ui::escape_for_display(&error.to_string())
+            );
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn purge(args: &[String]) -> ExitCode {
+    if !args.is_empty() {
+        eprintln!("oopsinput purge: this command takes no arguments");
+        return ExitCode::from(2);
+    }
+    match state::purge() {
+        Ok(result) => {
+            println!("oopsinput purge");
+            if result.removed_files == 0 {
+                println!("  nothing to purge");
+            } else {
+                let noun = if result.removed_files == 1 {
+                    "file"
+                } else {
+                    "files"
+                };
+                println!("  removed {} state {noun}", result.removed_files);
+            }
+            if result.directory_retained {
+                println!(
+                    "  kept the state directory because it contains new or unrecognized entries"
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!(
+                "oopsinput purge: {}",
+                ui::escape_for_display(&error.to_string())
+            );
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// Environment sanity checks. Grows per milestone (config validity, model
@@ -608,6 +665,8 @@ fn print_help() {
          usage: oopsinput <command>\n\n\
          commands:\n\
          \x20 check    read a command proposal on stdin, print a decision (used by the zsh plugin)\n\
+         \x20 report   summarize recorded decisions, latency, and evidence\n\
+         \x20 purge    delete all recorded state (configuration is kept)\n\
          \x20 doctor   check the installation and environment\n\
          \x20 version  print version\n\
          \x20 help     this text",

@@ -2,6 +2,8 @@
 name = "oopsinput"
 version = "0.1.0"
 edition = "2024"
+# std::fs::File locking, used to make retention/purge safe across shells.
+rust-version = "1.89"
 license = "Apache-2.0"
 description = "Catches commands that probably aren't what you meant — before they run."
 repository = "https://github.com/kserrec/oopsinput"

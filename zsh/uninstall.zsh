@@ -1,7 +1,8 @@
 #!/usr/bin/env zsh
 # oopsinput uninstaller: removes the marked block from ~/.zshrc and the binary
-# from ~/.local/bin. Leaves state/config for `oopsinput purge` (not yet built;
-# rm -r ~/.local/state/oopsinput does the same by hand). Idempotent.
+# from ~/.local/bin. It deliberately leaves recorded state and config; run
+# `oopsinput purge` before this script if recorded state should also go.
+# Idempotent.
 set -eu
 
 ZSHRC=$HOME/.zshrc
@@ -33,5 +34,4 @@ if [[ -x $BIN ]]; then
 fi
 
 print "done — open a new terminal for a clean shell."
-print "shadow data and config (if any) remain — delete them with:"
-print "  rm -r ~/.local/state/oopsinput ~/.config/oopsinput"
+print "recorded state and config (if any) remain; the uninstaller never deletes user data."
