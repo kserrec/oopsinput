@@ -205,10 +205,11 @@ yourself; the uninstaller will not claim that authority.
 
 ## Project status and development
 
-`v0.1.0` is the first public alpha. The deterministic product, optional
-local-model path, local reporting, 30-day retention, purge, and clean-machine
-install-to-uninstall lifecycle are implemented and continuously checked.
-[PLAN.md](PLAN.md) is the live status record.
+[`v0.1.0`](https://github.com/kserrec/oopsinput/releases/tag/v0.1.0) is the
+first public alpha. The deterministic product, optional local-model path, local
+reporting, 30-day retention, purge, and clean-machine install-to-uninstall
+lifecycle are implemented and continuously checked. [PLAN.md](PLAN.md) is the
+live status record.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) is the developer guide. From a fresh clone,
 the required local checks are:

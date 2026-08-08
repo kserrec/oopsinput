@@ -351,9 +351,18 @@ temporary directory so they never contaminate this passive sample.
       an unmarked blank separator which uninstall left behind; the installer no
       longer creates that byte, and the gate pins the regression. Release CI
       runs this gate on the minimum Rust toolchain before the timing gates.
-- [ ] Cut v0.1.0 tag; publish a self-recruiting public alpha and invite
-      voluntary shadow/suggest testers. Do not make personally recruited
-      testers a release gate; keep ungraduated warning categories silent
+- [x] Cut v0.1.0 tag; publish a self-recruiting public alpha and invite
+      voluntary shadow/suggest testers — ✅ 2026-08-08. Annotated tag
+      `v0.1.0` points to release commit `aa4385a`; its main-branch and tag
+      dependency, quality, lifecycle, latency, and 10,000-command PTY runs all
+      passed before the GitHub prerelease was published. The source-only
+      release leads with the fail-open boundary, Linux/interactive-Zsh scope,
+      install/doctor flow, and known limits, then invites voluntary natural-use
+      Shadow or Suggest trials with locally reviewed/redacted reports. No
+      personally recruited tester became a gate, no destructive probe list was
+      requested, and ungraduated danger categories remain silent in both trial
+      modes. Release:
+      https://github.com/kserrec/oopsinput/releases/tag/v0.1.0
 
 ## Later (v2+ candidates — see SPEC §17)
 

@@ -1182,6 +1182,7 @@ structural logging, and pilot-data summaries. Both CI workflows and the public
 security policy are also live, and `doctor` now covers the complete installed,
 live-shell, config, optional-model, and state-permission setup. The
 clean-machine release lifecycle is CI-enforced end to end. The `v0.1.0` code,
-documentation, and acceptance baseline is complete; publication status and
-later work are tracked in PLAN. Passive local M5 observation continues only as
-an optional future data point.
+documentation, and acceptance baseline is published as the first public alpha,
+so M6 is complete. Later work is tracked in PLAN; its next candidate is the
+promptless agent request contract and one named-agent adapter. Passive local M5
+observation continues only as an optional future data point.
