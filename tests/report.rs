@@ -42,3 +42,34 @@ fn report_command_reads_the_selected_state_directory() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn empty_home_never_resolves_to_a_relative_state_directory() {
+    // Regression (M5 bughunt 2026-08-08): HOME="" became the relative path
+    // `.local/state/oopsinput`, so state could be read from or written into
+    // whichever project happened to be the current directory.
+    let base = std::env::temp_dir().join(format!(
+        "oopsinput-report-empty-home-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_oopsinput"))
+        .arg("report")
+        .current_dir(&base)
+        .env("HOME", "")
+        .env_remove("OOPSINPUT_STATE_DIR")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no absolute state directory"),
+        "{output:?}"
+    );
+    assert!(!base.join(".local").exists(), "relative state was created");
+
+    let _ = std::fs::remove_dir_all(&base);
+}

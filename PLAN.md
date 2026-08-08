@@ -168,9 +168,11 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       interventions from shadow data — ✅ 2026-08-07. Streams the JSONL log;
       reports decision/model/visible/hypothetical rates, ranked evidence and
       policy reasons, visible-warning outcomes, and nearest-rank p50/p95/p99
-      latency. It counts persisted `observe` + `policy.*` shadow conversions
-      rather than recomputing policy, and any `model.*` evidence keeps that
-      event out of deterministic percentiles. L4 now records `warm`/`cold`
+      latency. New events persist the mode-blind Warn/Confirm reason explicitly;
+      legacy lines use only the closed set of reasons that really represented
+      an intervention, rather than treating every `observe` + `policy.*` as
+      one. Any `model.*` evidence keeps that event out of deterministic
+      percentiles. L4 now records `warm`/`cold`
       from a bounded, read-only Ollama `/api/ps` query immediately before chat;
       failed status queries and legacy events report as `unknown`, never cold
       or deterministic. Malformed/torn lines are counted and skipped, and all
@@ -186,9 +188,10 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       and expired records are streamed into a 0600 temp file and atomically
       replaced under a stable `File::lock`, while every append takes that same
       lock. Analysis-time writes remain complete under normal concurrency and
-      are bounded by the existing watchdog; only post-prompt writes abandon a
-      busy lock after 25 ms, so state work cannot hold or override the user's
-      chosen action. Purge, whose requested effect is deletion itself, waits.
+      are bounded by the existing watchdog; post-prompt writes abandon a busy
+      lock after 25 ms and append without running retention, so neither lock
+      contention nor a large sweep can hold or override the user's chosen
+      action. Purge, whose requested effect is deletion itself, waits.
       Waiters verify the lock inode, so purge can remove the anchor without
       splitting concurrent writers. No dependency added; Rust 1.89 is now the
       declared minimum because its standard library stabilized file locking.
@@ -199,31 +202,69 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       writer at 25 ms and lost 1/800 events in 1 of 7 full-suite runs under
       scheduler load (despite 0/20 isolated failures); the scoped design above
       passed 7/7 full-suite runs with all records present.
-- [ ] Author pilot: ≥1,000 natural commands in shadow+suggest; review top
-      candidates + random allow sample; findings → regression fixtures.
-      This may run in parallel with a self-recruiting outside alpha once
-      `report`, `purge`, and the minimum M6 trust/install surface are ready.
-      It gates graduating warning categories, not inviting voluntary users to
-      test shadow/suggest; personally recruiting testers is not a prerequisite.
-      The pilot must start after `oopsinput purge`: benchmark loops and probes
-      had run the real binary without `OOPSINPUT_STATE_DIR`, so the accumulated
-      state was not all natural. Purge also resets habituation and warning-
-      marker state but keeps config, which is the intended clean baseline.
-      That prerequisite was completed below. For the same reason, always set
-      `OOPSINPUT_STATE_DIR` to a temp dir when probing `check` by hand.
-      **Pilot status: started from zero on 2026-08-08.** The verified current
-      release binary and stable plugin copy are installed; their checksums
-      match the repository artifacts, and both the interactive shell and the
-      loaded plugin resolve `~/.local/bin/oopsinput`. The pre-purge report
-      contained 637 contaminated development events (all `allow`, including
-      228 typo candidates). The current binary's purge removed that log while
-      keeping the new 0600 `mode = suggest` config; the immediate post-purge
-      report showed 0 events. Natural-command collection starts at that
-      baseline. This item remains open until at least 1,000 natural commands
-      are collected and reviewed.
-- [ ] Tune budgets/thresholds from pilot data; graduate first warn category if
-      evidence supports it
-- [ ] Acceptance: pilot writeup in eval/; decision recorded per category
+- [x] M5 correctness sweep — ✅ 2026-08-08. Six bughunt findings fixed and
+      regression-pinned: intrinsic Observe reasons no longer inflate
+      hypothetical rates; unavailable prompts neither count as visible nor
+      spend budget; post-prompt appends never start retention; identical config
+      warnings are coordinated across shells; purge recovers a symlinked or
+      non-private regular lock anchor without following it; and an empty
+      `HOME` cannot create a relative state path. A torn tail is separated
+      before append so deferring retention cannot consume the new record. The
+      verified release build was refreshed into the existing pilot install;
+      binary/plugin checksums match their repository artifacts, while config
+      and accumulated state were preserved.
+- [x] M5 security-audit fixes — ✅ 2026-08-08. A reproduced relative-state-path
+      ownership bug is closed: a nonempty relative `OOPSINPUT_STATE_DIR`
+      disables state, relative `XDG_STATE_HOME` falls back to absolute `HOME`,
+      and relative `HOME` never resolves from the working directory. Config
+      warnings now reach `/dev/tty` through the real plugin exactly once, and a
+      failed display does not write the “shown” marker. JSONL readers drain any
+      record over 64 KiB without unbounded allocation and resume at the next
+      line. Existing-file readers verify the opened inode against the inspected
+      nonsymlink path; missing lock/log creation uses atomic `create_new`, so a
+      raced dangling symlink cannot create its target. The safe standard
+      library cannot eliminate an active same-user FIFO swap before open; that
+      residual stays inside SPEC §9's accepted same-user boundary rather than
+      adding `unsafe` or a platform dependency. A fresh RustSec database scan
+      (commit `1237bbe0`, 2026-08-06) found no advisory entry for the locked
+      dependency graph; all resolved licenses are Apache-2.0, MIT, Unlicense,
+      or Unicode-3.0 combinations. Continuous enforcement also landed rather
+      than being deferred to M6: cargo-deny 0.20.2 passes advisories, exact
+      crate allowlist, license, duplicate/wildcard, and source checks, and its
+      checksum-pinned workflow runs on every push and pull request plus weekly
+      while the repository is idle. 267 tests pass by default; the one
+      live-model evaluation harness remains intentionally ignored.
+- [x] M5 test audit — ✅ 2026-08-08. Test claims were checked against the
+      failures they are meant to catch, with three controlled mutations proving
+      that the oversized-record cap, pre-open non-regular-file refusal, and
+      replacement-lock-inode check each fail their regression test when
+      removed. Coverage now pins caller-level retention limits and daily sweep
+      coordination, newest-history preservation, warning-set re-arming,
+      purge's retention-marker/temp-file scope, FIFO refusal through a real
+      process, bounded analysis-time lock contention, and the purge/waiter lock
+      race. A real-CLI probe also found and fixed `doctor` calling a symlinked
+      config “present” even though the loader correctly ignored it; `doctor`
+      now reports that non-regular config as ignored and uses defaults. 267
+      tests pass by default; the one live-model evaluation harness remains
+      intentionally ignored.
+
+### Passive M5 observation — explicitly non-blocking
+
+Natural-command collection continues as an optional local data point, not a
+roadmap item, release gate, or input to `$next`. M6 work proceeds independently;
+the data may never be numerous or relevant enough to use. If warning categories
+are ever considered for graduation, first collect at least 1,000 natural
+Shadow/Suggest commands, review the top candidates plus a random Allow sample,
+turn real findings into fixtures, tune thresholds only when evidence supports
+it, and write the per-category decision in `eval/`.
+
+The clean baseline began on 2026-08-08 after `oopsinput purge`. The verified
+release binary and stable plugin copy were installed, both resolved
+`~/.local/bin/oopsinput`, and the immediate post-purge report showed 0 events.
+The removed pre-purge log held 637 development-contaminated events (all
+`allow`, including 228 typo candidates). The 0600 `mode = suggest` config was
+kept. Manual `check` probes must continue to set `OOPSINPUT_STATE_DIR` to a
+temporary directory so they never contaminate this passive sample.
 
 ## M6 — Share-ready polish
 
@@ -243,8 +284,10 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
 - [ ] README: honest pitch, install, what it does/does not do, uninstall, and a
       self-serve shadow/suggest testing protocol
 - [ ] CI (audit 2026-08-05): fmt --check, clippy -D warnings, cargo test, and
-      cargo-deny (supply-chain + license check; also vets unfamiliar
-      transitive deps like serde_json's `zmij`) on every push
+      both performance gates on every push. The dependency-policy slice
+      pre-landed with the M5 audit fixes on 2026-08-08: cargo-deny runs on
+      pushes, pull requests, and weekly, with every current transitive crate
+      (including serde_json's `zmij`) explicitly reviewed and allowlisted.
 - [ ] SECURITY.md (audit 2026-08-05): security posture, the accepted
       same-user trust boundary, what the tool does/doesn't defend against,
       vulnerability-report contact. Three things it must state precisely:

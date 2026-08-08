@@ -5,11 +5,11 @@
 //! The split matters for evaluation: `warranted` is the pure, mode-blind
 //! matrix the golden corpus pins (same command, different context, different
 //! answer); `cap_for_mode` and `apply_gates` then bound what actually becomes
-//! visible. In shadow, a warranted warn is recorded as `observe` with its
-//! policy reason preserved — that preserved reason IS the shadow conversion:
-//! `oopsinput report` (M5) counts hypothetical interventions from it.
+//! visible. In Shadow/Suggest, a warranted Warn/Confirm is recorded as
+//! `observe` and its mode-blind reason is persisted explicitly for M5's
+//! hypothetical-intervention report.
 
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -317,6 +317,9 @@ pub(crate) fn load_history_from(dir: &std::path::Path) -> History {
     let Ok(mut f) = std::fs::File::open(&path) else {
         return History::default();
     };
+    if crate::state::opened_regular_file_metadata(&path, &f, "policy history").is_err() {
+        return History::default();
+    }
     // Read only the tail; seek past everything older.
     if let Ok(meta) = f.metadata()
         && meta.len() > HISTORY_TAIL_BYTES
@@ -350,7 +353,7 @@ pub fn record_outcome(code: &str, ran_unchanged: bool, now_ms: u64) {
     let Some(line) = outcome_line(code, ran_unchanged, now_ms) else {
         return;
     };
-    let _ = crate::state::append_jsonl_after_prompt(&dir, "policy.jsonl", line.as_bytes(), now_ms);
+    let _ = crate::state::append_jsonl_after_prompt(&dir, "policy.jsonl", line.as_bytes());
 }
 
 #[cfg(test)]
@@ -428,6 +431,26 @@ pub fn config_path() -> Option<PathBuf> {
     (!home.is_empty()).then(|| PathBuf::from(home).join(".config/oopsinput/config"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigFileState {
+    Regular,
+    Missing,
+    NonRegular,
+    Unavailable,
+}
+
+/// Classify the config leaf exactly as the loader does. `doctor` consumes the
+/// same answer so it cannot call a symlink "present" while `load_config`
+/// correctly ignores it.
+pub(crate) fn config_file_state(path: &std::path::Path) -> ConfigFileState {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => ConfigFileState::Regular,
+        Ok(_) => ConfigFileState::NonRegular,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ConfigFileState::Missing,
+        Err(_) => ConfigFileState::Unavailable,
+    }
+}
+
 /// Load and validate the full SPEC §15 surface. $OOPSINPUT_MODE overrides
 /// the file's mode (and, being an explicit act, never warns).
 pub fn load_config() -> Config {
@@ -445,12 +468,13 @@ pub fn load_config() -> Config {
 }
 
 fn read_config_file(path: &std::path::Path) -> Option<String> {
+    if config_file_state(path) != ConfigFileState::Regular {
+        return None;
+    }
     let mut buf = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(CONFIG_READ_CAP)
-        .read_to_end(&mut buf)
-        .ok()?;
+    let file = std::fs::File::open(path).ok()?;
+    crate::state::opened_regular_file_metadata(path, &file, "config file").ok()?;
+    file.take(CONFIG_READ_CAP).read_to_end(&mut buf).ok()?;
     String::from_utf8(buf).ok()
 }
 
@@ -554,16 +578,44 @@ pub fn emit_config_warnings_once(cfg: &Config) {
         return;
     };
     let fp = warnings_fingerprint(&cfg.warnings);
-    let marker = dir.join("config_warned");
-    if std::fs::symlink_metadata(&marker).is_ok_and(|meta| meta.is_file())
-        && std::fs::read_to_string(&marker).is_ok_and(|prev| prev == fp)
-    {
+    let update = match crate::state::begin_small_file_update(&dir, "config_warned", fp.as_bytes()) {
+        Ok(Some(update)) => Some(update),
+        Ok(None) => return,
+        // State is evidence, not permission to communicate a config problem.
+        // If coordination is unavailable, show the warning and try again on
+        // a later command rather than silently suppressing it.
+        Err(_) => None,
+    };
+    if display_config_warnings(&cfg.warnings).is_err() {
+        // A marker means "shown", not merely "attempted". If no diagnostic
+        // channel is available, leave it absent and retry on a later command.
         return;
     }
-    for w in &cfg.warnings {
-        eprintln!("oopsinput: config: {w}");
+    if let Some(update) = update {
+        let _ = update.commit();
     }
-    let _ = crate::state::replace_small_file(&dir, "config_warned", fp.as_bytes());
+}
+
+/// The Zsh adapter discards the binary's ordinary streams, so it opts into a
+/// direct /dev/tty diagnostic only when a warning actually exists. Other
+/// callers keep conventional stderr behavior, which is also testable without
+/// a controlling terminal. Warning text contains trusted framing plus line
+/// numbers only; raw config keys and values never enter this string.
+fn display_config_warnings(warnings: &[String]) -> std::io::Result<()> {
+    let rendered = warnings
+        .iter()
+        .map(|warning| format!("oopsinput: config: {warning}\n"))
+        .collect::<String>();
+    if std::env::var_os("OOPSINPUT_DIAGNOSTICS_TTY").is_some() {
+        #[cfg(debug_assertions)]
+        if std::env::var_os("OOPSINPUT_TEST_NO_TTY").is_some() {
+            return Err(std::io::Error::other("diagnostic terminal unavailable"));
+        }
+        let mut tty = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
+        tty.write_all(rendered.as_bytes())
+    } else {
+        std::io::stderr().lock().write_all(rendered.as_bytes())
+    }
 }
 
 fn warnings_fingerprint(warnings: &[String]) -> String {
@@ -931,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn history_survives_a_partial_line_and_reads_only_the_tail() {
+    fn history_survives_a_partial_line_and_keeps_the_newest_tail() {
         let dir = std::env::temp_dir().join(format!("oopsinput-tail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -962,6 +1014,15 @@ mod tests {
             loaded.shown.len() <= MAX_HISTORY_RECORDS,
             "tail read is unbounded: {}",
             loaded.shown.len()
+        );
+        assert!(
+            loaded.shown.iter().all(|entry| entry.ts_ms >= 10_000),
+            "records older than the bounded tail survived"
+        );
+        assert_eq!(
+            loaded.shown.last().map(|entry| entry.ts_ms),
+            Some(13_999),
+            "the newest intervention was lost"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1022,6 +1083,31 @@ mod tests {
         assert_eq!(cfg.budget_per_hour, 5);
         assert!(!cfg.log_raw);
         assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+    }
+
+    #[test]
+    fn config_reader_refuses_a_symlink_and_accepts_the_same_regular_file() {
+        // M5 audit hardening (2026-08-08): config is read before the main
+        // analysis pipeline, so reject a non-regular path before open and
+        // verify the opened inode before consuming any bytes.
+        let dir =
+            std::env::temp_dir().join(format!("oopsinput-config-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let regular = dir.join("regular");
+        let link = dir.join("config");
+        std::fs::write(&regular, "mode = confirm\n").unwrap();
+        std::os::unix::fs::symlink(&regular, &link).unwrap();
+
+        assert_eq!(config_file_state(&link), ConfigFileState::NonRegular);
+        assert_eq!(config_file_state(&regular), ConfigFileState::Regular);
+        assert!(read_config_file(&link).is_none());
+        assert_eq!(
+            read_config_file(&regular).as_deref(),
+            Some("mode = confirm\n")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

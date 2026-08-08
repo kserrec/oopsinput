@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::BufRead;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -26,6 +25,12 @@ pub struct Event {
     pub buffer_bytes: usize,
     pub word_count: usize,
     pub duration_us: u128,
+    /// The policy reason that would have produced a visible L2+ intervention
+    /// before Shadow/Suggest mode capped it to Observe. Absent when the
+    /// mode-blind assessment itself was Allow/Observe, or when the configured
+    /// mode allowed the intervention to proceed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypothetical_reason: Option<&'static str>,
     /// Ollama model state immediately before a consultation: warm | cold |
     /// unknown. Absent when L4 did not run. Structural metadata only.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,12 +72,11 @@ fn append_to(dir: &std::path::Path, event: &Event) {
     // One buffer under the shared state lock: concurrent shells cannot
     // interleave a line or race the retention compactor.
     line.push('\n');
-    let result = if crate::prompt_is_active() {
-        crate::state::append_jsonl_after_prompt(dir, "events.jsonl", line.as_bytes(), event.ts_ms)
+    let _ = if crate::prompt_is_active() {
+        crate::state::append_jsonl_after_prompt(dir, "events.jsonl", line.as_bytes())
     } else {
         crate::state::append_jsonl(dir, "events.jsonl", line.as_bytes(), event.ts_ms)
     };
-    let _ = result;
 }
 
 #[derive(Debug)]
@@ -85,7 +89,10 @@ impl std::fmt::Display for ReportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::StateDirUnavailable => {
-                write!(f, "HOME is unset, so the state directory cannot be located")
+                write!(
+                    f,
+                    "no absolute state directory can be resolved from the environment"
+                )
             }
             Self::Read(error) => write!(f, "could not read the event log: {error}"),
         }
@@ -97,6 +104,8 @@ struct StoredEvent {
     decision: String,
     reason_code: String,
     #[serde(default)]
+    hypothetical_reason: Option<String>,
+    #[serde(default)]
     evidence: Vec<String>,
     duration_us: u128,
     #[serde(default)]
@@ -107,7 +116,7 @@ struct StoredEvent {
 
 #[derive(Default)]
 struct Report {
-    events: usize,
+    valid_events: usize,
     malformed: usize,
     model_consulted: usize,
     visible_interventions: usize,
@@ -124,35 +133,63 @@ struct Report {
 
 impl Report {
     fn record(&mut self, event: StoredEvent) {
-        self.events += 1;
-        *self.decisions.entry(event.decision.clone()).or_default() += 1;
-        for code in &event.evidence {
-            *self.evidence.entry(code.clone()).or_default() += 1;
+        let StoredEvent {
+            decision,
+            reason_code,
+            hypothetical_reason,
+            evidence,
+            duration_us,
+            model_state,
+            outcome,
+        } = event;
+        // New records persist the mode-blind answer explicitly. Older M5
+        // records predate that field, so recover only reasons that actually
+        // meant Warn/Confirm in that policy vocabulary; broad `policy.*`
+        // inference incorrectly counted intrinsic Observe outcomes.
+        let hypothetical_reason = hypothetical_reason.or_else(|| {
+            legacy_hypothetical_reason(&decision, &reason_code).then(|| reason_code.clone())
+        });
+        let consulted = evidence.iter().any(|code| code.starts_with("model."));
+
+        self.valid_events += 1;
+        *self.decisions.entry(decision).or_default() += 1;
+        for code in evidence {
+            *self.evidence.entry(code).or_default() += 1;
         }
-        if let Some(outcome) = event.outcome {
+        if let Some(outcome) = outcome {
             self.visible_interventions += 1;
             *self.outcomes.entry(outcome).or_default() += 1;
         }
-        if event.decision == "observe" && event.reason_code.starts_with("policy.") {
+        if let Some(reason) = hypothetical_reason {
             self.hypothetical_interventions += 1;
-            *self
-                .hypothetical_reasons
-                .entry(event.reason_code)
-                .or_default() += 1;
+            *self.hypothetical_reasons.entry(reason).or_default() += 1;
         }
 
-        let consulted = event.evidence.iter().any(|code| code.starts_with("model."));
         if !consulted {
-            self.deterministic_us.push(event.duration_us);
+            self.deterministic_us.push(duration_us);
             return;
         }
         self.model_consulted += 1;
-        match event.model_state.as_deref() {
-            Some("warm") => self.model_warm_us.push(event.duration_us),
-            Some("cold") => self.model_cold_us.push(event.duration_us),
-            _ => self.model_unknown_us.push(event.duration_us),
+        match model_state.as_deref() {
+            Some("warm") => self.model_warm_us.push(duration_us),
+            Some("cold") => self.model_cold_us.push(duration_us),
+            _ => self.model_unknown_us.push(duration_us),
         }
     }
+}
+
+fn legacy_hypothetical_reason(decision: &str, reason: &str) -> bool {
+    decision == "observe"
+        && matches!(
+            reason,
+            "policy.direct_catastrophic"
+                | "policy.dirty_work_at_risk"
+                | "policy.main_branch_force"
+                | "policy.blockdev_write"
+                | "policy.target_context"
+                | "policy.model_mismatch"
+                | "policy.model_adversarial"
+        )
 }
 
 /// Build the human-facing M5 report from the append-only event log. Missing
@@ -183,15 +220,22 @@ fn report_text_from_path(path: &std::path::Path) -> Result<String, ReportError> 
         }
         Err(error) => return Err(ReportError::Read(error)),
     };
+    crate::state::opened_regular_file_metadata(path, &file, "event log")
+        .map_err(ReportError::Read)?;
     let mut report = Report::default();
-    for line in std::io::BufReader::new(file).split(b'\n') {
-        let line = line.map_err(ReportError::Read)?;
-        if line.is_empty() {
-            continue;
-        }
-        match serde_json::from_slice::<StoredEvent>(&line) {
-            Ok(event) => report.record(event),
-            Err(_) => report.malformed += 1,
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        match crate::state::read_jsonl_record(&mut reader, &mut line).map_err(ReportError::Read)? {
+            crate::state::JsonlRead::Eof => break,
+            crate::state::JsonlRead::Oversized => report.malformed += 1,
+            crate::state::JsonlRead::Record { .. } if line.is_empty() => {}
+            crate::state::JsonlRead::Record { .. } => {
+                match serde_json::from_slice::<StoredEvent>(&line) {
+                    Ok(event) => report.record(event),
+                    Err(_) => report.malformed += 1,
+                }
+            }
         }
     }
     Ok(render_report(&report))
@@ -200,11 +244,11 @@ fn report_text_from_path(path: &std::path::Path) -> Result<String, ReportError> 
 fn render_report(report: &Report) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "oopsinput report");
-    let _ = writeln!(out, "  events: {}", report.events);
+    let _ = writeln!(out, "  events: {}", report.valid_events);
     if report.malformed > 0 {
         let _ = writeln!(out, "  malformed lines skipped: {}", report.malformed);
     }
-    if report.events == 0 {
+    if report.valid_events == 0 {
         let _ = writeln!(out, "  no events recorded");
         return out;
     }
@@ -214,26 +258,31 @@ fn render_report(report: &Report) -> String {
         &mut out,
         "model consulted",
         report.model_consulted,
-        report.events,
+        report.valid_events,
         false,
     );
     write_rate(
         &mut out,
         "visible L2+ interventions",
         report.visible_interventions,
-        report.events,
+        report.valid_events,
         true,
     );
     write_rate(
         &mut out,
         "hypothetical interventions",
         report.hypothetical_interventions,
-        report.events,
+        report.valid_events,
         true,
     );
 
-    let _ = writeln!(out, "\ndecisions");
-    write_ranked(&mut out, &report.decisions, report.events, true);
+    write_ranked_section(
+        &mut out,
+        "decisions",
+        &report.decisions,
+        report.valid_events,
+        true,
+    );
 
     let _ = writeln!(out, "\nanalysis latency");
     write_latency(&mut out, "deterministic", &report.deterministic_us);
@@ -241,32 +290,43 @@ fn render_report(report: &Report) -> String {
     write_latency(&mut out, "model cold", &report.model_cold_us);
     write_latency(&mut out, "model unknown", &report.model_unknown_us);
 
-    let _ = writeln!(out, "\nevidence codes");
-    if report.evidence.is_empty() {
-        let _ = writeln!(out, "  none");
-    } else {
-        write_ranked(&mut out, &report.evidence, report.events, false);
-    }
-
-    let _ = writeln!(out, "\nhypothetical intervention reasons");
-    if report.hypothetical_reasons.is_empty() {
-        let _ = writeln!(out, "  none");
-    } else {
-        write_ranked(&mut out, &report.hypothetical_reasons, report.events, false);
-    }
-
-    let _ = writeln!(out, "\nvisible intervention outcomes");
-    if report.outcomes.is_empty() {
-        let _ = writeln!(out, "  none");
-    } else {
-        write_ranked(
-            &mut out,
-            &report.outcomes,
-            report.visible_interventions,
-            true,
-        );
-    }
+    write_ranked_section(
+        &mut out,
+        "evidence codes",
+        &report.evidence,
+        report.valid_events,
+        false,
+    );
+    write_ranked_section(
+        &mut out,
+        "hypothetical intervention reasons",
+        &report.hypothetical_reasons,
+        report.valid_events,
+        false,
+    );
+    write_ranked_section(
+        &mut out,
+        "visible intervention outcomes",
+        &report.outcomes,
+        report.visible_interventions,
+        true,
+    );
     out
+}
+
+fn write_ranked_section(
+    out: &mut String,
+    title: &str,
+    counts: &BTreeMap<String, usize>,
+    total: usize,
+    rates: bool,
+) {
+    let _ = writeln!(out, "\n{title}");
+    if counts.is_empty() {
+        let _ = writeln!(out, "  none");
+    } else {
+        write_ranked(out, counts, total, rates);
+    }
 }
 
 fn write_rate(out: &mut String, label: &str, count: usize, total: usize, per_thousand: bool) {
@@ -365,6 +425,7 @@ mod tests {
                                 buffer_bytes: 10,
                                 word_count: 2,
                                 duration_us: 1,
+                                hypothetical_reason: None,
                                 model_state: None,
                                 ctx_git_dirty: None,
                                 ctx_target_entries: None,
@@ -411,6 +472,7 @@ mod tests {
                 buffer_bytes: 1,
                 word_count: 1,
                 duration_us: 1,
+                hypothetical_reason: None,
                 model_state: None,
                 ctx_git_dirty: None,
                 ctx_target_entries: None,
@@ -442,6 +504,7 @@ mod tests {
             buffer_bytes: 9,
             word_count: 2,
             duration_us: 42,
+            hypothetical_reason: Some("policy.model_mismatch"),
             model_state: Some("warm"),
             ctx_git_dirty: Some(14),
             ctx_target_entries: None,
@@ -452,6 +515,7 @@ mod tests {
         assert!(json.contains("\"buffer_bytes\":9"));
         assert!(json.contains("\"evidence\":[\"syntax.opaque_substitution\"]"));
         assert!(json.contains("\"model_state\":\"warm\""));
+        assert!(json.contains("\"hypothetical_reason\":\"policy.model_mismatch\""));
         assert!(json.contains("\"ctx_git_dirty\":14"));
         // absent context counts stay out of the line entirely
         assert!(!json.contains("ctx_target_entries"));
@@ -495,7 +559,18 @@ mod tests {
         let out = report_text_from_path(&dir.join("events.jsonl")).unwrap();
         assert!(out.contains("events: 7"), "{out}");
         assert!(out.contains("malformed lines skipped: 1"), "{out}");
-        assert!(out.contains("hypothetical interventions: 4/7"), "{out}");
+        assert!(out.contains("model consulted: 3/7 (42.86%)"), "{out}");
+        assert!(
+            out.contains("visible L2+ interventions: 1/7 (14.29%; 142.86 per 1,000)"),
+            "{out}"
+        );
+        assert!(out.contains("hypothetical interventions: 2/7"), "{out}");
+        assert!(out.contains("allow: 2 (28.57%)"), "{out}");
+        assert!(out.contains("observe: 4 (57.14%)"), "{out}");
+        assert!(out.contains("warn: 1 (14.29%)"), "{out}");
+        assert!(out.contains("policy.dirty_work_at_risk: 1"), "{out}");
+        assert!(out.contains("policy.model_mismatch: 1"), "{out}");
+        assert!(!out.contains("policy.evidence_unavailable: 2"), "{out}");
         assert!(
             out.contains("deterministic (n=4): p50 200 us, p95 400 us"),
             "{out}"
@@ -503,11 +578,42 @@ mod tests {
         assert!(out.contains("model warm (n=1): p50 1.500 s"), "{out}");
         assert!(out.contains("model cold (n=1): p50 2.500 s"), "{out}");
         assert!(out.contains("model unknown (n=1): p50 3.500 s"), "{out}");
+        assert!(out.contains("git.reset_hard: 1"), "{out}");
+        assert!(out.contains("model.invalid: 1"), "{out}");
+        assert!(out.contains("cancelled: 1 (100.00%)"), "{out}");
         assert!(out.contains("evil^[[31m: 1"), "{out}");
         assert!(
             !out.contains('\u{1b}'),
             "active escape reached report: {out:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn report_counts_one_oversized_record_and_resumes_at_the_next_line() {
+        // M5 audit hardening (2026-08-08): one corrupted line used to grow the
+        // report reader without bound. It is now one malformed record, and a
+        // valid event after it must remain reportable.
+        let dir =
+            std::env::temp_dir().join(format!("oopsinput-report-oversized-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let valid = b"{\"decision\":\"allow\",\"reason_code\":\"shadow.observed\",\"evidence\":[],\"duration_us\":1}\n";
+        // Keep the over-cap record valid JSON. An unbounded implementation
+        // would accept it as a third event, so this fixture specifically
+        // proves the cap rather than merely duplicating malformed-line tests.
+        let mut oversized = b"{\"decision\":\"allow\",\"reason_code\":\"shadow.observed\",\"evidence\":[],\"duration_us\":2,\"padding\":\"".to_vec();
+        oversized.resize(crate::state::JSONL_RECORD_CAP, b'x');
+        oversized.extend_from_slice(b"\"}\n");
+        let mut log = valid.to_vec();
+        log.extend_from_slice(&oversized);
+        log.extend_from_slice(valid);
+        std::fs::write(dir.join("events.jsonl"), log).unwrap();
+
+        let out = report_text_from_path(&dir.join("events.jsonl")).unwrap();
+        assert!(out.contains("events: 2"), "{out}");
+        assert!(out.contains("malformed lines skipped: 1"), "{out}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

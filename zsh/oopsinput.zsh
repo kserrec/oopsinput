@@ -124,8 +124,9 @@ _oopsinput_handle() {
     # path pays its cost.
     #
     # fd 3 is the replacement channel (SPEC §6): the binary's fd 3 is routed
-    # into $captured; its stdout (decision JSON) and stderr are discarded.
-    # Prompts reach the terminal via /dev/tty, not through these streams.
+    # into $captured; stdout (decision JSON) and stderr are discarded. The
+    # fixed env flag tells the binary to send config diagnostics directly to
+    # /dev/tty, but only when one exists, so the common path opens no extra fd.
     local captured rc
     captured=$( {
         print -rn -- "$original"
@@ -135,7 +136,7 @@ _oopsinput_handle() {
         fi
         print -rn -- $'\0'
         (( ${#_oi_recency} )) && print -rl -- $_oi_recency
-    } | "$_OOPSINPUT_BIN" check --res "$kind" 3>&1 >/dev/null 2>&1 )
+    } | OOPSINPUT_DIAGNOSTICS_TTY=1 "$_OOPSINPUT_BIN" check --res "$kind" 3>&1 >/dev/null 2>&1 )
     rc=$?
 
     case $rc in

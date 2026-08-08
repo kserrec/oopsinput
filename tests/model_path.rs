@@ -51,6 +51,7 @@ fn run_check(
         .env("XDG_CONFIG_HOME", env.base.join("xdg"))
         .env("OOPSINPUT_STATE_DIR", env.base.join("state"))
         .env("OOPSINPUT_TEST_OLLAMA_PORT", port.to_string())
+        .env("OOPSINPUT_TEST_NO_TTY", "1")
         .env_remove("OOPSINPUT_MODE")
         .env_remove("OOPSINPUT_TEST_HANG")
         .stdin(Stdio::piped())
@@ -235,6 +236,10 @@ fn ambiguous_candidate_consults_and_records_model_warn_in_shadow() {
         "{decision}"
     );
     assert_eq!(last_event(&env)["model_state"], "cold");
+    assert_eq!(
+        last_event(&env)["hypothetical_reason"],
+        "policy.model_mismatch"
+    );
 }
 
 #[test]
@@ -281,6 +286,7 @@ fn model_down_falls_back_deterministic_and_fast() {
         evidence_codes(&decision).contains(&"model.unreachable".to_string()),
         "{decision}"
     );
+    assert!(last_event(&env)["hypothetical_reason"].is_null());
     // A refused loopback connect is immediate — no user-visible stall.
     assert!(started.elapsed() < Duration::from_secs(2));
 }
@@ -508,5 +514,15 @@ fn model_warn_is_capped_at_warn_even_in_confirm_mode() {
     assert_eq!(
         decision["reason_code"], "policy.model_mismatch",
         "{decision}"
+    );
+    let event = last_event(&env);
+    assert!(
+        event["outcome"].is_null(),
+        "prompt was not visible: {event}"
+    );
+    assert!(event["hypothetical_reason"].is_null(), "{event}");
+    assert!(
+        !env.base.join("state/policy.jsonl").exists(),
+        "an unavailable prompt spent the intervention budget"
     );
 }

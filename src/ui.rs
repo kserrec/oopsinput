@@ -44,6 +44,15 @@ pub enum WarnChoice {
     RunOnce,
 }
 
+/// Whether a complete L2+ prompt reached the terminal. `NotShown` still
+/// means fail open and run unchanged, but it must not be recorded as a
+/// visible intervention or spend the user's warning budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningPrompt {
+    NotShown,
+    Shown(WarnChoice),
+}
+
 /// Prompt read timeout in deciseconds (VTIME): 10 s, then the default.
 const PROMPT_TIMEOUT_DS: &str = "100";
 /// Drain timeout while consuming an escape sequence's remaining bytes: the
@@ -135,12 +144,17 @@ pub fn prompt_typo(typed: &str, candidate: &str) -> TypoChoice {
 
 /// Show an L2+ warning on /dev/tty. `lines` are pre-assembled (untrusted
 /// pieces already escaped by the builder); this adds the trusted framing
-/// prefix and the keys line. Total failure fails open to `RunOnce` — the
-/// original command runs unchanged (SPEC §9-6/8).
-pub fn prompt_warning(lines: &[String], pausing: bool) -> WarnChoice {
+/// prefix and the keys line. Total failure reports `NotShown`; the caller
+/// still fails open and runs the original unchanged, without recording a
+/// visible intervention or spending budget (SPEC §9-6/8).
+pub fn prompt_warning(lines: &[String], pausing: bool) -> WarningPrompt {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("OOPSINPUT_TEST_NO_TTY").is_some() {
+        return WarningPrompt::NotShown;
+    }
     match open_prompt_tty() {
         Some((mut tty, _restore)) => run_warning_prompt(&mut tty, lines, pausing),
-        None => WarnChoice::RunOnce,
+        None => WarningPrompt::NotShown,
     }
 }
 
@@ -312,7 +326,7 @@ fn run_typo_prompt<T: PromptTty>(tty: &mut T, typed: &str, candidate: &str) -> T
 /// keys). Only deliberate keys decide — unrecognized keys are ignored, and
 /// the timeout default depends on the tier: advisory warnings run the
 /// command, pausing confirmations cancel it.
-fn run_warning_prompt<T: PromptTty>(tty: &mut T, lines: &[String], pausing: bool) -> WarnChoice {
+fn run_warning_prompt<T: PromptTty>(tty: &mut T, lines: &[String], pausing: bool) -> WarningPrompt {
     let timeout_default = if pausing {
         WarnChoice::Cancel
     } else {
@@ -330,7 +344,7 @@ fn run_warning_prompt<T: PromptTty>(tty: &mut T, lines: &[String], pausing: bool
         .and_then(|()| tty.flush())
         .is_err()
     {
-        return WarnChoice::RunOnce; // fail open (SPEC §9-8)
+        return WarningPrompt::NotShown; // fail open (SPEC §9-8)
     }
     let mut choice = timeout_default;
     for _ in 0..MAX_PROMPT_KEYS {
@@ -346,7 +360,7 @@ fn run_warning_prompt<T: PromptTty>(tty: &mut T, lines: &[String], pausing: bool
         break;
     }
     let _ = tty.write_all(b"\r\n");
-    choice
+    WarningPrompt::Shown(choice)
 }
 
 /// Assemble the warning's message lines (SPEC §7 anatomy: what the command
@@ -717,6 +731,26 @@ mod tests {
     }
     impl PromptTty for FakeTty {} // all bytes pre-buffered: no drain switch
 
+    struct UnwritableTty;
+
+    impl Read for UnwritableTty {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for UnwritableTty {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("display unavailable"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl PromptTty for UnwritableTty {}
+
     #[test]
     fn y_consents_and_message_is_framed() {
         let mut tty = FakeTty::new(b"y");
@@ -820,7 +854,7 @@ mod tests {
         let mut tty = FakeTty::new(&soup);
         assert_eq!(
             run_warning_prompt(&mut tty, &["x".into()], false),
-            WarnChoice::RunOnce
+            WarningPrompt::Shown(WarnChoice::RunOnce)
         );
     }
 
@@ -838,7 +872,7 @@ mod tests {
         let mut tty = FakeTty::new(b"c");
         assert_eq!(
             run_warning_prompt(&mut tty, &lines(), false),
-            WarnChoice::Cancel
+            WarningPrompt::Shown(WarnChoice::Cancel)
         );
         let shown = tty.shown();
         for line in shown.lines().filter(|l| !l.trim().is_empty()) {
@@ -871,7 +905,7 @@ mod tests {
             let mut tty = FakeTty::new(keys);
             assert_eq!(
                 run_warning_prompt(&mut tty, &lines(), false),
-                want,
+                WarningPrompt::Shown(want),
                 "keys {keys:?}"
             );
         }
@@ -883,14 +917,26 @@ mod tests {
         let mut tty = FakeTty::new(b"");
         assert_eq!(
             run_warning_prompt(&mut tty, &lines(), false),
-            WarnChoice::RunOnce
+            WarningPrompt::Shown(WarnChoice::RunOnce)
         );
         // pausing confirmation: timeout cancels — running is never the
         // default for predicted-irreversible commands (SPEC §7)
         let mut tty = FakeTty::new(b"");
         assert_eq!(
             run_warning_prompt(&mut tty, &lines(), true),
-            WarnChoice::Cancel
+            WarningPrompt::Shown(WarnChoice::Cancel)
+        );
+    }
+
+    #[test]
+    fn warning_display_failure_is_not_a_visible_intervention() {
+        // Regression (M5 bughunt 2026-08-08): setup/write failure used to
+        // return RunOnce indistinguishably from a displayed prompt whose user
+        // chose `r`, causing the caller to spend budget for a warning nobody
+        // saw.
+        assert_eq!(
+            run_warning_prompt(&mut UnwritableTty, &lines(), false),
+            WarningPrompt::NotShown
         );
     }
 

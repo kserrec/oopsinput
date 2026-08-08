@@ -285,7 +285,11 @@ from the log (see §11). New installs: `shadow` + `suggest`.
    features + keyed fingerprints (local random key, generated per install,
    user-only file). Redaction runs before any optional raw capture
    (opt-in, research only).
-4. All state files and the config dir are user-only (0700/0600).
+4. All state files and the config dir are user-only (0700/0600). State paths
+   resolve from absolute environment paths only; a relative explicit override
+   disables state rather than claiming the working directory. Product-owned
+   files are created atomically without following a symlink, and an opened
+   existing file must still match the nonsymlink path that was inspected.
 5. Displayed untrusted text is escaped (see §7). Fuzz target: no active escape
    sequence survives the escaper.
 6. Model output is validated against the schema; anything else is discarded as
@@ -375,12 +379,20 @@ uncertainty, not as safety.
 
 ## 14. Storage and privacy
 
-- `~/.config/oopsinput/config` — plain `key = value`.
+- State resolution accepts an absolute `$OOPSINPUT_STATE_DIR` override, else an
+  absolute `$XDG_STATE_HOME/oopsinput`, else an absolute
+  `$HOME/.local/state/oopsinput`. A nonempty relative explicit override disables
+  state; a relative XDG root is ignored in favor of HOME; relative or absent
+  HOME leaves state unavailable. State failure always fails open.
+- `~/.config/oopsinput/config` — plain `key = value`. A symlink or other
+  non-regular config-file leaf is ignored, and the opened inode is checked
+  against the inspected path before any bytes are consumed.
 - `~/.local/state/oopsinput/events.jsonl` — structural events. New records
   append one JSON line at a time: timestamp, decision, evidence codes, layer,
-  timings, outcome, keyed fingerprints, and (when L4 runs) model state
-  immediately before inference: `warm`, `cold`, or `unknown`. No raw commands,
-  paths, or goal text by default. Retention is the only rewrite.
+  timings, outcome, keyed fingerprints, the explicit mode-blind policy reason
+  when Shadow/Suggest suppressed a Warn/Confirm, and (when L4 runs) model
+  state immediately before inference: `warm`, `cold`, or `unknown`. No raw
+  commands, paths, or goal text by default. Retention is the only rewrite.
 - `~/.local/state/oopsinput/policy.jsonl` — habituation state: one appended
   line per *shown* intervention (timestamp, rule code, what the user did), read
   tail-first to compute the budget and per-rule cooldown. Every writer uses a
@@ -391,27 +403,37 @@ uncertainty, not as safety.
   user-only coordination metadata; they contain no command data.
 - Analysis-time state writes wait for the coordination lock under the existing
   process watchdog, preserving concurrent records without creating a new
-  unbounded wait. After a prompt answer, state writes wait at most 25 ms: if
-  the lock remains busy, that evidence record is omitted and the user's
-  edit/cancel/run choice takes effect unchanged. Explicit `purge` waits for the
-  lock because completing deletion is the command's sole requested effect.
+  unbounded wait. After prompt setup begins, state writes wait at most 25 ms
+  and append only: if the lock remains busy, that evidence record is omitted;
+  if retention is due, it is deferred to the next analysis-time write. The
+  user's edit/cancel/run choice therefore takes effect without a full-log
+  sweep after it. Explicit `purge` waits for the lock because completing
+  deletion is the command's sole requested effect.
 - `oopsinput report` — decision/model/intervention rates, deterministic and
   warm/cold/unknown model latency percentiles, ranked evidence codes, and
   hypothetical interventions from shadow data. A model consultation is
   identified by its `model.*` evidence code; legacy events without an explicit
   model state stay in the `unknown` model bucket rather than contaminating
-  deterministic percentiles.
+  deterministic percentiles. New hypothetical counts use the explicit
+  pre-mode reason field; legacy M5 records use only the closed set of reasons
+  that actually represented Warn/Confirm, never every `policy.*` reason. One
+  JSONL record is capped at 64 KiB while reading; an oversized record counts as
+  malformed and is drained so valid later records remain usable.
 - `oopsinput purge` — one exact, zero-argument command that deletes every
   oopsinput-owned state file and coordination marker, then removes the state
   directory if empty. It never deletes configuration, follows a symlink, or
   recursively removes an unknown entry; an unknown entry is kept and named in
-  the result only as an unrecognized entry (never echoed from disk).
-- Retention default 30 days, pruned on write. Each log checks a small marker on
-  every append and performs at most one full sweep per 24 hours. A sweep drops
-  records older than its cutoff plus malformed/torn records, then atomically
-  replaces the log under the shared state lock. With continuing writes, an
-  expired record can remain for less than one additional day; with no writes,
-  no sweep runs.
+  the result only as an unrecognized entry (never echoed from disk). Purge can
+  unlink a corrupted lock-anchor symlink without following it and restore a
+  regular anchor's private mode before coordinating deletion; other inode
+  types are refused.
+- Retention default 30 days, pruned on analysis-time writes. Each log checks a
+  small marker on each such append and performs at most one full sweep per 24
+  hours. A sweep drops records older than its cutoff plus malformed/torn
+  records, including records over the 64 KiB read cap, then atomically replaces
+  the log under the shared state lock. With continuing analysis-time writes,
+  an expired record can remain for less than one additional day;
+  post-prompt-only or no writes do not run a sweep.
 - **No telemetry. No network beyond loopback Ollama. Ever.**
 
 ## 15. Config (initial surface)
@@ -426,7 +448,10 @@ log_raw = false          # opt-in research capture (redacted first)
 ```
 
 Unknown keys: warn once, ignore. Invalid values: fall back to the default for
-that key, say so once.
+that key, say so once. The warning fingerprint check, display, and marker
+replacement are one state-locked transaction across concurrent shells. The
+Zsh adapter requests direct `/dev/tty` delivery only when a warning exists; the
+marker is committed only after that complete display succeeds.
 
 ## 16. Repository layout
 
@@ -441,6 +466,10 @@ oopsinput/
 ├── README.md
 ├── LICENSE              # Apache-2.0
 ├── Cargo.toml           # single binary crate — no workspace until earned
+├── Cargo.lock           # exact resolved dependency graph
+├── deny.toml            # advisories, licenses, sources, exact crate allowlist
+├── .github/workflows/
+│   └── dependency-policy.yml # cargo-deny on changes + weekly
 ├── src/
 │   ├── main.rs          # dispatch: check/report/purge/doctor/help/version
 │   ├── proposal.rs      # Zsh proposal input + metadata    (M1)

@@ -79,9 +79,9 @@ fn main() -> ExitCode {
     }
 }
 
-/// Set once analysis is over and a prompt is on screen: the user is in
-/// control, so the analysis deadline no longer applies (ui.rs caller
-/// contract). The prompt bounds itself via the terminal-level read timeout.
+/// Set once analysis is over and prompt setup begins: the analysis deadline no
+/// longer applies (ui.rs caller contract). Terminal helpers/reads and trailing
+/// state-lock contention carry their own bounds.
 static PROMPT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn prompt_is_active() -> bool {
@@ -106,8 +106,8 @@ fn arm_watchdog(deadline_ms: u64) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(deadline_ms));
         if PROMPT_ACTIVE.load(Ordering::SeqCst) {
-            // Prompt on screen: the watchdog retires. Post-prompt work is a
-            // single fd write and exit.
+            // Prompt path active: the watchdog retires. Trailing state writes
+            // use bounded, append-only coordination and never run retention.
             return;
         }
         let extension = MODEL_EXTENSION_MS.load(Ordering::SeqCst);
@@ -208,6 +208,12 @@ fn check(args: &[String]) -> ExitCode {
     // typo prompt in suggest mode and up, else record silently with the
     // policy reason preserved (the shadow conversion).
     let assessed = policy::apply_model_evidence(warranted, consulted.as_ref().map(|c| &c.outcome));
+    let hypothetical_reason = (matches!(cfg.mode, policy::Mode::Shadow | policy::Mode::Suggest)
+        && matches!(
+            assessed.verdict,
+            policy::Verdict::Warn | policy::Verdict::Confirm
+        ))
+    .then_some(assessed.reason);
     let capped = policy::cap_for_mode(assessed, cfg.mode);
     let (decision_str, reason_code, exit_code, outcome) = match capped.verdict {
         policy::Verdict::Warn | policy::Verdict::Confirm => warning_intervention(
@@ -244,6 +250,7 @@ fn check(args: &[String]) -> ExitCode {
         buffer_bytes: proposal.buffer.len(),
         word_count,
         duration_us,
+        hypothetical_reason,
         model_state: consulted.as_ref().map(|c| c.state.as_str()),
         ctx_git_dirty: context
             .as_ref()
@@ -431,7 +438,12 @@ fn warning_intervention(
     let lines = ui::warning_lines(gated.reason, danger, context, recency, model);
     let pausing = gated.verdict == policy::Verdict::Confirm;
     PROMPT_ACTIVE.store(true, Ordering::SeqCst);
-    let choice = ui::prompt_warning(&lines, pausing);
+    let choice = match ui::prompt_warning(&lines, pausing) {
+        ui::WarningPrompt::NotShown => {
+            return (gated.verdict.as_str(), gated.reason, 0, None);
+        }
+        ui::WarningPrompt::Shown(choice) => choice,
+    };
     let (outcome, ran_unchanged, exit_code) = match choice {
         ui::WarnChoice::Edit => ("edited", false, 11u8),
         ui::WarnChoice::Cancel => ("cancelled", false, 12),
@@ -536,16 +548,15 @@ fn doctor() -> ExitCode {
     match policy::config_path() {
         None => println!("  config:     HOME is unset — cannot locate config"),
         Some(config) => {
-            let config_exists = std::fs::metadata(&config).is_ok();
-            println!(
-                "  config:     {} {}",
-                config.display(),
-                if config_exists {
-                    "(present)"
-                } else {
-                    "(absent — defaults in effect)"
+            let config_status = match policy::config_file_state(&config) {
+                policy::ConfigFileState::Regular => "(present)",
+                policy::ConfigFileState::Missing => "(absent — defaults in effect)",
+                policy::ConfigFileState::NonRegular => {
+                    "(ignored — not a regular file; defaults in effect)"
                 }
-            );
+                policy::ConfigFileState::Unavailable => "(unavailable — defaults in effect)",
+            };
+            println!("  config:     {} {config_status}", config.display(),);
             let cfg = policy::load_config();
             println!(
                 "  mode:       {}",

@@ -461,6 +461,34 @@ fn config_file_mode_suggest_enables_prompts() {
 }
 
 #[test]
+fn config_warning_reaches_the_terminal_once_through_the_plugin() {
+    // Reproduced during the M5 audit (2026-08-08): policy wrote the warning to
+    // stderr and committed `config_warned`, while the plugin redirected stderr
+    // to /dev/null. The warning was therefore recorded as shown but invisible.
+    let s = Session::new(None, &[]);
+    let confdir = s.dir.join("config/oopsinput");
+    std::fs::create_dir_all(&confdir).unwrap();
+    std::fs::write(confdir.join("config"), "unknown_key = ignored\n").unwrap();
+
+    let out = s.run(&["echo config-warning-first", "echo config-warning-second"]);
+    assert!(
+        out.contains("config-warning-first"),
+        "first command lost:\n{out}"
+    );
+    assert!(
+        out.contains("config-warning-second"),
+        "second command lost:\n{out}"
+    );
+    assert_eq!(
+        out.matches("oopsinput: config:").count(),
+        1,
+        "warning was hidden or repeated:\n{out}"
+    );
+    assert!(out.contains("line 1: unknown key, ignored"), "{out}");
+    assert!(s.dir.join("state/config_warned").is_file());
+}
+
+#[test]
 fn suggest_mode_n_runs_the_original_unchanged() {
     let s = Session::new(None, &[("OOPSINPUT_MODE", "suggest")]);
     let out = s.run_staged(&[

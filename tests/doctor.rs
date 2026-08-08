@@ -58,3 +58,37 @@ fn doctor_default_path_reports_shadow_when_no_config() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn doctor_labels_a_symlinked_config_ignored_and_uses_defaults() {
+    // Reproduced during the M5 test audit (2026-08-08): config loading ignored
+    // the symlink as required, but doctor followed it for its existence check
+    // and called the same ignored path "present" next to a shadow-mode line.
+    let base = std::env::temp_dir().join(format!(
+        "oopsinput-doctor-config-link-{}",
+        std::process::id()
+    ));
+    let home = base.join("home");
+    let xdg = base.join("xdg");
+    let target = base.join("outside-config");
+    std::fs::create_dir_all(xdg.join("oopsinput")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(&target, "mode = confirm\n").unwrap();
+    std::os::unix::fs::symlink(&target, xdg.join("oopsinput/config")).unwrap();
+
+    let out = doctor_output(&home, Some(&xdg));
+    assert!(
+        out.contains("(ignored — not a regular file; defaults in effect)"),
+        "doctor did not describe the config loader's real decision:\n{out}"
+    );
+    assert!(
+        out.contains("mode:       shadow"),
+        "ignored config affected the mode:\n{out}"
+    );
+    assert!(
+        !out.contains("(present)"),
+        "symlink was called present:\n{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -1,6 +1,7 @@
 //! M5 purge command through the shipped binary: dispatch, exact ownership
 //! boundary, symlink refusal, and honest output.
 
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
@@ -18,6 +19,9 @@ fn purge_removes_owned_state_without_following_links_or_deleting_unknowns() {
     std::fs::write(dir.join("events.jsonl"), "event\n").unwrap();
     std::fs::write(dir.join("policy.jsonl"), "policy\n").unwrap();
     std::fs::write(dir.join("key"), "key\n").unwrap();
+    std::fs::write(dir.join(".events-retention"), "1").unwrap();
+    std::fs::write(dir.join(".policy-retention"), "1").unwrap();
+    std::fs::write(dir.join(".oopsinput-tmp-abandoned"), "partial").unwrap();
     std::fs::write(dir.join("unknown.txt"), "KEEP\n").unwrap();
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "mode = suggest\n").unwrap();
@@ -32,13 +36,17 @@ fn purge_removes_owned_state_without_following_links_or_deleting_unknowns() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("removed 4 state files"), "{stdout}");
+    assert!(stdout.contains("removed 7 state files"), "{stdout}");
     assert!(stdout.contains("kept the state directory"), "{stdout}");
     assert!(output.stderr.is_empty(), "{output:?}");
     assert!(!dir.join("events.jsonl").exists());
     assert!(!dir.join("policy.jsonl").exists());
     assert!(!dir.join("key").exists());
     assert!(!dir.join("config_warned").exists());
+    assert!(!dir.join(".events-retention").exists());
+    assert!(!dir.join(".policy-retention").exists());
+    assert!(!dir.join(".oopsinput-tmp-abandoned").exists());
+    assert!(!dir.join(".oopsinput.lock").exists());
     assert_eq!(
         std::fs::read_to_string(dir.join("unknown.txt")).unwrap(),
         "KEEP\n"
@@ -142,6 +150,82 @@ fn purge_with_any_trailing_argument_is_non_destructive_usage_error() {
 }
 
 const LOCK_FILE_FOR_ASSERTION: &str = ".oopsinput.lock";
+
+#[test]
+fn purge_recovers_a_symlinked_lock_without_following_its_target() {
+    // Regression (M5 bughunt 2026-08-08): purge promised to remove every
+    // coordination marker, but normal lock acquisition rejected a corrupted
+    // lock symlink before purge could unlink it.
+    let base =
+        std::env::temp_dir().join(format!("oopsinput-purge-locklink-{}", std::process::id()));
+    let dir = base.join("state");
+    let victim = base.join("victim.txt");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("events.jsonl"), "event\n").unwrap();
+    std::fs::write(&victim, "PRECIOUS\n").unwrap();
+    std::os::unix::fs::symlink(&victim, dir.join(LOCK_FILE_FOR_ASSERTION)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_oopsinput"))
+        .arg("purge")
+        .env("OOPSINPUT_STATE_DIR", &dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "PRECIOUS\n");
+    assert!(!dir.exists(), "state directory survived: {output:?}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn purge_recovers_a_regular_lock_with_non_private_permissions() {
+    let dir = std::env::temp_dir().join(format!("oopsinput-purge-lockmode-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("events.jsonl"), "event\n").unwrap();
+    let lock = dir.join(LOCK_FILE_FOR_ASSERTION);
+    std::fs::write(&lock, "").unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_oopsinput"))
+        .arg("purge")
+        .env("OOPSINPUT_STATE_DIR", &dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(!dir.exists(), "state directory survived: {output:?}");
+}
+
+#[test]
+fn purge_refuses_a_directory_at_the_lock_path_without_deleting_inside_it() {
+    let dir = std::env::temp_dir().join(format!("oopsinput-purge-lockdir-{}", std::process::id()));
+    let lock_dir = dir.join(LOCK_FILE_FOR_ASSERTION);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    std::fs::write(dir.join("events.jsonl"), "PRECIOUS\n").unwrap();
+    std::fs::write(lock_dir.join("precious.txt"), "PRECIOUS\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_oopsinput"))
+        .arg("purge")
+        .env("OOPSINPUT_STATE_DIR", &dir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("refusing recursive deletion"),
+        "{output:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("events.jsonl")).unwrap(),
+        "PRECIOUS\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(lock_dir.join("precious.txt")).unwrap(),
+        "PRECIOUS\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 #[test]
 fn purge_refuses_recursive_deletion_without_mutating_the_directory() {

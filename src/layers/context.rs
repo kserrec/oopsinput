@@ -359,20 +359,24 @@ mod tests {
     fn no_repo_means_no_git_facts() {
         let dir = tmp("norepo");
         // The premise is that no ancestor of the temp dir is a repository.
-        // Check it explicitly, so an unusual machine reports *that* instead
-        // of looking like a walk-up bug (test-audit 2026-08-06).
-        let mut probe = dir.clone();
-        loop {
-            assert!(
-                !probe.join(".git").exists(),
-                "premise broken: {} is inside a git repository, so this test \
-                 cannot say anything about the no-repo case",
-                dir.display()
-            );
-            if !probe.pop() {
-                break;
-            }
-        }
+        // Ask Git rather than treating any `.git` pathname as proof: an empty
+        // `/tmp/.git` directory triggered this guard on 2026-08-08 even though
+        // Git correctly reported that `/tmp` was not a repository.
+        let git = git_path().expect("the context integration tests require git");
+        let inside_repo = std::process::Command::new(git)
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(&dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("probe repository premise")
+            .success();
+        assert!(
+            !inside_repo,
+            "premise broken: {} is inside a git repository, so this test \
+             cannot say anything about the no-repo case",
+            dir.display()
+        );
         let ctx = collect_at(&dir, &[], None);
         assert!(ctx.git.is_none());
         let _ = fs::remove_dir_all(&dir);

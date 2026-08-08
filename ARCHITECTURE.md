@@ -377,7 +377,10 @@ use this same function.
 
 Appends one JSON line per command to `events.jsonl` in the state directory
 (resolution order: `$OOPSINPUT_STATE_DIR` override — used by tests — then
-`$XDG_STATE_HOME/oopsinput`, then `~/.local/state/oopsinput`).
+`$XDG_STATE_HOME/oopsinput`, then `~/.local/state/oopsinput`). Every resolved
+path must be absolute. A nonempty relative explicit override disables state; a
+relative XDG root falls back to an absolute HOME; a relative, unset, or empty
+HOME leaves state unavailable. No form can claim the current directory.
 
 The invariants, all test-pinned:
 
@@ -385,7 +388,8 @@ The invariants, all test-pinned:
   codes, resolution kind, buffer byte count, word count, duration, plus
   optional context *counts* (dirty file count, largest directory entry
   count), model state immediately before L4 inference (`warm`, `cold`, or
-  `unknown`), and the user's outcome at a visible warning (`edited`,
+  `unknown`), the mode-blind policy reason when Shadow/Suggest suppressed a
+  Warn/Confirm, and the user's outcome at a visible warning (`edited`,
   `cancelled`, `ran_unchanged`). The `Event` struct has no field that *could*
   carry command text — the type system is the redaction.
 - **User-only permissions**: directory `0700`, file `0600`.
@@ -393,49 +397,62 @@ The invariants, all test-pinned:
   are joined before writing. Every event and policy writer takes the same
   stable cross-process lock, so two shells cannot interleave a line or race a
   retention rewrite (pinned by 16-thread event and 8-thread policy hammers).
-- **Never written through a symlink.** If the log path is a symbolic link,
-  the append is refused rather than growing onto whatever it points at.
+- **Never written through a symlink.** Existing paths are rejected unless they
+  are regular before open and still the same nonsymlink inode immediately
+  afterwards. A missing lock or log uses atomic `create_new`, never a combined
+  create-and-follow open, so a dangling symlink raced into the path cannot
+  create its target.
 - **Failures are swallowed.** Logging must never cost the user their command
   or their prompt.
 
 `oopsinput report` streams that JSONL file and summarizes the data without
 recomputing policy. It reports decision and intervention rates, ranked evidence
 codes and hypothetical policy reasons, visible-warning outcomes, and nearest-
-rank p50/p95/p99 analysis latency. An `observe` event whose reason starts with
-`policy.` is the persisted shadow conversion and counts as a hypothetical
-intervention. Any `model.*` evidence code keeps that event out of the
-deterministic latency bucket; the event's model state then chooses warm, cold,
-or unknown. That last bucket is important for old logs and failed status
-queries: absent metadata must not quietly become either a deterministic or a
-cold measurement. A torn or malformed line is counted and skipped, while
-valid neighboring events remain usable. Codes read from disk pass through the
-display escaper before reaching the terminal.
+rank p50/p95/p99 analysis latency. New events persist the pre-mode hypothetical
+reason explicitly; intrinsic Observe outcomes such as unavailable evidence or
+an ungraduated candidate therefore cannot be mistaken for interventions. For
+legacy M5 lines, the report recognizes only the closed set of reasons that
+actually represented Warn/Confirm at that time. Any `model.*` evidence code
+keeps that event out of the deterministic latency bucket; the event's model
+state then chooses warm, cold, or unknown. That last bucket is important for
+old logs and failed status queries: absent metadata must not quietly become
+either a deterministic or a cold measurement. A torn or malformed line is
+counted and skipped, while valid neighboring events remain usable. One record
+is capped at 64 KiB and an oversized record is drained through its newline, so
+it cannot allocate without bound or hide a valid following event. Codes read
+from disk pass through the display escaper before reaching the terminal.
 
-`state.rs` owns the shared mechanics. On each append it reads a tiny marker;
-at most once per 24 hours per log, it streams valid records at or inside the
-30-day window to a private `0600` temporary file and atomically renames it over
-the old log. Expired and malformed/torn records are dropped. The stable lock
-anchor matters: locking the log itself would stop protecting writers the
-moment atomic rename created a new inode. Readers need no lock because they
-see one complete inode or the other. A sweep can lag the exact cutoff by less
-than a day, and no write means no sweep.
+`state.rs` owns the shared mechanics. On each analysis-time append it reads a
+tiny marker; at most once per 24 hours per log, it streams valid records at or
+inside the 30-day window to a private `0600` temporary file and atomically
+renames it over the old log. Expired and malformed/torn records are dropped.
+That same 64 KiB per-record cap applies during the sweep.
+The stable lock anchor matters: locking the log itself would stop protecting
+writers the moment atomic rename created a new inode. Readers need no lock
+because they see one complete inode or the other. A sweep can lag the exact
+cutoff by less than a day, and post-prompt-only or no writes mean no sweep.
 
 Analysis-time state writes wait for that lock under the existing process
 watchdog, so normal concurrent shells lose no records without adding an
-unbounded hold on the command. Once the user has answered a prompt, each
-remaining state write waits no more than 25 ms; if contention outlives the
-bound, the record is omitted rather than delaying or overriding the user's
-edit/cancel/run choice. Explicit `purge` is different—it blocks for the lock
-because deletion is the only effect the user asked that command to perform.
+unbounded hold on the command. Once prompt setup begins, each remaining state
+write waits no more than 25 ms and only appends; if contention outlives the
+bound, the record is omitted, and a due retention sweep waits for the next
+analysis-time write. Neither a busy lock nor a large log can therefore delay
+the user's edit/cancel/run choice. Explicit `purge` is different—it blocks for
+the lock because deletion is the only effect the user asked that command to
+perform.
 
 `oopsinput purge` takes that same lock and removes only oopsinput's named data,
 markers, abandoned temp files, and the lock itself; configuration is outside
 the state directory and stays. It refuses to enter a symlinked state directory
 or recursively delete a directory found at a file name. Known symlink entries
-are unlinked without following them; unknown entries stay, and keep the state
-directory from being removed. A waiting writer compares the inode it locked
-with the current anchor and retries if purge replaced it, so concurrent shells
-cannot split into two unsynchronized groups.
+are unlinked without following them—including a corrupted lock anchor—and a
+regular lock anchor's private permissions are restored before it is acquired.
+Other non-regular lock objects are refused. Unknown entries stay, and keep the
+state directory from being removed. In the normal, uncorrupted-anchor path, a
+waiting writer compares the inode it locked with the current anchor and retries
+if purge replaced it, so concurrent shells cannot split into two
+unsynchronized groups.
 
 ### 4.5 `src/layers/typo.rs` — L1, the typo layer
 
@@ -573,12 +590,12 @@ as `observe` — recognized but not yet graduated to speaking. Each arm exists
 to make a golden counterfactual pair pass; a rule with no context in which
 it stays silent does not belong here.
 
-**`cap_for_mode`** applies the mode as a *ceiling, never a floor* — and
-downgrades preserve the policy reason. That preserved reason is the whole
-shadow-mode mechanism: an event recorded as `observe` with the reason
-`policy.dirty_work_at_risk` is a hypothetical intervention, which is what
-lets the M5 pilot measure "how often would this have spoken, and would it
-have been right?" before anything is enabled for real users.
+**`cap_for_mode`** applies the mode as a *ceiling, never a floor*. Before that
+cap is applied, the event path records the mode-blind Warn/Confirm reason in a
+dedicated optional field. That explicit field is the shadow-mode measurement:
+it lets the M5 report ask "how often would this have spoken?" without
+misclassifying intrinsic Observe reasons or depending on the final reason a
+Suggest-mode typo prompt may produce.
 
 The four modes (SPEC §8): **shadow** (analyze and record, never visible —
 the default), **suggest** (adds typo prompts), **warn** (adds nonblocking
@@ -601,7 +618,12 @@ The module also owns the full SPEC §15 **config surface**: `mode`, `model`,
 values fall back to the documented default and say so; unknown keys are
 reported **by line number only**, never by echoing the key — config text is
 untrusted input and must not reach a terminal. Complaints are printed once
-per distinct set, tracked by a fingerprint file in the state directory.
+per distinct set, tracked by a fingerprint file in the state directory. The
+fingerprint comparison, display, and marker replacement hold the shared state
+lock as one transaction, so simultaneous shells cannot all print the same
+complaint. The plugin opts into direct `/dev/tty` delivery only on this warning
+path—ordinary commands open no extra terminal descriptor—and the marker is
+committed only after the whole diagnostic is written successfully.
 `$OOPSINPUT_MODE` overrides the file's mode.
 
 Cooldown and budget state live in `policy.jsonl` (user-only): one appended
@@ -649,7 +671,9 @@ stdout, which carries the decision JSON and is discarded by the plugin:
   timeout default depends on the tier: an advisory warning runs the command,
   a pausing confirmation cancels it — running is never the default for a
   command whose consequences are predicted to be irreversible. Any failure
-  to display fails open to running unchanged.
+  to display fails open to running unchanged, but returns a distinct
+  `NotShown` result: it is absent from the visible-outcome report and never
+  spends the hourly budget or advances a cooldown.
 
 `warning_lines` builds those message lines from evidence codes and context
 counts, with every untrusted fragment escaped and every line framed by the
@@ -786,7 +810,11 @@ Exactly two: `serde` and `serde_json` (JSON is a correctness/security surface
 with real spec depth). Everything else — CLI dispatch, PATH lookup, the edit
 distance, the lexer, config parsing, and the loopback HTTP client — is
 self-written per the policy in SPEC §12. Adding a dependency requires
-updating SPEC §12 first.
+updating SPEC §12 first. `deny.toml` independently pins every resolved
+transitive crate and the four licenses currently present; the checksum-pinned
+`.github/workflows/dependency-policy.yml` runs cargo-deny on every push and
+pull request and weekly, so a newly published advisory is found even when the
+repository is idle.
 
 ## 5. Three Enters, end to end
 
@@ -892,8 +920,8 @@ Measured on the candidate path (release, including both our spawn and git's):
 
 The testing philosophy: **buffer exactness and fail-open behavior are the
 product**, so the highest-value tests drive a real interactive zsh, not mocks.
-246 automated tests today (245 passing by default plus one ignored live-model
-harness) across unit and seven integration suites, plus two gates that run
+268 automated tests today (267 passing by default plus one ignored live-model
+harness) across unit and nine integration suites, plus two gates that run
 separately.
 
 - **Unit tests** live inside each `src/` module (`#[cfg(test)] mod tests`):
@@ -921,7 +949,8 @@ separately.
   restoring the exact buffer to a live ZLE, run-once executing unchanged,
   cancel leaving the dirty bytes untouched *on disk*, warnings outranking the
   typo prompt, arrow keys leaving no stray bytes, and recency overlap
-  counting shared targets but not shared flags).
+  counting shared targets but not shared flags). It also proves a config
+  warning reaches the actual terminal exactly once through the plugin.
 
   Some of these need a **staged** runner (`Session::run_staged`) that waits
   for expected text to appear on the terminal before sending the next keys.
@@ -941,12 +970,22 @@ separately.
   block without changing surrounding lines, and refuses existing or symlinked
   destinations rather than claiming or writing through them.
 - **`tests/doctor.rs`** — `doctor`'s config line and mode line must agree,
-  including when `XDG_CONFIG_HOME` redirects the config elsewhere.
+  including when `XDG_CONFIG_HOME` redirects the config elsewhere and when a
+  symlinked config is ignored in favor of defaults.
 - **`tests/report.rs`** — the shipped `report` command honors the selected
   state directory and exposes its summary through the real CLI dispatch.
+- **`tests/state_paths.rs`** — real `check` processes prove relative explicit
+  state overrides and relative HOME values cannot claim the working directory,
+  while a relative XDG state root falls back to an absolute HOME. They also
+  prove a FIFO log is rejected before retention can block on it and the process
+  watchdog bounds analysis-time lock contention.
+- **`tests/config_warnings.rs`** — simultaneous processes emit one warning set,
+  a changed warning set re-arms exactly once, and a failed terminal display
+  leaves the marker absent so delivery retries.
 - **`tests/purge.rs`** — exact destructive-command argv, empty-state success,
-  configuration/unknown-file preservation, known-symlink unlink safety, and
-  refusal to enter a symlinked directory or recurse into an unexpected one.
+  configuration/unknown-file preservation, known-symlink unlink safety,
+  retention-marker and abandoned-temp cleanup, and refusal to enter a
+  symlinked directory or recurse into an unexpected one.
 - **`scripts/pty-gate.zsh`** — the volume acceptance gate: N unique
   submissions (default 10,000) through a PTY shell; every output must appear,
   nothing may hang. M1's run: 10,000/10,000, zero altered buffers, in 128 s.
@@ -960,6 +999,11 @@ separately.
   command once shipped and was caught by a hand-run probe rather than by any
   test (test-audit 2026-08-06). It writes to a temporary state directory, so
   running it never pollutes the shadow-mode event log the pilot depends on.
+- **`.github/workflows/dependency-policy.yml`** — installs cargo-deny 0.20.2
+  only after its release archive matches the repository-pinned SHA-256, then
+  rejects advisories, yanked crates, unreviewed crate versions, unacceptable
+  licenses, duplicate/wildcard dependencies, and non-crates.io sources. It
+  runs on pushes, pull requests, manual dispatch, and a weekly schedule.
 - **`eval/golden/`** — the golden corpus (SPEC §11), three files run as
   ordinary tests: `typo.json` (20 cases), `danger.json` (41 cases, command
   shapes) and `policy.json` (19 cases, context flips — the same command in
@@ -1066,9 +1110,10 @@ next; completed milestones are archived verbatim in
 refactor, bug-hunt, and security-audit pass.
 
 In short: the deterministic product, optional local-model layer, and M5
-report, purge, and retention are complete and tested — capture, lexing, all
-four layers, policy, prompts,
-model gating and fallback, structural logging, and pilot-data summaries. What
-remains before a first release is M5's natural-command pilot and tuning,
-followed by M6 release engineering: continuous integration,
-`SECURITY.md`, a fuller `doctor`, and a clean-machine install test.
+report, purge, retention, and security hardening are complete and tested —
+capture, lexing, all four layers, policy, prompts, model gating and fallback,
+structural logging, and pilot-data summaries. The dependency-policy workflow
+is also live. M6 release engineering proceeds independently: the full
+build/test/performance CI job, `SECURITY.md`, a fuller `doctor`, a clean-machine
+install test, and the first tag. Passive local M5 observation continues only
+as an optional future data point.

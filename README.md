@@ -54,9 +54,11 @@ the warning interface (edit / cancel / run-once), local event recording, and
 the opt-in local-model layer (loopback Ollama, advisory-only, fully tested
 against a misbehaving model). The local `report` and zero-argument `purge`
 commands are built, as is 30-day on-write retention. Not yet done: the
-shadow-mode pilot that decides which warnings earn the right to appear by
-default, and the remaining release engineering (CI, `SECURITY.md`, a fuller
-`doctor`, and the clean-machine release check).
+optional long-running shadow sample that might eventually inform which
+warnings earn the right to appear by default, and the remaining release
+engineering (full build/test CI, `SECURITY.md`, a fuller `doctor`, and the
+clean-machine release check). Dependency advisories, licenses, sources, and
+the exact resolved crate set are already enforced by scheduled CI.
 
 See [SPEC.md](SPEC.md) for the full design, [PLAN.md](PLAN.md) for
 milestone-by-milestone progress, and
