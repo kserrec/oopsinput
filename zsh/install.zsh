@@ -22,13 +22,34 @@ ZSHRC_BACKUP=$HOME/.zshrc.oopsinput-backup
 MARK_BEGIN="# >>> oopsinput >>>"
 MARK_END="# <<< oopsinput <<<"
 
+# Render terminal controls visibly. Zsh's (V) handles C0/C1/DEL, while the
+# explicit pass covers the Unicode bidi and invisible-format characters that
+# (V) otherwise preserves raw. Paths and environment overrides are untrusted.
+_oopsinput_escape_for_display() {
+    local shown=$1 i
+    local -a chars codes
+    # Exact UTF-8 byte spellings work under both C and UTF-8 locales;
+    # $'\u....' itself errors under LC_ALL=C.
+    chars=($'\xD8\x9C' $'\xE2\x80\x8B' $'\xE2\x80\x8C' $'\xE2\x80\x8D'
+        $'\xE2\x80\x8E' $'\xE2\x80\x8F' $'\xE2\x80\xA8' $'\xE2\x80\xA9'
+        $'\xE2\x80\xAA' $'\xE2\x80\xAB' $'\xE2\x80\xAC' $'\xE2\x80\xAD'
+        $'\xE2\x80\xAE' $'\xE2\x81\xA0' $'\xE2\x81\xA6' $'\xE2\x81\xA7'
+        $'\xE2\x81\xA8' $'\xE2\x81\xA9' $'\xEF\xBB\xBF')
+    codes=(061C 200B 200C 200D 200E 200F 2028 2029 202A 202B 202C 202D 202E
+        2060 2066 2067 2068 2069 FEFF)
+    for (( i = 1; i <= ${#chars}; i++ )); do
+        shown=${shown//$chars[i]/\\u{${codes[i]}}}
+    done
+    print -rn -- ${(V)shown}
+}
+
 fail() {
-    print -u2 -r -- "install: $1"
+    print -u2 -r -- "install: $(_oopsinput_escape_for_display "$1")"
     exit 1
 }
 
 if [[ ! -x $BIN_SRC ]]; then
-    print -u2 -r -- "install: release binary not found at $BIN_SRC"
+    print -u2 -r -- "install: release binary not found at $(_oopsinput_escape_for_display "$BIN_SRC")"
     print -u2 "install: build it first:  cargo build --release"
     exit 1
 fi
@@ -80,7 +101,7 @@ fi
 CONFIG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/oopsinput
 CONFIG=$CONFIG_DIR/config
 if [[ -e $CONFIG || -L $CONFIG ]]; then
-    print -r -- "config already present: $CONFIG — leaving it as is"
+    print -r -- "config already present: $(_oopsinput_escape_for_display "$CONFIG") — leaving it as is"
 else
     mkdir -p -- $CONFIG_DIR
     chmod 700 -- $CONFIG_DIR
@@ -89,7 +110,7 @@ else
         print "mode = suggest   # shadow | suggest | warn | confirm"
     } > $CONFIG
     chmod 600 -- $CONFIG
-    print -r -- "wrote default config: $CONFIG (mode = suggest)"
+    print -r -- "wrote default config: $(_oopsinput_escape_for_display "$CONFIG") (mode = suggest)"
 fi
 
 mkdir -p -- $BIN_DIR $PLUGIN_DIR
@@ -119,8 +140,8 @@ mv -f -- $BIN_TMP $BIN_DST
 BIN_TMP=""
 mv -f -- $PLUGIN_TMP $PLUGIN_DST
 PLUGIN_TMP=""
-print -r -- "installed binary: $BIN_DST"
-print -r -- "installed plugin: $PLUGIN_DST"
+print -r -- "installed binary: $(_oopsinput_escape_for_display "$BIN_DST")"
+print -r -- "installed plugin: $(_oopsinput_escape_for_display "$PLUGIN_DST")"
 
 write_plugin_block() {
     print -r -- $MARK_BEGIN
@@ -143,12 +164,11 @@ if [[ -f $ZSHRC ]]; then
     else
         {
             sed -n '1,$p' -- $ZSHRC
-            print ""
             write_plugin_block
         } > $ZSHRC_TMP
     fi
     chmod --reference=$ZSHRC $ZSHRC_TMP
-    print -r -- "backed up $ZSHRC -> $ZSHRC_BACKUP"
+    print -r -- "backed up $(_oopsinput_escape_for_display "$ZSHRC") -> $(_oopsinput_escape_for_display "$ZSHRC_BACKUP")"
 else
     write_plugin_block > $ZSHRC_TMP
     chmod 600 -- $ZSHRC_TMP
@@ -158,10 +178,10 @@ ZSHRC_TMP=""
 trap - EXIT HUP INT TERM
 
 if (( B_COUNT == 1 )); then
-    print -r -- "updated plugin block in $ZSHRC"
+    print -r -- "updated plugin block in $(_oopsinput_escape_for_display "$ZSHRC")"
 else
-    print -r -- "added plugin block to $ZSHRC"
+    print -r -- "added plugin block to $(_oopsinput_escape_for_display "$ZSHRC")"
 fi
 
-print -r -- "done — open a new terminal (or: source $ZSHRC)."
+print -r -- "done — open a new terminal (or: source $(_oopsinput_escape_for_display "$ZSHRC"))."
 print "mode: suggest — typo prompts for commands that don't resolve; everything else is shadow-recorded only."

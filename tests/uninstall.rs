@@ -19,6 +19,7 @@ fn install_script() -> PathBuf {
 fn uninstall(home: &Path) -> Output {
     Command::new("zsh")
         .arg(script())
+        .env("LC_ALL", "C")
         .env("HOME", home)
         .output()
         .expect("run uninstall.zsh")
@@ -199,6 +200,32 @@ fn unrecognized_file_in_plugin_directory_is_preserved() {
         "preserve this\n"
     );
     assert!(plugin_dir.exists(), "a non-empty directory must remain");
+
+    cleanup(&home);
+}
+
+#[test]
+fn uninstaller_escapes_control_and_bidi_bytes_in_displayed_paths() {
+    // Reproduced while verifying SECURITY.md (2026-08-08): the no-receipt
+    // diagnostic interpolated HOME-derived paths without terminal escaping.
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let home = std::env::temp_dir().join(format!(
+        "oopsinput-uninst-display-{}-{id}-\u{1b}]0;UNINSTALL\u{7}-\u{202e}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+
+    let out = uninstall(&home);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains('\u{1b}') && !stdout.contains('\u{7}') && !stdout.contains('\u{202e}'),
+        "active terminal controls survived in uninstaller output: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("^[]0;UNINSTALL^G") && stdout.contains("\\u{202E}"),
+        "uninstaller did not render both hostile fragments visibly: {stdout:?}"
+    );
 
     cleanup(&home);
 }

@@ -4,7 +4,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -40,16 +40,21 @@ impl FakeHome {
     /// Run install.zsh against this fake HOME. XDG_CONFIG_HOME is cleared so
     /// the default ~/.config path is what gets exercised.
     fn run_install(&self) -> bool {
-        Command::new("zsh")
-            .arg(script())
+        self.run_install_output(None).status.success()
+    }
+
+    fn run_install_output(&self, xdg: Option<&Path>) -> Output {
+        let mut cmd = Command::new("zsh");
+        cmd.arg(script())
+            .env("LC_ALL", "C")
             .env("HOME", &self.dir)
             .env("OOPSINPUT_BIN_SRC", &self.bin_src)
-            .env("OOPSINPUT_PLUGIN_SRC", &self.plugin_src)
-            .env_remove("XDG_CONFIG_HOME")
-            .output()
-            .expect("run install.zsh")
-            .status
-            .success()
+            .env("OOPSINPUT_PLUGIN_SRC", &self.plugin_src);
+        match xdg {
+            Some(dir) => cmd.env("XDG_CONFIG_HOME", dir),
+            None => cmd.env_remove("XDG_CONFIG_HOME"),
+        };
+        cmd.output().expect("run install.zsh")
     }
 
     fn config_path(&self) -> PathBuf {
@@ -284,5 +289,28 @@ fn fresh_install_does_not_claim_a_preexisting_plugin() {
     assert_eq!(
         std::fs::read_to_string(h.installed_plugin()).unwrap(),
         "someone else's plugin\n"
+    );
+}
+
+#[test]
+fn installer_escapes_control_and_bidi_bytes_in_displayed_paths() {
+    // Reproduced while verifying SECURITY.md (2026-08-08): installer-authored
+    // path messages emitted OSC bytes and U+202E from environment overrides.
+    let h = FakeHome::new();
+    let xdg = h.dir.join("xdg-\u{1b}]0;INSTALL\u{7}-\u{202e}");
+    let out = h.run_install_output(Some(&xdg));
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains('\u{1b}') && !stdout.contains('\u{7}') && !stdout.contains('\u{202e}'),
+        "active terminal controls survived in installer output: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("^[]0;INSTALL^G") && stdout.contains("\\u{202E}"),
+        "installer did not render both hostile fragments visibly: {stdout:?}"
     );
 }

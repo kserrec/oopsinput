@@ -15,8 +15,28 @@ PLUGIN=$PLUGIN_DIR/oopsinput.zsh
 MARK_BEGIN="# >>> oopsinput >>>"
 MARK_END="# <<< oopsinput <<<"
 
+# Keep every path printed by the uninstaller inert in a terminal. Zsh's (V)
+# covers control bytes; the explicit pass covers bidi and invisible formats.
+_oopsinput_escape_for_display() {
+    local shown=$1 i
+    local -a chars codes
+    # Exact UTF-8 byte spellings work under both C and UTF-8 locales;
+    # $'\u....' itself errors under LC_ALL=C.
+    chars=($'\xD8\x9C' $'\xE2\x80\x8B' $'\xE2\x80\x8C' $'\xE2\x80\x8D'
+        $'\xE2\x80\x8E' $'\xE2\x80\x8F' $'\xE2\x80\xA8' $'\xE2\x80\xA9'
+        $'\xE2\x80\xAA' $'\xE2\x80\xAB' $'\xE2\x80\xAC' $'\xE2\x80\xAD'
+        $'\xE2\x80\xAE' $'\xE2\x81\xA0' $'\xE2\x81\xA6' $'\xE2\x81\xA7'
+        $'\xE2\x81\xA8' $'\xE2\x81\xA9' $'\xEF\xBB\xBF')
+    codes=(061C 200B 200C 200D 200E 200F 2028 2029 202A 202B 202C 202D 202E
+        2060 2066 2067 2068 2069 FEFF)
+    for (( i = 1; i <= ${#chars}; i++ )); do
+        shown=${shown//$chars[i]/\\u{${codes[i]}}}
+    done
+    print -rn -- ${(V)shown}
+}
+
 fail() {
-    print -u2 -r -- "uninstall: $1"
+    print -u2 -r -- "uninstall: $(_oopsinput_escape_for_display "$1")"
     exit 1
 }
 
@@ -60,25 +80,25 @@ if (( B_COUNT == 1 )); then
     chmod --reference=$ZSHRC $ZSHRC_TMP
     mv -f -- $ZSHRC_TMP $ZSHRC
     ZSHRC_TMP=""
-    print -r -- "removed plugin block from $ZSHRC (backup at $ZSHRC_BACKUP)"
+    print -r -- "removed plugin block from $(_oopsinput_escape_for_display "$ZSHRC") (backup at $(_oopsinput_escape_for_display "$ZSHRC_BACKUP"))"
 else
-    print -r -- "no plugin block found in $ZSHRC"
+    print -r -- "no plugin block found in $(_oopsinput_escape_for_display "$ZSHRC")"
 fi
 
 if (( B_COUNT == 1 )); then
     if [[ -e $BIN || -L $BIN ]]; then
         rm -- $BIN
-        print -r -- "removed $BIN"
+        print -r -- "removed $(_oopsinput_escape_for_display "$BIN")"
     fi
     if [[ -e $PLUGIN || -L $PLUGIN ]]; then
         rm -- $PLUGIN
-        print -r -- "removed $PLUGIN"
+        print -r -- "removed $(_oopsinput_escape_for_display "$PLUGIN")"
     fi
     if [[ -d $PLUGIN_DIR ]]; then
         if rmdir -- $PLUGIN_DIR 2>/dev/null; then
-            print -r -- "removed empty $PLUGIN_DIR"
+            print -r -- "removed empty $(_oopsinput_escape_for_display "$PLUGIN_DIR")"
         else
-            print -r -- "kept non-empty $PLUGIN_DIR"
+            print -r -- "kept non-empty $(_oopsinput_escape_for_display "$PLUGIN_DIR")"
         fi
     fi
 fi
