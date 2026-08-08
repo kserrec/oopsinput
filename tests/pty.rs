@@ -66,7 +66,7 @@ impl Session {
     /// isolated ZDOTDIR.
     fn spawn_zsh(&self) -> std::process::Child {
         Command::new("script")
-            .args(["-qec", "zsh -i", "/dev/null"])
+            .args(["-qec", "zsh -d -i", "/dev/null"])
             .env("ZDOTDIR", &self.dir)
             .env("HOME", &self.dir)
             .env("TERM", "xterm")
@@ -203,6 +203,26 @@ fn ordinary_commands_pass_through_unchanged() {
         "substitution output missing:\n{out}"
     );
     assert!(out.contains("pty-c-ok"), "&& chain output missing:\n{out}");
+}
+
+#[test]
+fn pty_fixture_never_loads_host_global_startup_files() {
+    // Reproduced in release CI on 2026-08-08: GitHub's global Zsh setup ran
+    // compinit, whose insecure-directory prompt consumed scripted input and
+    // left several sessions blocked forever. `zsh -d` keeps RCS enabled for
+    // this fixture's .zshrc while disabling GLOBAL_RCS before startup.
+    let s = Session::new(None, &[]);
+    // Build the marker from the option value so neither complete outcome is
+    // present in `script`'s echo of the input command.
+    let out = s.run(&["print -r -- pty-global-rcs-${options[globalrcs]}"]);
+    assert!(
+        out.contains("pty-global-rcs-off"),
+        "host global startup files were not disabled:\n{out}"
+    );
+    assert!(
+        !out.contains("pty-global-rcs-on"),
+        "GLOBAL_RCS was unexpectedly enabled:\n{out}"
+    );
 }
 
 #[test]

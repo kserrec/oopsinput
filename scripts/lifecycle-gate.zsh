@@ -107,7 +107,11 @@ PTY_TRANSCRIPT=$GATE_ROOT/pty-transcript
     print -r -- "print -r -- lifecycle-shell-ok"
     print -r -- "exit"
 } > $PTY_INPUT
-if ! run_clean timeout 20s script -qec "zsh -i" /dev/null \
+# Reproduced in GitHub release CI on 2026-08-08: the runner's global Zsh
+# setup invoked compinit, whose prompt consumed the opening quote from the
+# scripted doctor command and left Zsh at `dquote>` until this timeout. `-d`
+# disables host global startup files while still loading our isolated .zshrc.
+if ! run_clean timeout 20s script -qec "zsh -d -i" /dev/null \
         < $PTY_INPUT > $PTY_TRANSCRIPT 2>&1; then
     fail "installed interactive shell failed or timed out:\n$(< $PTY_TRANSCRIPT)"
 fi

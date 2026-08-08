@@ -30,7 +30,10 @@ print -r -- "exit" >> $WORK/stream
 
 print "running $N submissions through PTY zsh..."
 START=$EPOCHREALTIME
-ZDOTDIR=$WORK TERM=xterm script -qec "zsh -i" /dev/null < $WORK/stream > $WORK/out 2>/dev/null
+# Keep this fixture hermetic: `-d` skips host global startup files but still
+# loads $ZDOTDIR/.zshrc. GitHub's global compinit prompt otherwise consumes
+# scripted input before this gate's prompt is ready (release CI, 2026-08-08).
+ZDOTDIR=$WORK TERM=xterm script -qec "zsh -d -i" /dev/null < $WORK/stream > $WORK/out 2>/dev/null
 typeset -F ELAPSED_F=$(( EPOCHREALTIME - START ))
 
 FOUND=$(grep -c -- '^gate-.*-ok' $WORK/out || true)
