@@ -313,7 +313,13 @@ temporary directory so they never contaminate this passive sample.
       `.zshrc`; every automated interactive shell now starts with `zsh -d -i`,
       which keeps the fixture startup file and excludes host global startup
       files. A regression checks that exact option state, and the replacement
-      public run passed both jobs and every acceptance gate.
+      public run passed both jobs and every acceptance gate. Final wrapup also
+      exposed a low-budget model-path test race: if the 30 ms read-only
+      `/api/ps` probe expired before completing its request, the single-use
+      mock dropped its only listener and manufactured `model.unreachable` for
+      the following chat connection. The mock now stays available for
+      `/api/chat`, matching real Ollama; the exact regression passed 30/30 and
+      the complete suite passed 10/10 after the test-only fix.
 - [x] SECURITY.md (audit 2026-08-05): security posture, the accepted same-user
       trust boundary, what the tool does/doesn't defend against, and a real
       private-report contact — ✅ 2026-08-08. The policy leads with fail-open;

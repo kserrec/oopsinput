@@ -114,22 +114,28 @@ fn mock_server_with_ps(
             return;
         };
         flag.store(true, Ordering::SeqCst);
-        let status_head = read_full_request(&mut status);
-        assert!(
-            status_head.starts_with("GET /api/ps HTTP/1.1"),
-            "{status_head}"
-        );
-        let _ = write!(
-            status,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-            ps.len()
-        );
-        let _ = status.write_all(&ps);
+        // The status probe deliberately gets only a fraction of the overall
+        // model deadline. If it expires before finishing its request, a real
+        // Ollama server remains available for the subsequent chat request.
+        // Keep this mock alive too instead of dropping its only listener.
+        if let Some(status_head) = read_full_request(&mut status) {
+            assert!(
+                status_head.starts_with("GET /api/ps HTTP/1.1"),
+                "{status_head}"
+            );
+            let _ = write!(
+                status,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                ps.len()
+            );
+            let _ = status.write_all(&ps);
+        }
 
         let Ok((mut chat, _)) = listener.accept() else {
             return;
         };
-        let chat_head = read_full_request(&mut chat);
+        let chat_head =
+            read_full_request(&mut chat).expect("client closed before finishing its chat request");
         assert!(
             chat_head.starts_with("POST /api/chat HTTP/1.1"),
             "{chat_head}"
@@ -180,7 +186,7 @@ fn mock_ollama_raw(response: Vec<u8>) -> u16 {
     mock_server(response, Duration::ZERO).0
 }
 
-fn read_full_request(s: &mut TcpStream) -> String {
+fn read_full_request(s: &mut TcpStream) -> Option<String> {
     let mut got = Vec::new();
     let mut buf = [0u8; 4096];
     let head_end = loop {
@@ -188,7 +194,9 @@ fn read_full_request(s: &mut TcpStream) -> String {
             break p;
         }
         let n = s.read(&mut buf).unwrap();
-        assert!(n > 0, "client closed before finishing its request");
+        if n == 0 {
+            return None;
+        }
         got.extend_from_slice(&buf[..n]);
     };
     let head = String::from_utf8_lossy(&got[..head_end]).into_owned();
@@ -200,10 +208,12 @@ fn read_full_request(s: &mut TcpStream) -> String {
         .unwrap();
     while got.len() < head_end + 4 + len {
         let n = s.read(&mut buf).unwrap();
-        assert!(n > 0);
+        if n == 0 {
+            return None;
+        }
         got.extend_from_slice(&buf[..n]);
     }
-    head
+    Some(head)
 }
 
 fn last_event(env: &TestEnv) -> serde_json::Value {
@@ -316,6 +326,10 @@ fn hanging_model_bounded_by_its_own_timeout() {
     // The server accepts and never answers. consult()'s own deadline
     // (model_timeout_ms) must cut it loose — deterministic fallback, well
     // before the mock's 5 s nap and the watchdog extension's backstop.
+    // Probed 2026-08-08: under full-suite scheduling pressure, the 30 ms
+    // status probe once expired before completing its request. The former
+    // single-listener mock then vanished and manufactured model.unreachable;
+    // keeping it alive for chat preserves the real Ollama lifecycle.
     let env = TestEnv::new("hang", "model = mock\nmodel_timeout_ms = 300\n");
     let (port, _) = mock_ollama(PROBABLE, Duration::from_secs(5));
     let started = Instant::now();
