@@ -205,32 +205,43 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       `report`, `purge`, and the minimum M6 trust/install surface are ready.
       It gates graduating warning categories, not inviting voluntary users to
       test shadow/suggest; personally recruiting testers is not a prerequisite.
-      **Run `oopsinput purge` before starting**: the dev machine's state
-      contains ~435 synthetic events written by benchmark loops and probes on
-      2026-08-06 that ran the real
-      binary without `OOPSINPUT_STATE_DIR` set, so accumulated data is not
-      all natural. Purge also resets habituation and warning-marker state but
-      keeps config, which is the intended clean pilot baseline. For the same
-      reason, always set `OOPSINPUT_STATE_DIR` to a temp dir when probing
-      `check` by hand.
-      **Pilot status at the 2026-08-07 wrap-up: not started.** The
-      `oopsinput` currently found on `PATH` is an older installed build;
-      `oopsinput purge` returned `unknown command 'purge'`. The next pass must
-      first install the verified current release binary and confirm that both
-      the interactive shell and plugin resolve to it, then run the current
-      binary's purge before natural-command collection begins.
+      The pilot must start after `oopsinput purge`: benchmark loops and probes
+      had run the real binary without `OOPSINPUT_STATE_DIR`, so the accumulated
+      state was not all natural. Purge also resets habituation and warning-
+      marker state but keeps config, which is the intended clean baseline.
+      That prerequisite was completed below. For the same reason, always set
+      `OOPSINPUT_STATE_DIR` to a temp dir when probing `check` by hand.
+      **Pilot status: started from zero on 2026-08-08.** The verified current
+      release binary and stable plugin copy are installed; their checksums
+      match the repository artifacts, and both the interactive shell and the
+      loaded plugin resolve `~/.local/bin/oopsinput`. The pre-purge report
+      contained 637 contaminated development events (all `allow`, including
+      228 typo candidates). The current binary's purge removed that log while
+      keeping the new 0600 `mode = suggest` config; the immediate post-purge
+      report showed 0 events. Natural-command collection starts at that
+      baseline. This item remains open until at least 1,000 natural commands
+      are collected and reviewed.
 - [ ] Tune budgets/thresholds from pilot data; graduate first warn category if
       evidence supports it
 - [ ] Acceptance: pilot writeup in eval/; decision recorded per category
 
 ## M6 — Share-ready polish
 
+- [x] Shareable install: copy both the binary and plugin to stable user-owned
+      locations — ✅ 2026-08-08. The release binary installs at
+      `~/.local/bin/oopsinput`, the plugin at
+      `~/.local/share/oopsinput/oopsinput.zsh`, and the marked `.zshrc` block
+      sources the installed copy, so moving/deleting the checkout no longer
+      breaks new shells. Reruns stage and atomically replace complete runtime
+      files, migrate the old repository-pointing block in place, and preserve
+      its surrounding bytes and mode. A healthy marker block is the ownership
+      receipt for update/uninstall: without one, same-named existing files are
+      never claimed or removed. Symlink/non-regular destinations and ambiguous
+      marker layouts are refused before edits; uninstall keeps config, state,
+      and unknown plugin-directory entries. Nineteen lifecycle/security
+      integration cases pin install, update, migration, and removal.
 - [ ] README: honest pitch, install, what it does/does not do, uninstall, and a
       self-serve shadow/suggest testing protocol
-- [ ] Shareable install: copy both the binary and plugin to stable user-owned
-      locations. The current installer writes a `.zshrc` source line pointing
-      into the repository checkout, so moving/deleting the clone breaks the
-      installed hook. Pin install/update/uninstall behavior with tests
 - [ ] CI (audit 2026-08-05): fmt --check, clippy -D warnings, cargo test, and
       cargo-deny (supply-chain + license check; also vets unfamiliar
       transitive deps like serde_json's `zmij`) on every push
@@ -250,9 +261,12 @@ in [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md).
       keys, but that is a curated list a future git release could outgrow.
       The structural fix — reading the index ourselves, no git spawn — is a
       v2 candidate, not a v1 promise.
-      (3) install.zsh leaves any existing path (dangling symlinks included)
-      untouched rather than writing through it, and the binary refuses to
-      write through a symlink in its own state dir.
+      (3) On a fresh install, install.zsh leaves any existing destination
+      (dangling symlinks included) untouched rather than claiming or writing
+      through it. A healthy marked `.zshrc` block is the receipt that permits
+      atomic update of regular installed binary/plugin files; config stays
+      untouched whenever its path already exists. The binary likewise refuses
+      to write through a symlink in its own state dir.
       (4) The loopback model peer check (audit 2026-08-06): with a model
       configured, command text goes to 127.0.0.1:11434 only after the
       peer's uid checks out (own user / system account). State the

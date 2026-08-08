@@ -35,9 +35,11 @@ oopsinput is three things working together:
    than through the plugin. There is no daemon, no background process, no
    state held in memory between commands.
 3. **Install/uninstall scripts** (`zsh/install.zsh`, `zsh/uninstall.zsh`) —
-   copy the binary into `~/.local/bin`, add/remove one clearly-marked block
-   in `~/.zshrc`, and write a default config file on first install.
-   Everything they touch is marked, backed up, and reversible.
+   copy the binary into `~/.local/bin` and the plugin into
+   `~/.local/share/oopsinput`, add/remove one clearly-marked block in
+   `~/.zshrc`, and write a default config file on first install. The shell
+   edit is backed up; the marker block is also the receipt that authorizes
+   later updates and removal of the two installed runtime files.
 
 The trust and failure model in one sentence: the plugin treats the binary as
 something that can crash, hang, or be missing at any moment, and in every one
@@ -109,13 +111,28 @@ zsh/install.zsh
 This installs in **suggest** mode: the typo layer may ask you a question
 (only ever about a command that could not have run anyway), and everything
 else is silently observed and recorded. Danger warnings are off by default —
-see §4.8 for the modes and how one is chosen.
+see §4.8 for the modes and how one is chosen. The release binary lands at
+`~/.local/bin/oopsinput`; the plugin lands at
+`~/.local/share/oopsinput/oopsinput.zsh`, and the marked `~/.zshrc` block
+sources that installed copy. Moving or deleting the checkout therefore does
+not break a new shell. Rerunning the installer atomically updates both runtime
+files and migrates an older checkout-pointing block in place.
+
+Before editing, the installer requires an unambiguous marker boundary and
+refuses symbolic-link or non-regular destinations. On a fresh install it also
+refuses to overwrite same-named regular files: only an existing healthy marker
+block authorizes update behavior.
 
 To remove:
 
 ```
 zsh/uninstall.zsh
 ```
+
+The uninstaller uses the same healthy marker block as its ownership receipt.
+It removes that block and the two installed runtime files, but preserves any
+unrecognized file in the plugin directory. Configuration and recorded state
+also remain; run `oopsinput purge` first when recorded state should be removed.
 
 ## 3. The zsh side, ground-up
 
@@ -875,8 +892,8 @@ Measured on the candidate path (release, including both our spawn and git's):
 
 The testing philosophy: **buffer exactness and fail-open behavior are the
 product**, so the highest-value tests drive a real interactive zsh, not mocks.
-227 automated tests today (226 passing by default plus one ignored live-model
-harness) across unit and six integration suites, plus two gates that run
+246 automated tests today (245 passing by default plus one ignored live-model
+harness) across unit and seven integration suites, plus two gates that run
 separately.
 
 - **Unit tests** live inside each `src/` module (`#[cfg(test)] mod tests`):
@@ -914,12 +931,15 @@ separately.
   press it before the prompt exists. The runner is bounded: a marker that
   never appears fails with the terminal transcript instead of hanging the
   suite.
-- **`tests/uninstall.rs`** — `uninstall.zsh` against a `~/.zshrc` with
-  damaged marker blocks must refuse to edit, never delete-to-end-of-file.
-- **`tests/install.rs`** — the installed defaults: a fresh install writes
-  `mode = suggest` with user-only permissions, an existing config is left
-  byte-identical, a symlink at the config path is not written through, and
-  installing twice doesn't duplicate the `~/.zshrc` block.
+- **`tests/uninstall.rs`** — damaged or multiple marker blocks refuse without
+  editing; a healthy install removes only its marker, binary, and plugin while
+  preserving config, state, and unrecognized files; no marker means no
+  authority to remove same-named files.
+- **`tests/install.rs`** — the installed defaults and lifecycle: a fresh
+  install writes `mode = suggest` with user-only permissions, copies both
+  runtime artifacts outside the checkout, migrates and updates an old source
+  block without changing surrounding lines, and refuses existing or symlinked
+  destinations rather than claiming or writing through them.
 - **`tests/doctor.rs`** — `doctor`'s config line and mode line must agree,
   including when `XDG_CONFIG_HOME` redirects the config elsewhere.
 - **`tests/report.rs`** — the shipped `report` command honors the selected

@@ -55,8 +55,8 @@ the opt-in local-model layer (loopback Ollama, advisory-only, fully tested
 against a misbehaving model). The local `report` and zero-argument `purge`
 commands are built, as is 30-day on-write retention. Not yet done: the
 shadow-mode pilot that decides which warnings earn the right to appear by
-default, and release engineering (CI, `SECURITY.md`, and share-ready install
-and update behavior).
+default, and the remaining release engineering (CI, `SECURITY.md`, a fuller
+`doctor`, and the clean-machine release check).
 
 See [SPEC.md](SPEC.md) for the full design, [PLAN.md](PLAN.md) for
 milestone-by-milestone progress, and
@@ -86,9 +86,12 @@ cargo build --release
 cargo test
 ```
 
-To try it on your own shell — installs in suggest mode, adds one marked
-block to `~/.zshrc` (backed up first), and is undone by
-`zsh/uninstall.zsh`:
+To try it on your own shell, run the installer after the release build. It
+copies the binary to `~/.local/bin/oopsinput` and the plugin to
+`~/.local/share/oopsinput/oopsinput.zsh`, adds one marked block to `~/.zshrc`
+(backed up first), and starts in suggest mode. The installed shell hook does
+not depend on the repository staying where it is; rerunning the installer
+updates both installed files.
 
 ```
 zsh/install.zsh
@@ -102,8 +105,9 @@ mode = warn
 
 `oopsinput report` summarizes recorded decisions without exposing command
 text. `oopsinput purge` deletes all oopsinput-owned recorded state while
-keeping configuration; run it before `zsh/uninstall.zsh` if you want that
-state removed as part of leaving.
+keeping configuration. `zsh/uninstall.zsh` removes the marked shell block and
+the installed binary/plugin, but deliberately keeps configuration and recorded
+state; run `oopsinput purge` first if you want the recorded state removed too.
 
 ## License
 
