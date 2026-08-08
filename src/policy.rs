@@ -439,6 +439,13 @@ pub(crate) enum ConfigFileState {
     Unavailable,
 }
 
+pub(crate) struct ConfigInspection {
+    pub path: Option<PathBuf>,
+    pub file_state: ConfigFileState,
+    pub config: Config,
+    pub mode_override_valid: bool,
+}
+
 /// Classify the config leaf exactly as the loader does. `doctor` consumes the
 /// same answer so it cannot call a symlink "present" while `load_config`
 /// correctly ignores it.
@@ -454,23 +461,48 @@ pub(crate) fn config_file_state(path: &std::path::Path) -> ConfigFileState {
 /// Load and validate the full SPEC §15 surface. $OOPSINPUT_MODE overrides
 /// the file's mode (and, being an explicit act, never warns).
 pub fn load_config() -> Config {
-    let mut cfg = match config_path() {
-        Some(path) => match read_config_file(&path) {
-            Some(text) => parse_config(&text),
-            None => Config::default(),
+    inspect_config().config
+}
+
+/// The same fail-open config load as `load_config`, plus the exact reason the
+/// file did or did not participate. Runtime analysis needs only the effective
+/// config; `doctor` also needs to distinguish a valid absent file from a
+/// regular file that could not be opened, verified, read, or decoded.
+pub(crate) fn inspect_config() -> ConfigInspection {
+    let path = config_path();
+    let (mut cfg, file_state) = match path.as_deref() {
+        Some(path) => match config_file_state(path) {
+            ConfigFileState::Regular => match read_config_file(path) {
+                Some(text) => (parse_config(&text), ConfigFileState::Regular),
+                None => (Config::default(), ConfigFileState::Unavailable),
+            },
+            state => (Config::default(), state),
         },
-        None => Config::default(),
+        None => (Config::default(), ConfigFileState::Unavailable),
     };
-    if let Ok(v) = std::env::var("OOPSINPUT_MODE") {
-        cfg.mode = parse_mode(&v).unwrap_or(Mode::Shadow);
+    let mode_override_valid = match std::env::var("OOPSINPUT_MODE") {
+        Ok(v) => match parse_mode(&v) {
+            Some(mode) => {
+                cfg.mode = mode;
+                true
+            }
+            None => {
+                cfg.mode = Mode::Shadow;
+                false
+            }
+        },
+        Err(std::env::VarError::NotPresent) => true,
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    };
+    ConfigInspection {
+        path,
+        file_state,
+        config: cfg,
+        mode_override_valid,
     }
-    cfg
 }
 
 fn read_config_file(path: &std::path::Path) -> Option<String> {
-    if config_file_state(path) != ConfigFileState::Regular {
-        return None;
-    }
     let mut buf = Vec::new();
     let file = std::fs::File::open(path).ok()?;
     crate::state::opened_regular_file_metadata(path, &file, "config file").ok()?;

@@ -31,7 +31,10 @@ impl Session {
         let bin = bin_override
             .map(String::from)
             .unwrap_or_else(|| env!("CARGO_BIN_EXE_oopsinput").to_string());
-        let plugin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("zsh/oopsinput.zsh");
+        let plugin_source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("zsh/oopsinput.zsh");
+        let plugin = dir.join(".local/share/oopsinput/oopsinput.zsh");
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::copy(&plugin_source, &plugin).unwrap();
 
         let mut zshrc = String::new();
         zshrc.push_str("PS1='PTYTEST%% '\n");
@@ -51,7 +54,9 @@ impl Session {
         for (k, v) in extra_env {
             zshrc.push_str(&format!("export {k}={v}\n"));
         }
+        zshrc.push_str("# >>> oopsinput >>>\n");
         zshrc.push_str(&format!("source {plugin:?}\n"));
+        zshrc.push_str("# <<< oopsinput <<<\n");
         std::fs::write(dir.join(".zshrc"), zshrc).unwrap();
 
         Session { dir }
@@ -63,6 +68,7 @@ impl Session {
         Command::new("script")
             .args(["-qec", "zsh -i", "/dev/null"])
             .env("ZDOTDIR", &self.dir)
+            .env("HOME", &self.dir)
             .env("TERM", "xterm")
             .env_remove("OOPSINPUT_BIN")
             .stdin(Stdio::piped())
@@ -233,17 +239,48 @@ fn missing_binary_fails_open() {
 }
 
 #[test]
+fn doctor_sees_the_installed_plugin_and_all_live_accept_widgets() {
+    // Reproduced with a direct Zsh tokenizer probe (2026-08-08): `(z)` keeps
+    // the quotes around the README's full-path spelling, so taking `:t`
+    // directly produced `oopsinput"` and skipped the live-status refresh.
+    // Blank the previously published value first so this test cannot pass on
+    // the load-time snapshot alone.
+    let s = Session::new(None, &[]);
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_oopsinput"));
+    let command = format!("{binary:?} doctor");
+    let out = s.run(&["export OOPSINPUT_WRAPPED_WIDGETS=", &command]);
+    assert!(
+        out.contains("plugin:     installed"),
+        "doctor missed the installed artifact and receipt:\n{out}"
+    );
+    assert!(
+        out.contains("widgets:    4/4 wrapped in this shell"),
+        "plugin did not publish the live wrapper state:\n{out}"
+    );
+    assert!(
+        out.contains("result:     ready"),
+        "healthy interactive install did not pass doctor:\n{out}"
+    );
+}
+
+#[test]
 fn missing_binary_diagnostic_escapes_hostile_path() {
     // Audit finding #4: the load diagnostic prints the env-supplied binary
-    // path; a value carrying terminal escape sequences must not be rendered
-    // raw (here: an OSC title-set sequence).
-    let hostile = "/nonexistent/\u{1b}]0;EVIL\u{7}x";
-    let s = Session::new(Some(hostile), &[]);
+    // path; a value carrying terminal escape sequences or bidi controls must
+    // not be rendered raw (here: an OSC title-set sequence plus U+202E).
+    let hostile = "/nonexistent/\u{1b}]0;EVIL\u{7}x-\u{202e}";
+    // C locale is deliberate: the plugin must not depend on Unicode locale
+    // support merely to make hostile UTF-8 bytes safe for display.
+    let s = Session::new(Some(hostile), &[("LC_ALL", "C")]);
     let out = s.run(&["echo pty-esc-ok"]);
     assert!(out.contains("pty-esc-ok"), "commands did not run:\n{out}");
     assert!(
         !out.contains("\u{1b}]0;EVIL"),
         "raw escape sequence from OOPSINPUT_BIN reached the terminal:\n{out:?}"
+    );
+    assert!(
+        !out.contains('\u{202e}') && out.contains("\\u{202E}"),
+        "raw bidi control from OOPSINPUT_BIN reached the terminal:\n{out:?}"
     );
 }
 

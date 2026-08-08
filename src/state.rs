@@ -20,6 +20,14 @@ const LOCK_FILE: &str = ".oopsinput.lock";
 const EVENT_RETENTION_FILE: &str = ".events-retention";
 const POLICY_RETENTION_FILE: &str = ".policy-retention";
 const TEMP_PREFIX: &str = ".oopsinput-tmp-";
+const OWNED_FILES: &[&str] = &[
+    "events.jsonl",
+    "policy.jsonl",
+    "key",
+    "config_warned",
+    EVENT_RETENTION_FILE,
+    POLICY_RETENTION_FILE,
+];
 const RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const PRUNE_INTERVAL_MS: u64 = 24 * 60 * 60 * 1_000;
 const POST_PROMPT_LOCK_TIMEOUT: Duration = Duration::from_millis(25);
@@ -53,6 +61,105 @@ pub(crate) fn state_dir() -> Option<PathBuf> {
     let home = PathBuf::from(home);
     home.is_absolute()
         .then(|| home.join(".local/state/oopsinput"))
+}
+
+#[derive(Debug)]
+pub(crate) struct StateInspection {
+    pub dir: Option<PathBuf>,
+    pub present: bool,
+    pub checked_files: usize,
+    pub issues: Vec<StateIssue>,
+}
+
+#[derive(Debug)]
+pub(crate) enum StateIssue {
+    DirectoryUnavailable,
+    DirectoryNotReal,
+    DirectoryUnreadable,
+    DirectoryMode(u32),
+    EntryUnavailable(&'static str),
+    EntryNotRegular(&'static str),
+    EntryMode(&'static str, u32),
+}
+
+/// Read-only setup inspection for `doctor`. It neither creates the state
+/// directory nor repairs modes: diagnostics must describe the current state,
+/// while the normal write path remains the sole owner of creation and repair.
+pub(crate) fn inspect_state() -> StateInspection {
+    let Some(dir) = state_dir() else {
+        return StateInspection {
+            dir: None,
+            present: false,
+            checked_files: 0,
+            issues: vec![StateIssue::DirectoryUnavailable],
+        };
+    };
+    let mut inspection = StateInspection {
+        dir: Some(dir.clone()),
+        present: false,
+        checked_files: 0,
+        issues: Vec::new(),
+    };
+    let meta = match std::fs::symlink_metadata(&dir) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return inspection,
+        Err(_) => {
+            inspection.issues.push(StateIssue::DirectoryUnavailable);
+            return inspection;
+        }
+    };
+    inspection.present = true;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        inspection.issues.push(StateIssue::DirectoryNotReal);
+        return inspection;
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode != 0o700 {
+        inspection.issues.push(StateIssue::DirectoryMode(mode));
+    }
+
+    inspect_state_entry(&dir.join(LOCK_FILE), LOCK_FILE, &mut inspection);
+    for name in OWNED_FILES {
+        inspect_state_entry(&dir.join(name), name, &mut inspection);
+    }
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => {
+            inspection.issues.push(StateIssue::DirectoryUnreadable);
+            return inspection;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                inspection.issues.push(StateIssue::DirectoryUnreadable);
+                break;
+            }
+        };
+        if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+            inspect_state_entry(&entry.path(), "temporary state file", &mut inspection);
+        }
+    }
+    inspection
+}
+
+fn inspect_state_entry(path: &Path, label: &'static str, inspection: &mut StateInspection) {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            inspection.checked_files += 1;
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                inspection.issues.push(StateIssue::EntryNotRegular(label));
+                return;
+            }
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o600 {
+                inspection.issues.push(StateIssue::EntryMode(label, mode));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => inspection.issues.push(StateIssue::EntryUnavailable(label)),
+    }
 }
 
 /// Append one already-serialized JSONL record and opportunistically enforce
@@ -702,14 +809,6 @@ fn remove_state_dir_if_empty(dir: &Path) -> Result<bool, PurgeError> {
 }
 
 fn owned_entries(dir: &Path) -> Result<Vec<PathBuf>, PurgeError> {
-    const OWNED_FILES: &[&str] = &[
-        "events.jsonl",
-        "policy.jsonl",
-        "key",
-        "config_warned",
-        EVENT_RETENTION_FILE,
-        POLICY_RETENTION_FILE,
-    ];
     let mut paths = Vec::new();
     for name in OWNED_FILES {
         let path = dir.join(name);

@@ -15,10 +15,31 @@
 
 typeset -g _OOPSINPUT_BIN=${OOPSINPUT_BIN:-$HOME/.local/bin/oopsinput}
 if [[ ! -x $_OOPSINPUT_BIN ]]; then
-    # (V) renders control characters visibly (^[ etc.) — a hostile env value
-    # cannot emit raw terminal sequences through this diagnostic. Note (qqqq)
-    # is NOT sufficient: it wraps in $'...' but leaves control bytes raw.
-    print -u2 "oopsinput: binary not found at ${(V)_OOPSINPUT_BIN} — guard disabled for this session"
+    # Zsh's (V) renders control characters visibly (^[ etc.) but leaves bidi
+    # and zero-width format controls raw. Neutralize those first so a hostile
+    # env value cannot spoof this diagnostic. Note (qqqq) is NOT sufficient:
+    # it wraps in $'...' but leaves control bytes raw.
+    _oopsinput_escape_for_display() {
+        local shown=$1 i
+        local -a chars codes
+        # Exact UTF-8 byte spellings work under both C and UTF-8 locales;
+        # $'\u....' itself errors under LC_ALL=C.
+        chars=($'\xD8\x9C' $'\xE2\x80\x8B' $'\xE2\x80\x8C' $'\xE2\x80\x8D'
+            $'\xE2\x80\x8E' $'\xE2\x80\x8F' $'\xE2\x80\xA8' $'\xE2\x80\xA9'
+            $'\xE2\x80\xAA' $'\xE2\x80\xAB' $'\xE2\x80\xAC' $'\xE2\x80\xAD'
+            $'\xE2\x80\xAE' $'\xE2\x81\xA0' $'\xE2\x81\xA6' $'\xE2\x81\xA7'
+            $'\xE2\x81\xA8' $'\xE2\x81\xA9' $'\xEF\xBB\xBF')
+        codes=(061C 200B 200C 200D 200E 200F 2028 2029 202A 202B 202C 202D 202E
+            2060 2066 2067 2068 2069 FEFF)
+        for (( i = 1; i <= ${#chars}; i++ )); do
+            shown=${shown//$chars[i]/\\u{${codes[i]}}}
+        done
+        print -rn -- ${(V)shown}
+    }
+    typeset _oi_shown_bin=$(_oopsinput_escape_for_display "$_OOPSINPUT_BIN")
+    unfunction _oopsinput_escape_for_display
+    print -u2 -r -- "oopsinput: binary not found at $_oi_shown_bin — guard disabled for this session"
+    unset _oi_shown_bin
     return 0
 fi
 
@@ -33,6 +54,19 @@ _OOPSINPUT_WIDGETS=(
     accept-and-hold
     accept-and-infer-next-history
 )
+
+# A child process cannot inspect ZLE state in its parent shell. Publish only a
+# closed list of our static widget names so `oopsinput doctor` can report the
+# live adapter state without receiving command text or user-defined names.
+_oopsinput_publish_status() {
+    local w
+    local -a wrapped=()
+    for w in $_OOPSINPUT_WIDGETS; do
+        [[ ${widgets[$w]:-} == user:_oopsinput_wrap_$w ]] && wrapped+=( $w )
+    done
+    typeset -gx OOPSINPUT_PLUGIN_ACTIVE=1
+    typeset -gx OOPSINPUT_WRAPPED_WIDGETS=${(j:,:)wrapped}
+}
 
 # Invoke whatever this widget was before we wrapped it: a saved user widget
 # (another plugin's wrapper) if one existed, else the ZLE builtin (.name).
@@ -65,6 +99,14 @@ _oopsinput_handle() {
     # *character*) when the split yields a single word. Regression-tested.
     local -a _oi_words
     _oi_words=( ${(z)BUFFER} )
+    # (z) preserves source quoting. Remove that quoting before taking the
+    # basename: for the documented `"$HOME/.../oopsinput" doctor` spelling,
+    # `${_oi_words[1]:t}` otherwise ends in `oopsinput"` and misses the status
+    # refresh. (Q) only removes quoting; it does not evaluate expansions.
+    local _oi_command=${(Q)_oi_words[1]}
+    if [[ ${_oi_command:t} == oopsinput && ${_oi_words[2]:-} == doctor ]]; then
+        _oopsinput_publish_status
+    fi
     local word=${_oi_words[1]:-}
     local out kind=unknown
     if [[ -n $word ]]; then
@@ -190,3 +232,4 @@ _oopsinput_handle() {
         zle -N $w _oopsinput_wrap_$w
     done
 }
+_oopsinput_publish_status
