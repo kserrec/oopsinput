@@ -10,6 +10,8 @@ How it relates to the other documents:
   and SPEC disagree, SPEC wins.
 - **[PLAN.md](PLAN.md)** tracks *progress*: which milestones are done and what
   each one covered.
+- **[SECURITY.md](SECURITY.md)** states the threat boundary, residual risks,
+  and private vulnerability-reporting channel.
 - **This document** covers *how the code works right now*. That is the whole
   deterministic product: command capture in zsh, the lexer, all three
   deterministic analysis layers (typo, danger, context), the policy engine,
@@ -79,6 +81,14 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
   integration tests in `tests/` (including the PTY suite — see §6).
 - The `fmt`/`clippy` line must be clean before any commit (project rule).
 
+The clean-machine lifecycle gate — install the real release artifacts under a
+temporary isolated home, exercise `doctor`, Shadow recording, `report`,
+`purge`, and uninstall, then enforce the exact ownership residue:
+
+```
+scripts/lifecycle-gate.zsh
+```
+
 The volume acceptance gate — thousands of scripted submissions through a real
 interactive zsh, verifying that every command's output appears and nothing
 hangs:
@@ -98,9 +108,10 @@ against a release build:
 scripts/perf-gate.zsh
 ```
 
-Neither gate runs under `cargo test`: they need a release build and real
-process spawns, and keeping them separate keeps the test suite fast. Run
-them before claiming a performance number.
+These three gates run separately from `cargo test`: they need a release build
+and real process spawns, and keeping them separate keeps the test suite fast.
+Run all three before release; run both timing gates before claiming a
+performance number.
 
 To install on your own machine:
 
@@ -151,7 +162,15 @@ Enter is not the only way to submit a buffer. The plugin wraps all four
 `accept-and-hold`, `accept-and-infer-next-history`), and because widgets are
 keymap-independent, the same wrappers cover both Emacs and Vi modes.
 
-### What the wrapper does (`_oopsinput_handle`, `zsh/oopsinput.zsh:48`)
+A child process cannot inspect the ZLE widgets in its parent shell. After
+wrapping, the plugin therefore publishes only a closed status vocabulary:
+`OOPSINPUT_PLUGIN_ACTIVE=1` and a comma-separated subset of those four static
+widget names in `OOPSINPUT_WRAPPED_WIDGETS`. It refreshes that status
+immediately before an interactively entered `oopsinput doctor` command, so
+`doctor` can verify the live adapter without receiving command text or
+user-defined widget names.
+
+### What the wrapper does (`_oopsinput_handle` in `zsh/oopsinput.zsh`)
 
 On each accepted buffer, the wrapper:
 
@@ -225,10 +244,12 @@ On each accepted buffer, the wrapper:
 Two more load-time behaviors worth knowing: sourcing the plugin twice is
 harmless (already-wrapped widgets are detected and skipped), and if the binary
 is missing at load, the plugin prints one diagnostic and disables itself for
-the session. That diagnostic renders the configured path with zsh's `(V)`
-flag so control characters appear visibly (`^[`) — a hostile `OOPSINPUT_BIN`
-value can't smuggle terminal escape sequences to your terminal. (`(qqqq)`
-quoting is *not* sufficient for this; it leaves control bytes raw.)
+the session. That diagnostic maps bidirectional and invisible Unicode format
+characters to explicit code points, then renders control characters visibly
+with zsh's `(V)` flag (`^[`). The byte-based mapping works under both UTF-8 and
+`LC_ALL=C`, so a hostile `OOPSINPUT_BIN` value cannot smuggle terminal controls
+or misleading text direction to the terminal. (`(qqqq)` quoting is *not*
+sufficient for this; it leaves control bytes raw.)
 
 ### Three zsh traps, regression-locked
 
@@ -304,16 +325,24 @@ builds** (`#[cfg(debug_assertions)]`, meaning the code is compiled out of
 release binaries entirely). The PTY suite uses them to prove the watchdog
 works end-to-end; a release binary has a fixed deadline and no hang hook.
 
-`doctor` prints environment sanity checks: version, whether `zsh` is on PATH
-(via direct file-metadata lookup that requires the executable bit — never by
-asking a shell, per SPEC §9), which config file is in effect and whether it
-exists, the resulting mode, how many config problems were found, whether
-the plugin block is present in `~/.zshrc`, and — when a model is configured —
-whether Ollama answers on loopback and has that model pulled (a POST to
-`/api/show` through §4.10's client; it loads nothing and runs no inference).
-The config line and the mode line resolve through the same function, so they
-can never contradict each other (they once did — a bug found by review and
-now pinned by `tests/doctor.rs`).
+`doctor` is a read-only setup diagnosis. It checks the version and whether a
+real executable `zsh` is on PATH (via direct file-metadata lookup — never by
+asking a shell, per SPEC §9); the unique marked block in regular `~/.zshrc`
+and the regular installed plugin file; all four live accept-widget wrappers;
+the config file, every parser issue, any `OOPSINPUT_MODE` override, and the
+effective mode; the optional Ollama peer and configured model; and exact
+`0700`/`0600` modes on the state directory and every owned state file. A
+missing state directory is healthy because the first write creates it. The
+command never creates, repairs, or rewrites anything: it prints `result:
+ready` and exits zero only when every required check passes, otherwise it
+prints `result: problems found` and exits one.
+
+The model check is a POST to `/api/show` through §4.10's client; it loads
+nothing and runs no inference. The config line and the mode line resolve
+through the same inspection, so they cannot contradict each other (they once
+did — a bug found by review and now pinned by `tests/doctor.rs`). Untrusted
+paths, config diagnostics, model names, and state paths are escaped before
+display.
 
 ### 4.2 `src/proposal.rs` — input parsing
 
@@ -453,6 +482,13 @@ state directory from being removed. In the normal, uncorrupted-anchor path, a
 waiting writer compares the inode it locked with the current anchor and retries
 if purge replaced it, so concurrent shells cannot split into two
 unsynchronized groups.
+
+The same module supplies `doctor` with a strictly read-only inspection. It
+accepts an absent state directory, but when state exists it requires the real
+directory to be `0700` and every recognized lock, log, marker, key, policy, or
+temporary state file to be a regular `0600` file. Unknown entries are ignored
+because oopsinput does not claim them. Inspection reports damage but never
+creates state or repairs permissions.
 
 ### 4.5 `src/layers/typo.rs` — L1, the typo layer
 
@@ -657,6 +693,13 @@ unconditionally — including to text that a charset check elsewhere has
 already restricted, because a rule that holds only while a distant check
 stays correct is a rule that breaks silently when that check is edited.
 
+The plugin's missing-binary diagnostic and the install/uninstall scripts run
+before or outside the Rust binary, so they use a small Zsh equivalent: Zsh's
+visible representation for C0/C1 controls plus an explicit UTF-8 table for the
+same bidi and invisible formatting characters. The table uses byte spellings
+so it remains valid even under the C locale. Regression fixtures cover hostile
+environment-derived paths in all three surfaces.
+
 **Two prompts**, both on `/dev/tty` — the terminal itself — rather than
 stdout, which carries the decision JSON and is discarded by the plugin:
 
@@ -822,17 +865,17 @@ repository is idle.
 
 You type `git status` and press Enter:
 
-1. ZLE runs the wrapped `accept-line`, which calls `_oopsinput_handle`
-   (`zsh/oopsinput.zsh:48`).
+1. ZLE runs the wrapped `accept-line`, which calls `_oopsinput_handle` in
+   `zsh/oopsinput.zsh`.
 2. The buffer is non-empty, not a continuation line, not recursive — so the
    plugin resolves `git` via `whence -w` → `command`. Because that is not
    `none`, no candidate names are collected; five recency summaries are.
 3. It pipes the payload to `~/.local/bin/oopsinput check --res command`,
    capturing descriptor 3.
-4. The binary reads config, arms the watchdog (`src/main.rs:87`), reads the
-   payload into a `Proposal` (`src/proposal.rs:107`), lexes it, skips the
+4. The binary reads config, arms the watchdog (`src/main.rs`), reads the
+   payload into a `Proposal` (`src/proposal.rs`), lexes it, skips the
    typo layer immediately (the resolution kind is not `none`), and runs the
-   danger layer (`src/layers/danger.rs:60`), which finds nothing. Because
+   danger layer (`src/layers/danger.rs`), which finds nothing. Because
    there is no candidate, the context layer never runs. Decision: `allow` /
    `shadow.observed`.
 5. It appends one structural line to `~/.local/state/oopsinput/events.jsonl`
@@ -854,19 +897,19 @@ You type `gti status` and press Enter, in suggest mode:
 
 3. Because the kind is `none`, the plugin fills the candidate section with
    every alias, function, builtin, and reserved-word name.
-4. The binary runs the typo layer (`src/layers/typo.rs:39`). The word `gti`
+4. The binary runs the typo layer (`src/layers/typo.rs`). The word `gti`
    is the first token, literal, and 3 characters, so it qualifies. Scanning
    the supplied names and PATH finds `git` at distance 1. No exact match for
    `gti` exists, so nothing suppresses the result. Evidence:
    `typo.candidate_d1`. The danger layer finds nothing, so policy has nothing
    stronger to say and the typo prompt proceeds.
 5. The binary builds the corrected buffer *first*
-   (`src/layers/typo.rs:160`) — `git status`, with every byte after the
+   (`src/layers/typo.rs`) — `git status`, with every byte after the
    command word preserved. Only if that succeeds does it mark the prompt
    active, retiring the watchdog, and ask on `/dev/tty`:
    `oopsinput: 'gti' not found — did you mean 'git'? [y/n]`
 6. You press `y`. The binary writes `git status` plus one NUL byte to
-   descriptor 3 (`src/main.rs:387`), records `replace` / `typo.accepted`,
+   descriptor 3 (`src/main.rs`), records `replace` / `typo.accepted`,
    and exits **10**.
 7. The plugin sees exit 10, confirms the trailing NUL, strips it, sets
    `BUFFER` to the corrected text, and delegates. zsh runs `git status`.
@@ -887,13 +930,13 @@ tests. In `warn` mode you type `git reset --hard`:
 1–3. As the common path; `git` resolves, so no candidate names.
 4. The danger layer matches the `reset --hard` rule and emits
    `git.reset_hard`. Because there is now a candidate, the context layer runs
-   (`src/layers/context.rs:75`): it finds the repository, reads `HEAD`, and
+   (`src/layers/context.rs`): it finds the repository, reads `HEAD`, and
    runs the hardened `git status`, which reports 17 dirty files.
-5. Policy (`src/policy.rs:57`) sees a work-loss command with work to lose and
+5. Policy (`src/policy.rs`) sees a work-loss command with work to lose and
    returns `warn` / `policy.dirty_work_at_risk`. The mode is `warn`, so the
    ceiling doesn't lower it. The gates pass (budget available, rule not in
    cooldown).
-6. `warning_intervention` (`src/main.rs:329`) marks the prompt active and
+6. `warning_intervention` (`src/main.rs`) marks the prompt active and
    displays:
 
    ```
@@ -920,8 +963,8 @@ Measured on the candidate path (release, including both our spawn and git's):
 
 The testing philosophy: **buffer exactness and fail-open behavior are the
 product**, so the highest-value tests drive a real interactive zsh, not mocks.
-268 automated tests today (267 passing by default plus one ignored live-model
-harness) across unit and nine integration suites, plus two gates that run
+281 automated tests today (280 passing by default plus one ignored live-model
+harness) across unit and nine integration suites, plus three gates that run
 separately.
 
 - **Unit tests** live inside each `src/` module (`#[cfg(test)] mod tests`):
@@ -932,25 +975,28 @@ separately.
   budget and cooldown behavior, config validation, the display escaper
   (including its fuzz test), both prompts' key protocols against a scripted
   fake terminal, and the bounded external-helper runner.
-- **`tests/pty.rs`** — the PTY integration suite. Each test builds an
-  isolated `ZDOTDIR` (a throwaway home for zsh config) whose `.zshrc` loads
-  the plugin against the freshly-built debug binary, then runs a genuine
+- **`tests/pty.rs`** — the PTY integration suite. Each test builds an isolated
+  throwaway home, copies the current plugin to its installed location, and
+  writes a real marked `.zshrc` block that loads it against the freshly-built
+  debug binary. It then runs a genuine
   interactive zsh inside a pseudo-terminal via util-linux
   `script -qec "zsh -i" /dev/null`, feeds it keystrokes, and asserts on what
   the terminal displayed. Covered: ordinary passthrough, unicode and quoting
   survival, PS2 multiline continuation, missing binary fails open, hostile
-  escape sequences in the load diagnostic are neutralized, a hanging binary
-  is killed by the watchdog within deadline, secrets never reach the event
-  log, resolution kinds are extracted correctly, double-sourcing is harmless,
-  Vi keymap accepts work; the full typo flow (`y` runs the correction with
-  arguments preserved byte-for-byte, `n` runs the original, Ctrl-C runs
-  nothing, resolving words never prompt, the config file alone enables
-  prompts); and the full warning flow (both halves of the flagship pair, edit
-  restoring the exact buffer to a live ZLE, run-once executing unchanged,
-  cancel leaving the dirty bytes untouched *on disk*, warnings outranking the
-  typo prompt, arrow keys leaving no stray bytes, and recency overlap
-  counting shared targets but not shared flags). It also proves a config
-  warning reaches the actual terminal exactly once through the plugin.
+  terminal and bidi controls in the load diagnostic are neutralized under the
+  C locale, a hanging binary is killed by the watchdog within deadline, secrets
+  never reach the event log, resolution kinds are extracted correctly,
+  double-sourcing is harmless, Vi keymap accepts work; the full typo flow (`y`
+  runs the correction with arguments preserved byte-for-byte, `n` runs the
+  original, Ctrl-C runs nothing, resolving words never prompt, the config file
+  alone enables prompts); and the full warning flow (both halves of the
+  flagship pair, edit restoring the exact buffer to a live ZLE, run-once
+  executing unchanged, cancel leaving the dirty bytes untouched *on disk*,
+  warnings outranking the typo prompt, arrow keys leaving no stray bytes, and
+  recency overlap counting shared targets but not shared flags). It also proves
+  a config warning reaches the actual terminal exactly once through the plugin,
+  and that an interactively invoked `doctor` sees the installed plugin plus all
+  four live wrappers and reports `ready`.
 
   Some of these need a **staged** runner (`Session::run_staged`) that waits
   for expected text to appear on the terminal before sending the next keys.
@@ -963,15 +1009,21 @@ separately.
 - **`tests/uninstall.rs`** — damaged or multiple marker blocks refuse without
   editing; a healthy install removes only its marker, binary, and plugin while
   preserving config, state, and unrecognized files; no marker means no
-  authority to remove same-named files.
+  authority to remove same-named files; displayed paths cannot inject terminal
+  or bidi controls.
 - **`tests/install.rs`** — the installed defaults and lifecycle: a fresh
   install writes `mode = suggest` with user-only permissions, copies both
   runtime artifacts outside the checkout, migrates and updates an old source
   block without changing surrounding lines, and refuses existing or symlinked
-  destinations rather than claiming or writing through them.
-- **`tests/doctor.rs`** — `doctor`'s config line and mode line must agree,
-  including when `XDG_CONFIG_HOME` redirects the config elsewhere and when a
-  symlinked config is ignored in favor of defaults.
+  destinations rather than claiming or writing through them. Its authored path
+  messages are inert under both control bytes and bidi controls.
+- **`tests/doctor.rs`** — a complete healthy installation reports `ready`;
+  missing runtime files, partial wrapper coverage, unsafe state permissions,
+  invalid config, and an unreachable configured model each report problems and
+  exit nonzero. The state failure proves diagnosis does not repair permissions.
+  Config and mode lines must agree under XDG redirection and when a symlinked
+  config is ignored; invalid config reports only safe line-level diagnostics,
+  and environment-derived config and PATH results are terminal-escaped.
 - **`tests/report.rs`** — the shipped `report` command honors the selected
   state directory and exposes its summary through the real CLI dispatch.
 - **`tests/state_paths.rs`** — real `check` processes prove relative explicit
@@ -986,6 +1038,14 @@ separately.
   configuration/unknown-file preservation, known-symlink unlink safety,
   retention-marker and abandoned-temp cleanup, and refusal to enter a
   symlinked directory or recurse into an unexpected one.
+- **`scripts/lifecycle-gate.zsh`** — the complete release lifecycle under one
+  `mktemp`-owned home: install the actual release binary and plugin, load them
+  in a real interactive ZLE shell, require `doctor` to report all four wrappers
+  ready in Shadow mode, record and report three commands, purge state, and
+  uninstall. It proves the original `.zshrc` bytes return exactly, runtime and
+  state disappear, and only the deliberately retained config plus `.zshrc`
+  backup remain. The first probe exposed an unmarked separator newline left by
+  uninstall; the gate regression-locks its removal.
 - **`scripts/pty-gate.zsh`** — the volume acceptance gate: N unique
   submissions (default 10,000) through a PTY shell; every output must appear,
   nothing may hang. M1's run: 10,000/10,000, zero altered buffers, in 128 s.
@@ -999,6 +1059,12 @@ separately.
   command once shipped and was caught by a hand-run probe rather than by any
   test (test-audit 2026-08-06). It writes to a temporary state directory, so
   running it never pollutes the shadow-mode event log the pilot depends on.
+- **`.github/workflows/ci.yml`** — on every push and pull request, one job
+  checks formatting, runs Clippy with warnings denied, and runs the complete
+  test suite; an independent job builds the release binary and runs the
+  lifecycle, latency, and default 10,000-submission PTY gates above. Both jobs
+  run against the declared minimum Rust 1.89.0. Manual dispatch is available
+  too.
 - **`.github/workflows/dependency-policy.yml`** — installs cargo-deny 0.20.2
   only after its release archive matches the repository-pinned SHA-256, then
   rejects advisories, yanked crates, unreviewed crate versions, unacceptable
@@ -1112,8 +1178,9 @@ refactor, bug-hunt, and security-audit pass.
 In short: the deterministic product, optional local-model layer, and M5
 report, purge, retention, and security hardening are complete and tested —
 capture, lexing, all four layers, policy, prompts, model gating and fallback,
-structural logging, and pilot-data summaries. The dependency-policy workflow
-is also live. M6 release engineering proceeds independently: the full
-build/test/performance CI job, `SECURITY.md`, a fuller `doctor`, a clean-machine
-install test, and the first tag. Passive local M5 observation continues only
-as an optional future data point.
+structural logging, and pilot-data summaries. Both CI workflows and the public
+security policy are also live, and `doctor` now covers the complete installed,
+live-shell, config, optional-model, and state-permission setup. The
+clean-machine release lifecycle is CI-enforced end to end. Remaining M6 work is
+the first tag and public-alpha launch. Passive local M5 observation continues
+only as an optional future data point.

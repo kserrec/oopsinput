@@ -1,6 +1,6 @@
 # oopsinput — Specification
 
-**Version:** 1.0-draft · **Status:** canonical · **License:** Apache-2.0 · **Updated:** 2026-08-05
+**Version:** 1.0-draft · **Status:** canonical · **License:** Apache-2.0 · **Updated:** 2026-08-08
 
 This document is the source of truth for the project. It supersedes the earlier
 "Binput Guard" canonical spec (kept privately as background reading; its long-horizon
@@ -461,6 +461,7 @@ oopsinput/
 ├── PLAN.md              # milestones and progress
 ├── PLAN-ARCHIVE.md      # completed milestones, archived verbatim
 ├── ARCHITECTURE.md      # how the pieces fit — the developer's map
+├── SECURITY.md          # threat boundary + vulnerability reporting
 ├── AGENTS.md            # Codex working agreement for coding sessions
 ├── CLAUDE.md            # Claude working agreement; keep in sync
 ├── README.md
@@ -469,6 +470,7 @@ oopsinput/
 ├── Cargo.lock           # exact resolved dependency graph
 ├── deny.toml            # advisories, licenses, sources, exact crate allowlist
 ├── .github/workflows/
+│   ├── ci.yml                # fmt, clippy, tests + release acceptance gates
 │   └── dependency-policy.yml # cargo-deny on changes + weekly
 ├── src/
 │   ├── main.rs          # dispatch: check/report/purge/doctor/help/version
@@ -486,7 +488,7 @@ oopsinput/
 │   ├── oopsinput.zsh    # widget wrapper plugin
 │   ├── install.zsh
 │   └── uninstall.zsh
-├── scripts/             # acceptance gates (pty-gate.zsh, perf-gate.zsh)
+├── scripts/             # lifecycle, PTY-volume, and latency acceptance gates
 ├── eval/golden/         # paired JSON cases
 └── tests/               # integration + PTY tests
 ```

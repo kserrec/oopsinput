@@ -281,48 +281,71 @@ temporary directory so they never contaminate this passive sample.
       marker layouts are refused before edits; uninstall keeps config, state,
       and unknown plugin-directory entries. Nineteen lifecycle/security
       integration cases pin install, update, migration, and removal.
-- [ ] README: honest pitch, install, what it does/does not do, uninstall, and a
-      self-serve shadow/suggest testing protocol
-- [ ] CI (audit 2026-08-05): fmt --check, clippy -D warnings, cargo test, and
-      both performance gates on every push. The dependency-policy slice
-      pre-landed with the M5 audit fixes on 2026-08-08: cargo-deny runs on
-      pushes, pull requests, and weekly, with every current transitive crate
-      (including serde_json's `zmij`) explicitly reviewed and allowlisted.
-- [ ] SECURITY.md (audit 2026-08-05): security posture, the accepted
-      same-user trust boundary, what the tool does/doesn't defend against,
-      vulnerability-report contact. Three things it must state precisely:
-      (1) "same user" does NOT imply every directory on $PATH is trusted —
-      the typo layer fires on *unresolvable* commands, so any helper resolved
-      by name turns any typo into execution of a predictable name from
-      whatever directory leads $PATH (`.`, or a repo's ./bin added by
-      direnv); this is the rationale behind the external-helper standing rule
-      in the header (audit 2026-08-06, from the `stty` finding).
-      (2) The residual git-helper risk (audit 2026-08-06): oopsinput runs
-      `git status` in whatever directory the user is standing in, and a
-      repository obtained from someone else (extracted archive, committed
-      fixture repo) is untrusted input. We neutralize the exec-capable config
-      keys, but that is a curated list a future git release could outgrow.
-      The structural fix — reading the index ourselves, no git spawn — is a
-      v2 candidate, not a v1 promise.
-      (3) On a fresh install, install.zsh leaves any existing destination
-      (dangling symlinks included) untouched rather than claiming or writing
-      through it. A healthy marked `.zshrc` block is the receipt that permits
-      atomic update of regular installed binary/plugin files; config stays
-      untouched whenever its path already exists. The binary likewise refuses
-      to write through a symlink in its own state dir.
-      (4) The loopback model peer check (audit 2026-08-06): with a model
-      configured, command text goes to 127.0.0.1:11434 only after the
-      peer's uid checks out (own user / system account). State the
-      residuals honestly: the uid<1000 heuristic assumes standard
-      SYS_UID_MAX, a hostile *system* account is out of scope (that's a
-      compromised machine), and a nonstandard Ollama setup (e.g. dual-stack
-      bind putting the socket in /proc/net/tcp6) fails closed to
-      deterministic-only — `doctor` names the refusal.
-- [ ] `oopsinput doctor` covers: plugin installed, widgets wrapped, config
-      valid, model reachable (optional — ✅ landed with M4's model.rs),
-      state perms
-- [ ] Clean-machine test: fresh user → install → shadow → report → uninstall
-      leaves no trace
+- [x] README: honest pitch, install, what it does/does not do, uninstall, and a
+      self-serve shadow/suggest testing protocol — ✅ 2026-08-08. The
+      share-ready guide now leads with the fail-open boundary; distinguishes
+      implemented, default, opt-in, and excluded behavior; discloses local
+      storage and exactly when raw command text reaches opt-in Ollama; names
+      every install/uninstall effect; and gives natural-use Shadow and Suggest
+      protocols without encouraging destructive probes. All commands and
+      lifecycle claims were checked against the shipped CLI and integration
+      tests. The same documentation audit corrected SPEC's stale update date
+      and `doctor`'s obsolete claim that the M3 warning UI was still pending;
+      the latter has a regression test.
+- [x] CI (audit 2026-08-05): fmt --check, clippy -D warnings, cargo test, and
+      both performance gates on every push — ✅ 2026-08-08. The new
+      build/test workflow also runs on pull requests and manual dispatch with
+      read-only repository permissions. Independent jobs keep quality and
+      acceptance results visible: one runs fmt, Clippy, and all default tests;
+      the other builds release and runs the clean-machine lifecycle gate, the
+      binary latency gate, and the full 10,000-submission PTY gate. Both use
+      the exact minimum Rust 1.89.0,
+      install only Zsh and Ubuntu's `bsdutils` PTY package, and reuse the
+      commit-pinned checkout action already audited for the dependency
+      workflow. `actionlint` 1.7.12 passed after its published SHA-256 was
+      verified. Local minimum-toolchain acceptance: common p95 3.41 ms / 25
+      ms, candidate p95 8.80 ms / 75 ms; PTY 10,000/10,000 at 5.43 ms per
+      submission / 40 ms, with zero lost or altered commands. The
+      dependency-policy slice remains separate: cargo-deny runs on pushes,
+      pull requests, and weekly, with every resolved crate explicitly
+      reviewed and allowlisted.
+- [x] SECURITY.md (audit 2026-08-05): security posture, the accepted same-user
+      trust boundary, what the tool does/doesn't defend against, and a real
+      private-report contact — ✅ 2026-08-08. The policy leads with fail-open;
+      treats PATH and third-party repositories as untrusted despite the
+      same-user boundary; names the curated Git-config residual and index-reader
+      v2 fix; explains fresh-install refusal, the `.zshrc` ownership receipt,
+      symlink-safe state, and preserved config; and discloses raw command text,
+      peer-UID checks, and every accepted Ollama residual. Claim verification
+      proved that `doctor`, the unknown-command error, plugin load failure, and
+      lifecycle scripts could display environment-derived control or bidi text
+      unsafely. Their authored diagnostics now use terminal escapers, including
+      under `LC_ALL=C`, with CLI, lifecycle, and real-PTY regression fixtures.
+- [x] `oopsinput doctor`: plugin installed, widgets wrapped, config valid,
+      optional model reachable, and state permissions — ✅ 2026-08-08. The
+      read-only command now verifies the unique marked `.zshrc` block and
+      regular installed plugin, all four live ZLE wrappers, parser and
+      environment-mode validity, the configured model's loopback health, and
+      exact `0700`/`0600` modes for recognized state. Missing state is valid;
+      damage is reported without creation or repair. It exits zero only with
+      `result: ready`, otherwise one with `result: problems found`. The plugin
+      exposes only a closed list of its four static wrapper names and refreshes
+      it immediately before an interactive doctor invocation. Six new CLI
+      failure/health cases plus a real-PTY installed-shell case pin the result;
+      the PTY case clears the load-time snapshot first and invokes the README's
+      quoted full path, proving the status is refreshed live.
+- [x] Clean-machine lifecycle test: fresh isolated user → install → shadow →
+      report → purge → uninstall — ✅ 2026-08-08. A release-level gate now
+      creates one `mktemp` home, installs the actual release binary and plugin,
+      verifies their bytes and modes, loads the installed hook under a real PTY,
+      requires live `doctor` readiness in Shadow mode, records and reports
+      exactly three commands, purges all state, and uninstalls. It then proves
+      the original `.zshrc` is byte-exact, runtime paths and state are gone,
+      and the deliberately retained config plus `.zshrc` backup are the only
+      oopsinput artifacts. The first real probe found that fresh install added
+      an unmarked blank separator which uninstall left behind; the installer no
+      longer creates that byte, and the gate pins the regression. Release CI
+      runs this gate on the minimum Rust toolchain before the timing gates.
 - [ ] Cut v0.1.0 tag; publish a self-recruiting public alpha and invite
       voluntary shadow/suggest testers. Do not make personally recruited
       testers a release gate; keep ungraduated warning categories silent
