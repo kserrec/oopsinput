@@ -1181,6 +1181,7 @@ capture, lexing, all four layers, policy, prompts, model gating and fallback,
 structural logging, and pilot-data summaries. Both CI workflows and the public
 security policy are also live, and `doctor` now covers the complete installed,
 live-shell, config, optional-model, and state-permission setup. The
-clean-machine release lifecycle is CI-enforced end to end. Remaining M6 work is
-the first tag and public-alpha launch. Passive local M5 observation continues
-only as an optional future data point.
+clean-machine release lifecycle is CI-enforced end to end. The `v0.1.0` code,
+documentation, and acceptance baseline is complete; publication status and
+later work are tracked in PLAN. Passive local M5 observation continues only as
+an optional future data point.

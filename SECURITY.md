@@ -11,9 +11,9 @@ states the security posture in one place and explains how to report a problem.
 
 ## Supported versions
 
-There is no tagged release yet. Until the first release, security fixes target
-the current `main` branch only; earlier pre-alpha snapshots are not separately
-supported. This section will be updated when versioned releases begin.
+Security fixes target the current `main` branch and the latest tagged public
+alpha, `v0.1.0`. Earlier untagged snapshots are not separately supported.
+Alpha support does not imply a response-time or long-term-support guarantee.
 
 ## Report a vulnerability privately
 
@@ -36,9 +36,9 @@ Please include:
 - whether any details are already public.
 
 Replace real command text, paths, repository contents, history, and secrets
-with synthetic equivalents. The pre-alpha project does not promise a response
-time SLA, but coordinated disclosure is preferred: please allow time to verify
-and fix a report before publishing exploit details.
+with synthetic equivalents. The alpha project does not promise a response-time
+SLA, but coordinated disclosure is preferred: please allow time to verify and
+fix a report before publishing exploit details.
 
 Good security reports include analysis executing something, a command buffer
 changing without the documented consent, raw private data reaching a default

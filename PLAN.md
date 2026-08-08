@@ -308,7 +308,12 @@ temporary directory so they never contaminate this passive sample.
       submission / 40 ms, with zero lost or altered commands. The
       dependency-policy slice remains separate: cargo-deny runs on pushes,
       pull requests, and weekly, with every resolved crate explicitly
-      reviewed and allowlisted.
+      reviewed and allowlisted. The first hosted run exposed Ubuntu's global
+      `compinit` prompt consuming scripted PTY input before the isolated
+      `.zshrc`; every automated interactive shell now starts with `zsh -d -i`,
+      which keeps the fixture startup file and excludes host global startup
+      files. A regression checks that exact option state, and the replacement
+      public run passed both jobs and every acceptance gate.
 - [x] SECURITY.md (audit 2026-08-05): security posture, the accepted same-user
       trust boundary, what the tool does/doesn't defend against, and a real
       private-report contact — ✅ 2026-08-08. The policy leads with fail-open;

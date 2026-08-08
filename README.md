@@ -7,11 +7,12 @@ Zsh shell. It catches misspelled command names, recognizes a curated set of
 high-consequence command shapes, checks the current context, and intervenes
 only when the evidence warrants it.
 
-> **Pre-alpha:** Linux and interactive Zsh only. There is no packaged release
-> yet. oopsinput is an assistance layer, not a safety boundary: it deliberately
-> fails open, so an internal failure or an unrecognized command shape lets the
-> original command run unchanged. Never test it with a destructive command you
-> would not otherwise run.
+> **Public alpha (`v0.1.0`):** Linux and interactive Zsh only; install from
+> source because no prebuilt packages are published. oopsinput is an assistance
+> layer, not a safety boundary: it deliberately fails open, so an internal
+> failure or an unrecognized command shape lets the original command run
+> unchanged. Never test it with a destructive command you would not otherwise
+> run.
 
 ## What it does today
 
@@ -204,10 +205,10 @@ yourself; the uninstaller will not claim that authority.
 
 ## Project status and development
 
-The deterministic product, the optional local-model path, local reporting,
-30-day retention, purge, and the clean-machine install-to-uninstall lifecycle
-are implemented and continuously checked. Remaining release engineering is the
-first tag and public-alpha launch. [PLAN.md](PLAN.md) is the live status record.
+`v0.1.0` is the first public alpha. The deterministic product, optional
+local-model path, local reporting, 30-day retention, purge, and clean-machine
+install-to-uninstall lifecycle are implemented and continuously checked.
+[PLAN.md](PLAN.md) is the live status record.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) is the developer guide. From a fresh clone,
 the required local checks are:
