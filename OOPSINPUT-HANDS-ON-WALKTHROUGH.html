@@ -1,0 +1,1276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your first hands-on hour with oopsinput</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f5f1e8;
+      --paper-deep: #e9e1d3;
+      --card: #fffdf8;
+      --ink: #182126;
+      --muted: #5a666b;
+      --line: #d7cdbd;
+      --blue: #24556a;
+      --blue-soft: #dcebf0;
+      --green: #176146;
+      --green-soft: #def0e7;
+      --amber: #895514;
+      --amber-soft: #fae9c9;
+      --red: #8b3030;
+      --red-soft: #f5dede;
+      --code: #172329;
+      --code-ink: #e9f2ef;
+      --shadow: 0 14px 34px rgba(35, 47, 50, 0.08);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 8% 0%, rgba(36, 85, 106, 0.10), transparent 28rem),
+        linear-gradient(180deg, var(--paper), #faf7f0 42rem);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.62;
+    }
+
+    a { color: var(--blue); }
+    a:hover { color: #123d50; }
+
+    .page {
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 34px 0 96px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(30px, 6vw, 70px);
+      border: 1px solid rgba(36, 85, 106, 0.18);
+      border-radius: 28px;
+      background: rgba(255, 253, 248, 0.92);
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 260px;
+      height: 260px;
+      right: -105px;
+      top: -115px;
+      border-radius: 50%;
+      background: linear-gradient(145deg, rgba(36, 85, 106, 0.20), rgba(23, 97, 70, 0.05));
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--blue);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 { line-height: 1.16; }
+
+    h1 {
+      max-width: 820px;
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.45rem, 7vw, 5.5rem);
+      font-weight: 600;
+      letter-spacing: -0.045em;
+    }
+
+    .lede {
+      max-width: 760px;
+      margin: 24px 0 0;
+      color: #39474c;
+      font-size: clamp(1.05rem, 2vw, 1.25rem);
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 5px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: #3f4b50;
+      font-size: 0.84rem;
+      font-weight: 700;
+    }
+
+    .jump {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 18px 0 44px;
+    }
+
+    .jump a {
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 253, 248, 0.78);
+      color: var(--ink);
+      font-size: 0.9rem;
+      font-weight: 750;
+      text-align: center;
+      text-decoration: none;
+    }
+
+    .jump a:hover { border-color: var(--blue); background: white; }
+
+    section { margin-top: 58px; }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 20px;
+      align-items: end;
+      margin-bottom: 20px;
+      padding-bottom: 13px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h2 {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(1.85rem, 4vw, 2.8rem);
+      font-weight: 600;
+      letter-spacing: -0.025em;
+    }
+
+    h3 { margin: 0.25rem 0 0.6rem; font-size: 1.15rem; }
+
+    .section-kicker { color: var(--muted); font-size: 0.86rem; font-weight: 700; }
+
+    .grid-2, .grid-3 {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .card, .callout {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--card);
+      box-shadow: 0 8px 22px rgba(35, 47, 50, 0.05);
+    }
+
+    .card { padding: 22px; }
+    .card p:last-child, .callout p:last-child { margin-bottom: 0; }
+
+    .callout {
+      margin: 18px 0;
+      padding: 18px 20px;
+      border-left-width: 5px;
+    }
+
+    .callout.safe { border-left-color: var(--green); background: var(--green-soft); }
+    .callout.caution { border-left-color: var(--amber); background: var(--amber-soft); }
+    .callout.stop { border-left-color: var(--red); background: var(--red-soft); }
+    .callout.info { border-left-color: var(--blue); background: var(--blue-soft); }
+
+    .callout strong { display: block; margin-bottom: 3px; }
+
+    .plain-list { margin: 0; padding-left: 1.25rem; }
+    .plain-list li + li { margin-top: 0.45rem; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr;
+      gap: 10px;
+      align-items: stretch;
+      margin: 22px 0;
+    }
+
+    .flow-box {
+      display: flex;
+      min-height: 120px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: #fff;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    .flow-box b { color: var(--blue); }
+    .arrow { align-self: center; color: var(--blue); font-size: 1.55rem; font-weight: 900; }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+    }
+
+    th, td { padding: 13px 15px; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; }
+    th { background: #eee7db; font-size: 0.82rem; letter-spacing: 0.04em; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+
+    .steps { display: grid; gap: 14px; }
+
+    details.step {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--card);
+      box-shadow: 0 8px 22px rgba(35, 47, 50, 0.05);
+    }
+
+    details.step[open] { border-color: rgba(36, 85, 106, 0.45); }
+
+    details.step > summary {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      min-height: 72px;
+      padding: 14px 18px;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+
+    details.step > summary::-webkit-details-marker { display: none; }
+
+    details.step > summary::after {
+      content: "+";
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      background: var(--blue-soft);
+      color: var(--blue);
+      font-size: 1.25rem;
+      font-weight: 800;
+      line-height: 28px;
+      text-align: center;
+    }
+
+    details.step[open] > summary::after { content: "−"; }
+
+    .step-no {
+      display: inline-grid;
+      width: 38px;
+      height: 38px;
+      place-items: center;
+      border-radius: 12px;
+      background: var(--blue);
+      color: #fff;
+      font-weight: 850;
+    }
+
+    .step-title { font-weight: 800; }
+    .step-sub { display: block; margin-top: 2px; color: var(--muted); font-size: 0.86rem; font-weight: 500; }
+
+    .step-body { padding: 0 22px 24px 74px; }
+
+    .checkline {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      margin-top: 18px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--green-soft);
+      color: #174936;
+      font-weight: 700;
+    }
+
+    .checkline input { width: 18px; height: 18px; margin-top: 3px; accent-color: var(--green); }
+
+    pre {
+      position: relative;
+      overflow-x: auto;
+      margin: 14px 0;
+      padding: 52px 18px 17px;
+      border: 1px solid #293b42;
+      border-radius: 13px;
+      background: var(--code);
+      color: var(--code-ink);
+      font: 0.92rem/1.58 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      tab-size: 2;
+    }
+
+    .copy-button {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1;
+      min-width: 74px;
+      padding: 7px 12px;
+      border: 1px solid #567078;
+      border-radius: 8px;
+      background: #24383f;
+      color: #f4faf7;
+      font: 750 0.78rem/1 ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+    }
+
+    .copy-button:hover { background: #31515c; border-color: #76919a; }
+    .copy-button:active { transform: translateY(1px); }
+    .copy-button:focus-visible { outline: 3px solid #8fc7d8; outline-offset: 2px; }
+    .copy-button.copied { background: #1d684d; border-color: #63a58a; }
+    .copy-button.failed { background: #854040; border-color: #c17b7b; }
+
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    :not(pre) > code { padding: 0.12em 0.34em; border-radius: 5px; background: #eee8dc; font-size: 0.92em; }
+
+    .expect {
+      margin-top: 14px;
+      padding: 14px 16px;
+      border: 1px dashed #77a28f;
+      border-radius: 12px;
+      background: #f2faf6;
+    }
+
+    .expect b { color: var(--green); }
+
+    kbd {
+      display: inline-block;
+      min-width: 1.8em;
+      padding: 0.12em 0.42em;
+      border: 1px solid #a7a096;
+      border-bottom-width: 3px;
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      font: 700 0.88em ui-monospace, monospace;
+      text-align: center;
+    }
+
+    .file-map code { overflow-wrap: anywhere; }
+
+    .footer {
+      margin-top: 64px;
+      padding: 24px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      text-align: center;
+    }
+
+    @media (max-width: 820px) {
+      .jump, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); }
+      .section-head { grid-template-columns: 1fr; }
+      .step-body { padding-left: 20px; }
+    }
+
+    @media print {
+      body { background: #fff; }
+      .page { width: 100%; padding: 0; }
+      .hero, .card, details.step { box-shadow: none; }
+      .jump { display: none; }
+      .copy-button { display: none; }
+      pre { padding-top: 17px; }
+      details.step > summary::after { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <p class="eyebrow">A zero-assumptions, hands-on walkthrough</p>
+      <h1>Your first hour with <em>oopsinput</em></h1>
+      <p class="lede">
+        You have not used this project before. That is the starting point, not a problem.
+        This guide first names every moving piece, then lets you experience the product one
+        safe action at a time. No real project files are used for the dangerous-looking tests.
+      </p>
+      <div class="meta">
+        <span class="pill">Binary reports v0.1.0</span>
+        <span class="pill">Repository: /home/serrecchia/Projects/oopsinput</span>
+        <span class="pill">Linux + interactive Zsh</span>
+        <span class="pill">Prepared 2026-08-09</span>
+      </div>
+    </header>
+
+    <nav class="jump" aria-label="Jump to a section">
+      <a href="#mental-model">1. Understand it</a>
+      <a href="#hands-on">2. Experience it</a>
+      <a href="#automated">3. Test the build</a>
+      <a href="#lifecycle">4. Full lifecycle</a>
+    </nav>
+
+    <div class="callout stop">
+      <strong>The one safety rule that matters most</strong>
+      oopsinput is an assistance layer, not a safety barrier. When it breaks, times out, or
+      cannot understand a command, it deliberately lets the original command run unchanged.
+      Never test it with a destructive command aimed at your real files, your home directory,
+      the filesystem root, a real remote repository, or a storage device.
+    </div>
+
+    <div class="callout safe">
+      <strong>What this guide changes</strong>
+      The main exercise creates a randomly named directory under <code>/tmp</code>, a tiny Git
+      repository inside it, and oopsinput test records inside it. Terminal-only environment
+      variables keep the exercise away from your normal config and recorded state. The cleanup
+      step removes only that generated directory after validating its name. No command uses
+      <code>sudo</code>, asks for a password, contacts a network service, or edits a dotenv file.
+    </div>
+
+    <section id="mental-model">
+      <div class="section-head">
+        <h2>First: what did you build?</h2>
+        <span class="section-kicker">Read this before opening a terminal</span>
+      </div>
+
+      <p>
+        oopsinput watches the moment when you press Enter in an interactive Zsh terminal. It
+        tries to notice two broad things: a command name that probably contains a typo, and a
+        recognized command shape whose current context makes it unusually consequential. It
+        does not run continuously in the background and it does not replace Zsh.
+      </p>
+
+      <div class="flow" aria-label="How one submitted command moves through oopsinput">
+        <div class="flow-box"><b>1. You type</b><span>Zsh holds the exact text in its editable command buffer.</span></div>
+        <div class="arrow">→</div>
+        <div class="flow-box"><b>2. The Zsh plugin</b><span>Intercepts Enter and sends a copy of the buffer plus shell facts to the binary.</span></div>
+        <div class="arrow">→</div>
+        <div class="flow-box"><b>3. The Rust binary</b><span>Analyzes once, records structural facts, and returns a decision. Then it exits.</span></div>
+        <div class="arrow">→</div>
+        <div class="flow-box"><b>4. Zsh acts</b><span>Runs the original, runs an accepted typo correction, restores it for editing, or cancels.</span></div>
+      </div>
+
+      <div class="grid-2">
+        <article class="card">
+          <h3>The Zsh plugin</h3>
+          <p>
+            A <strong>shell plugin</strong> is code loaded into your interactive command shell.
+            This one wraps Zsh’s four “accept this line” actions. Its real source is
+            <code>/home/serrecchia/Projects/oopsinput/zsh/oopsinput.zsh</code>; the installed copy
+            is <code>/home/serrecchia/.local/share/oopsinput/oopsinput.zsh</code>.
+          </p>
+        </article>
+        <article class="card">
+          <h3>The Rust binary</h3>
+          <p>
+            A <strong>binary</strong> is the compiled executable program. The plugin starts one
+            short-lived <code>oopsinput check</code> process for each submitted command. There is
+            no daemon. Dispatch and the decision flow begin in
+            <code>/home/serrecchia/Projects/oopsinput/src/main.rs</code>.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Evidence and policy</h3>
+          <p>
+            Four layers collect evidence: typo distance; recognized danger shapes; current Git
+            or filesystem context; and an optional local Ollama model. Policy turns that evidence
+            into allow, observe, warn, or confirm. The optional model is disabled by default.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Local structural records</h3>
+          <p>
+            The default log records facts such as decision codes, evidence codes, word counts,
+            outcomes, and timings. It does not record raw command text or paths. The report reads
+            those records locally; nothing is uploaded.
+          </p>
+        </article>
+      </div>
+
+      <h3 style="margin-top: 28px">The four visibility modes</h3>
+      <table>
+        <thead>
+          <tr><th>Mode</th><th>What you see</th><th>What still happens</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>shadow</code></td><td>No prompts at all.</td><td>Analysis and structural recording continue.</td></tr>
+          <tr><td><code>suggest</code></td><td>Typo prompts for command names that do not resolve.</td><td>Danger decisions stay invisible and become hypothetical report data.</td></tr>
+          <tr><td><code>warn</code></td><td>Typo prompts plus eligible contextual warnings.</td><td>You can edit, cancel, or run the exact original once.</td></tr>
+          <tr><td><code>confirm</code></td><td>Also preserves the strongest confirmation tier.</td><td>We will not manually test this with a catastrophic command because fail-open makes that unsafe.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout info">
+        <strong>Stop point</strong>
+        Before continuing, the sentence to hold onto is: “oopsinput advises Zsh at Enter time;
+        Zsh still owns execution, and any internal failure preserves the original command.”
+        If that sentence is unclear, pause here and ask about it before doing the exercises.
+      </div>
+    </section>
+
+    <section id="hands-on">
+      <div class="section-head">
+        <h2>Now experience the product</h2>
+        <span class="section-kicker">Open one card, complete it, then continue</span>
+      </div>
+
+      <div class="callout caution">
+        <strong>Use your own Terminal window</strong>
+        These are interactive checks: oopsinput reads single keys from the real terminal and
+        inspects the live Zsh widgets in that same shell. They cannot be meaningfully completed
+        by a non-interactive process on your behalf. Keep the same terminal open through Step 19;
+        the isolation variables belong only to that one shell process.
+      </div>
+
+      <div class="steps">
+        <details class="step" open>
+          <summary>
+            <span class="step-no">1</span>
+            <span class="step-title">Open a brand-new terminal window<span class="step-sub">This loads the installed plugin into a fresh interactive Zsh process.</span></span>
+          </summary>
+          <div class="step-body">
+            <p>
+              Open your normal Terminal application and create a new window or tab. Do not use
+              an embedded command runner. You should see your ordinary shell prompt.
+            </p>
+            <div class="expect"><b>Expected:</b> a normal prompt where you can type. Nothing from oopsinput needs to appear yet.</div>
+            <label class="checkline"><input type="checkbox"> I have a newly opened terminal and can see its prompt.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">2</span>
+            <span class="step-title">Ask the installed program to diagnose itself<span class="step-sub">This is the live owner check that automation cannot perform for you.</span></span>
+          </summary>
+          <div class="step-body">
+            <p>Paste this into that new terminal and press Enter:</p>
+            <pre><code>"$HOME/.local/bin/oopsinput" doctor</code></pre>
+            <div class="expect">
+              <b>Expected:</b> the output ends with <code>result: ready</code>. It should also say
+              <code>plugin: installed</code>, <code>widgets: 4/4 wrapped in this shell</code>, show
+              a valid config, identify the effective mode, report the model as disabled unless
+              you deliberately configured one, and accept the state permissions.
+            </div>
+            <p>
+              <code>doctor</code> itself is read-only. Because you submitted the line through the
+              active plugin, the plugin may record one ordinary structural analysis event before
+              the doctor process runs. That distinction is expected.
+            </p>
+            <div class="callout stop">
+              <strong>If it does not end in “ready,” stop here.</strong>
+              Do not install, repair permissions, or edit config yet. Reply in chat with:
+              “I stopped at the live doctor check; it did not report ready,” followed by the
+              complete doctor output. Review the output before sharing it, although doctor is
+              designed to escape untrusted text and not print raw command history.
+            </div>
+            <label class="checkline"><input type="checkbox"> Doctor reported <code>result: ready</code>.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">3</span>
+            <span class="step-title">Create an isolated practice area<span class="step-sub">All later deliberate events and config defaults stay under one generated /tmp directory.</span></span>
+          </summary>
+          <div class="step-body">
+            <p>Paste this entire block once:</p>
+            <pre><code>export OOPSINPUT_HANDSON_DIR="$(mktemp -d /tmp/oopsinput-handson.XXXXXX)"
+export OOPSINPUT_STATE_DIR="$OOPSINPUT_HANDSON_DIR/state"
+export XDG_CONFIG_HOME="$OOPSINPUT_HANDSON_DIR/config"
+export OOPSINPUT_MODE=shadow
+print -r -- "Disposable practice area: $OOPSINPUT_HANDSON_DIR"</code></pre>
+            <p>
+              An <strong>environment variable</strong> is a named value inherited by programs
+              launched from this terminal. These four values last only in this shell. They do not
+              edit your normal oopsinput config. <code>XDG_CONFIG_HOME</code> points this exercise
+              at an empty config location, so all settings except the explicit mode use safe
+              defaults. <code>OOPSINPUT_STATE_DIR</code> keeps all exercise records separate.
+            </p>
+            <div class="expect"><b>Expected:</b> one printed path beginning with <code>/tmp/oopsinput-handson.</code>.</div>
+            <label class="checkline"><input type="checkbox"> I see the generated practice-area path.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">4</span>
+            <span class="step-title">Confirm the isolated setup<span class="step-sub">Doctor should now describe the temporary defaults rather than your normal config path.</span></span>
+          </summary>
+          <div class="step-body">
+            <pre><code>"$HOME/.local/bin/oopsinput" doctor</code></pre>
+            <div class="expect">
+              <b>Expected:</b> <code>config</code> says the temporary path is absent and defaults
+              are valid; <code>mode</code> says <code>shadow</code>; <code>widgets</code> remains
+              <code>4/4</code>; and the result remains <code>ready</code>.
+            </div>
+            <label class="checkline"><input type="checkbox"> The isolated doctor check is ready in Shadow mode.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">5</span>
+            <span class="step-title">Watch an ordinary command pass through<span class="step-sub">The common path should feel like oopsinput is not there.</span></span>
+          </summary>
+          <div class="step-body">
+            <pre><code>printf 'ordinary command reached Zsh unchanged\n'</code></pre>
+            <div class="expect">
+              <b>Expected:</b> exactly the sentence <code>ordinary command reached Zsh unchanged</code>,
+              with no oopsinput prompt. The plugin analyzed the line and then gave the exact
+              original buffer back to Zsh.
+            </div>
+            <label class="checkline"><input type="checkbox"> The ordinary command ran normally and silently.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">6</span>
+            <span class="step-title">See what Shadow mode means<span class="step-sub">Create a safe fake command, mistype it, and observe deliberate silence.</span></span>
+          </summary>
+          <div class="step-body">
+            <p>First create a terminal-only alias with a deliberately unusual name:</p>
+            <pre><code>alias oopspecialx='printf "TYPO CORRECTION WORKED: %s\n"'</code></pre>
+            <p>Now type the name with one extra <code>q</code>:</p>
+            <pre><code>oopspecialxq shadow</code></pre>
+            <div class="expect">
+              <b>Expected:</b> no oopsinput prompt. Zsh reports that <code>oopspecialxq</code> was
+              not found. Shadow mode noticed the one-character typo but deliberately stayed
+              invisible and allowed the original typo to fail naturally.
+            </div>
+            <p>Confirm that hidden observation through the aggregate report:</p>
+            <pre><code>"$HOME/.local/bin/oopsinput" report</code></pre>
+            <div class="expect">
+              <b>Expected:</b> a nonzero event count and <code>typo.candidate_d1</code> in the
+              evidence ranking. The report shows structural counts, never the typed alias name.
+            </div>
+            <label class="checkline"><input type="checkbox"> Shadow stayed silent, while the report recorded typo evidence.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">7</span>
+            <span class="step-title">Accept a typo correction in Suggest mode<span class="step-sub">This is the installed default’s visible daily-use feature.</span></span>
+          </summary>
+          <div class="step-body">
+            <p>Change only this terminal’s mode:</p>
+            <pre><code>export OOPSINPUT_MODE=suggest</code></pre>
+            <p>Submit the same safe typo with a different argument:</p>
+            <pre><code>oopspecialxq accepted</code></pre>
+            <p>Wait until the <code>[y/n]</code> prompt is visible, then press <kbd>y</kbd> once.</p>
+            <div class="expect">
+              <b>Expected:</b> oopsinput suggests <code>oopspecialx</code>, and accepting prints
+              <code>TYPO CORRECTION WORKED: accepted</code>. The argument survives unchanged;
+              only the command name is corrected after your explicit consent.
+            </div>
+            <label class="checkline"><input type="checkbox"> Pressing <kbd>y</kbd> ran the corrected alias with its argument intact.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">8</span>
+            <span class="step-title">Decline a typo correction<span class="step-sub">The original typo must run unchanged, even though it will fail.</span></span>
+          </summary>
+          <div class="step-body">
+            <pre><code>oopspecialxq declined</code></pre>
+            <p>Wait for the prompt, then press <kbd>n</kbd> once.</p>
+            <div class="expect">
+              <b>Expected:</b> the alias does not print anything. Zsh reports
+              <code>oopspecialxq</code> as not found. That error is success for this test: you
+              told oopsinput to preserve and run the original bytes.
+            </div>
+            <label class="checkline"><input type="checkbox"> Pressing <kbd>n</kbd> ran the original typo and Zsh rejected it normally.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">9</span>
+            <span class="step-title">Cancel a typo completely<span class="step-sub">Neither the typo nor the correction should run.</span></span>
+          </summary>
+          <div class="step-body">
+            <pre><code>oopspecialxq cancelled</code></pre>
+            <p>Wait for the prompt, then press <kbd>Ctrl</kbd> + <kbd>C</kbd>.</p>
+            <div class="expect">
+              <b>Expected:</b> the prompt disappears and a fresh shell prompt returns. You see
+              neither <code>TYPO CORRECTION WORKED</code> nor a “command not found” error,
+              because nothing ran.
+            </div>
+            <div class="callout caution">
+              <strong>If any expected typo prompt is absent</strong>
+              The deliberate fail-open outcome is that the original typo runs unchanged and Zsh
+              prints “command not found.” Do not switch to a consequential probe. Stop, keep the
+              terminal output, and report which step lacked the prompt. Prompt tests passed in
+              isolation while this guide was prepared, but a parallel PTY verification run did
+              suppress two prompts under load; the exact cause is not yet proven.
+            </div>
+            <label class="checkline"><input type="checkbox"> Ctrl-C returned to the prompt without running either command.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">10</span>
+            <span class="step-title">Build a disposable dirty Git repository<span class="step-sub">This gives the warning layer real context without risking your work.</span></span>
+          </summary>
+          <div class="step-body">
+            <p>Paste this whole block:</p>
+            <pre><code>mkdir -p "$OOPSINPUT_HANDSON_DIR/dirty-repo"
+cd "$OOPSINPUT_HANDSON_DIR/dirty-repo"
+git init -q
+git symbolic-ref HEAD refs/heads/main
+printf 'committed version\n' &gt; tracked.txt
+git add tracked.txt
+git -c user.name='Oopsinput Walkthrough' -c user.email='walkthrough@example.invalid' commit -q -m 'baseline'
+printf 'disposable uncommitted change\n' &gt; tracked.txt
+git status --short</code></pre>
+            <p>
+              A <strong>tracked file</strong> is a file Git knows about. A <strong>commit</strong>
+              is the saved baseline. The final <code>printf</code> changes the file after that
+              baseline, creating exactly one disposable piece of uncommitted work.
+            </p>
+            <div class="expect"><b>Expected:</b> <code>git status --short</code> prints <code> M tracked.txt</code>.</div>
+            <label class="checkline"><input type="checkbox"> The disposable repository contains one modified tracked file.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">11</span>
+            <span class="step-title">Cancel a contextual warning<span class="step-sub">Same real Git command, but its only target is the disposable change.</span></span>
+          </summary>
+          <div class="step-body">
+            <pre><code>export OOPSINPUT_MODE=warn</code></pre>
+            <p>Now submit:</p>
+            <pre><code>git reset --hard</code></pre>
+            <p>Wait for the warning, read every line, then press <kbd>c</kbd>.</p>
+            <div class="expect">
+              <b>Expected:</b> the warning says the command will discard uncommitted tracked-file
+              changes, reports one modified tracked file, and offers
+              <kbd>e</kbd>dit, <kbd>c</kbd>ancel, and <kbd>r</kbd>un unchanged. After <kbd>c</kbd>,
+              nothing runs.
+            </div>
+            <p>Verify that cancel protected the disposable change:</p>
+            <pre><code>git status --short</code></pre>
+            <div class="expect"><b>Expected:</b> it still prints <code> M tracked.txt</code>.</div>
+            <div class="callout stop">
+              <strong>If no warning appears, stop.</strong>
+              Fail-open may have allowed the reset, which can erase only the disposable change in
+              this fixture. Do not repeat the experiment on real work. Save the complete output
+              and report that Step 11 ran without a warning.
+            </div>
+            <label class="checkline"><input type="checkbox"> Cancel left the disposable modification present.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">12</span>
+            <span class="step-title">Restore the exact command for editing<span class="step-sub">The warning does not rewrite or execute it.</span></span>
+          </summary>
+          <div class="step-body">
+            <pre><code>git reset --hard</code></pre>
+            <p>
+              Wait for the warning, then press <kbd>e</kbd>. The warning should disappear and the
+              exact text <code>git reset --hard</code> should reappear on your normal editable
+              command line. At that normal prompt, press <kbd>Ctrl</kbd> + <kbd>C</kbd> to discard
+              the line rather than execute it.
+            </p>
+            <p>Verify again:</p>
+            <pre><code>git status --short</code></pre>
+            <div class="expect"><b>Expected:</b> it still prints <code> M tracked.txt</code>.</div>
+            <label class="checkline"><input type="checkbox"> Edit restored the exact buffer, and clearing it left the file modified.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">13</span>
+            <span class="step-title">Run the original once, with deliberate consent<span class="step-sub">This destroys only the known disposable modification.</span></span>
+          </summary>
+          <div class="step-body">
+            <pre><code>git reset --hard</code></pre>
+            <p>Wait for the warning, then press <kbd>r</kbd>.</p>
+            <div class="expect">
+              <b>Expected:</b> Git runs the exact original command and reports that HEAD is at the
+              baseline commit. The disposable uncommitted text is now gone.
+            </div>
+            <p>Confirm both facts:</p>
+            <pre><code>git status --short
+sed -n '1p' tracked.txt</code></pre>
+            <div class="expect">
+              <b>Expected:</b> the status command prints nothing, and the file prints
+              <code>committed version</code>.
+            </div>
+            <label class="checkline"><input type="checkbox"> Run-once executed unchanged and reset only the disposable file.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">14</span>
+            <span class="step-title">See the context-sensitive counterfactual<span class="step-sub">The identical command should now be silent because there is no work to lose.</span></span>
+          </summary>
+          <div class="step-body">
+            <pre><code>git reset --hard</code></pre>
+            <div class="expect">
+              <b>Expected:</b> Git runs immediately with no oopsinput warning. This is the heart
+              of the product’s danger design: <code>git reset --hard</code> in a dirty repository
+              and the identical text in a clean repository receive different answers because
+              the current consequences differ.
+            </div>
+            <label class="checkline"><input type="checkbox"> The clean-tree reset ran silently.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">15</span>
+            <span class="step-title">Read the local report<span class="step-sub">Turn the exercise into counts, outcomes, evidence, and latency.</span></span>
+          </summary>
+          <div class="step-body">
+            <pre><code>"$HOME/.local/bin/oopsinput" report</code></pre>
+            <div class="expect">
+              <b>Expected:</b> a nonzero event total; deterministic latency percentiles; ranked
+              decision and evidence codes; and visible warning outcomes containing one each for
+              <code>cancelled</code>, <code>edited</code>, and <code>ran_unchanged</code>. Exact event
+              counts and timings depend on how many verification commands you entered.
+            </div>
+            <p>
+              A <strong>percentile</strong> summarizes a distribution. For example, p95 is the
+              measured duration at or below which 95 percent of recorded analyses completed.
+            </p>
+            <label class="checkline"><input type="checkbox"> I can connect the report’s three warning outcomes to my three choices.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">16</span>
+            <span class="step-title">Prove the default log omitted raw command text<span class="step-sub">Use a fake canary string, never a real secret.</span></span>
+          </summary>
+          <div class="step-body">
+            <p>First submit a distinctive, meaningless string as an ordinary command argument:</p>
+            <pre><code>printf 'OOPSINPUT_PRIVACY_CANARY_4f71\n'</code></pre>
+            <p>Now search the temporary event log for that exact raw text:</p>
+            <pre><code>if grep -Fq 'OOPSINPUT_PRIVACY_CANARY_4f71' "$OOPSINPUT_STATE_DIR/events.jsonl"; then
+  print -r -- 'FAIL: raw canary text appeared in the event log'
+else
+  print -r -- 'PASS: raw command text is absent from the event log'
+fi</code></pre>
+            <div class="expect"><b>Expected:</b> <code>PASS: raw command text is absent from the event log</code>.</div>
+            <p>
+              This proves the specific default-log property for the event you just created. It
+              is not a general security proof and it does not mean terminal output is safe to
+              share without reviewing it.
+            </p>
+            <label class="checkline"><input type="checkbox"> The fake canary did not appear in the structural event log.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">17</span>
+            <span class="step-title">Check private state permissions<span class="step-sub">The directory should be owner-only; its files should be owner-readable and owner-writable only.</span></span>
+          </summary>
+          <div class="step-body">
+            <pre><code>stat -c 'directory mode: %a' "$OOPSINPUT_STATE_DIR"
+find "$OOPSINPUT_STATE_DIR" -maxdepth 1 -type f -printf 'file mode: %m  %f\n' | sort</code></pre>
+            <div class="expect">
+              <b>Expected:</b> the directory mode is <code>700</code>. Every listed file mode is
+              <code>600</code>. Those numeric permissions mean only your user account can enter
+              the directory or read and write the files.
+            </div>
+            <label class="checkline"><input type="checkbox"> The state directory is 700 and every state file is 600.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">18</span>
+            <span class="step-title">Purge the isolated records<span class="step-sub">This permanently deletes only oopsinput-owned state under the temporary state path.</span></span>
+          </summary>
+          <div class="step-body">
+            <p>
+              The following command invokes purge and checks for the removed directory in the
+              same submitted buffer. That matters: a later separately submitted command would
+              itself be analyzed and would recreate the state directory.
+            </p>
+            <pre><code>"$HOME/.local/bin/oopsinput" purge &amp;&amp; if [[ ! -e "$OOPSINPUT_STATE_DIR" ]]; then
+  print -r -- 'PASS: temporary recorded state was removed'
+else
+  print -r -- 'FAIL: temporary recorded state still exists'
+fi</code></pre>
+            <div class="expect">
+              <b>Expected:</b> purge reports removed state files, followed by
+              <code>PASS: temporary recorded state was removed</code>. The Git fixture and the
+              empty temporary config area remain until the next cleanup step.
+            </div>
+            <label class="checkline"><input type="checkbox"> Purge removed the temporary oopsinput state.</label>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary>
+            <span class="step-no">19</span>
+            <span class="step-title">Remove the disposable practice area<span class="step-sub">A path-shape guard prevents this cleanup from broadening beyond the directory created in Step 3.</span></span>
+          </summary>
+          <div class="step-body">
+            <p>
+              First put the plugin back into silent mode. This line may recreate one temporary
+              state event, which the guarded cleanup immediately removes.
+            </p>
+            <pre><code>export OOPSINPUT_MODE=shadow</code></pre>
+            <p>Then paste this entire block once:</p>
+            <pre><code>case "$OOPSINPUT_HANDSON_DIR" in
+  /tmp/oopsinput-handson.*)
+    cd /home/serrecchia/Projects/oopsinput
+    rm -rf -- "$OOPSINPUT_HANDSON_DIR"
+    unset OOPSINPUT_HANDSON_DIR OOPSINPUT_STATE_DIR XDG_CONFIG_HOME OOPSINPUT_MODE
+    unalias oopspecialx 2&gt;/dev/null || true
+    print -r -- 'Disposable oopsinput practice area removed'
+    ;;
+  *)
+    print -u2 -- 'REFUSED: the practice-area path did not have the expected safe shape'
+    ;;
+esac</code></pre>
+            <div class="expect">
+              <b>Expected:</b> <code>Disposable oopsinput practice area removed</code>, followed
+              by your normal prompt. Your current directory is now the real project root; your
+              normal oopsinput config and state resolution are back in effect for later commands.
+            </div>
+            <label class="checkline"><input type="checkbox"> The disposable area is gone and the terminal overrides are unset.</label>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section id="automated">
+      <div class="section-head">
+        <h2>Test the build like a developer</h2>
+        <span class="section-kicker">Automated checks after the human experience</span>
+      </div>
+
+      <p>
+        The hands-on section proves that you can feel and understand the product. These checks
+        prove broader mechanical properties. Run them in a normal terminal from the repository.
+        They create compiled files under <code>target/</code> and temporary test directories; the
+        lifecycle gate uses an isolated fake home and does not edit your real shell setup.
+        Submitting the top-level Cargo and gate commands through your installed plugin can add a
+        few deliberate structural events to your normal state. M8 requires purging all deliberate
+        test data before the later natural-use pilot begins.
+      </p>
+
+      <div class="grid-3">
+        <article class="card"><h3>Build</h3><p>Turn Rust source code into the optimized executable that real users run.</p></article>
+        <article class="card"><h3>Test</h3><p>Run unit, integration, golden-corpus, lifecycle, and real-terminal behavior checks.</p></article>
+        <article class="card"><h3>Lint and format</h3><p>Reject inconsistent formatting and suspicious Rust patterns treated as errors.</p></article>
+      </div>
+
+      <div class="steps" style="margin-top: 20px">
+        <details class="step">
+          <summary><span class="step-no">A</span><span class="step-title">Build the release binary<span class="step-sub">Optimized, stripped, thin link-time optimization—the artifact users run.</span></span></summary>
+          <div class="step-body">
+            <pre><code>cd /home/serrecchia/Projects/oopsinput
+cargo build --release</code></pre>
+            <div class="expect"><b>Pass condition:</b> the command exits successfully and the final line says the release profile finished.</div>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary><span class="step-no">B</span><span class="step-title">Run formatting and lint checks<span class="step-sub">Neither command rewrites source files.</span></span></summary>
+          <div class="step-body">
+            <p>Run the formatter in check-only mode:</p>
+            <pre><code>cargo fmt --check</code></pre>
+            <p>Then run Clippy and turn every warning into a failure:</p>
+            <pre><code>cargo clippy --all-targets -- -D warnings</code></pre>
+            <div class="expect"><b>Pass condition:</b> both commands exit successfully with no diff and no warning.</div>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary><span class="step-no">C</span><span class="step-title">Run the complete default Rust test suite<span class="step-sub">Unit tests plus every integration and PTY test; the live-model evaluation stays intentionally ignored.</span></span></summary>
+          <div class="step-body">
+            <pre><code>cargo test --locked</code></pre>
+            <div class="expect">
+              <b>Pass condition:</b> every test group ends with zero failures. The last full M8
+              acceptance recorded 298 passing tests and one intentionally ignored live-model
+              evaluation harness. Cargo prints separate summaries per test executable, so do not
+              expect one single “298 passed” line.
+            </div>
+            <div class="callout caution">
+              <strong>If one test fails, do not edit code or call a green rerun a fix.</strong>
+              Save the complete failing output and stop. While this guide was prepared, one
+              parallel PTY run produced 31 passes and two fail-open typo-prompt failures; each
+              affected test then passed 10 out of 10 unchanged in isolation. PLAN.md separately
+              tracks an unresolved one-off hosted dirty-reset failure. These facts justify
+              investigation, not a speculative patch or a claim that nothing is wrong.
+            </div>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary><span class="step-no">D</span><span class="step-title">Run the isolated install-to-uninstall lifecycle<span class="step-sub">A fake home proves ownership and cleanup without touching your real ~/.zshrc.</span></span></summary>
+          <div class="step-body">
+            <pre><code>scripts/lifecycle-gate.zsh</code></pre>
+            <div class="expect">
+              <b>Pass condition:</b> the final line begins <code>GATE PASS</code>. The gate installs
+              into a randomly generated temporary home, opens a real interactive Zsh, checks
+              doctor, records three Shadow events, reports them, purges, uninstalls, and proves
+              the original shell file returned byte-for-byte.
+            </div>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary><span class="step-no">E</span><span class="step-title">Measure release latency against the budgets<span class="step-sub">The binary’s ordinary and danger-candidate paths are timed with isolated state.</span></span></summary>
+          <div class="step-body">
+            <pre><code>scripts/perf-gate.zsh</code></pre>
+            <div class="expect">
+              <b>Pass condition:</b> both measured paths say <code>ok</code>, followed by
+              <code>perf-gate: all paths within budget</code>. The enforced p95 ceilings are
+              25 milliseconds for an ordinary resolving command and 75 milliseconds for the
+              danger-plus-context path.
+            </div>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary><span class="step-no">F</span><span class="step-title">Send 10,000 commands through a real PTY Zsh<span class="step-sub">This is the volume and plugin-side latency acceptance gate.</span></span></summary>
+          <div class="step-body">
+            <pre><code>scripts/pty-gate.zsh</code></pre>
+            <div class="expect">
+              <b>Pass condition:</b> <code>submissions: 10000</code>,
+              <code>outputs: 10000</code>, and a final <code>GATE PASS</code> reporting zero lost
+              or altered commands and an average below the 40-millisecond per-submission ceiling.
+              The last recorded M8 run measured 4.67 milliseconds per submission; runtime varies
+              with machine load.
+            </div>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section id="lifecycle">
+      <div class="section-head">
+        <h2>Optional: exercise your real install lifecycle</h2>
+        <span class="section-kicker">This section deliberately changes your shell setup</span>
+      </div>
+
+      <div class="callout caution">
+        <strong>Real-world consequence</strong>
+        Unlike the isolated gate, these steps update your real user-level install. The installer
+        replaces the oopsinput binary and plugin it already owns, preserves your existing config
+        and recorded state, keeps the original <code>~/.zshrc.oopsinput-backup</code>, and refreshes
+        one marked block in <code>~/.zshrc</code>. The uninstaller removes that marked block and the
+        installed runtime files, while deliberately retaining config, state, and backup. No step
+        uses root privileges or costs money.
+      </div>
+
+      <p>
+        Complete this only after the main hands-on section. Opening a new terminal between
+        lifecycle changes is part of the test: an already-running shell retains code it loaded
+        earlier.
+      </p>
+
+      <div class="steps">
+        <details class="step">
+          <summary><span class="step-no">L1</span><span class="step-title">Exercise the update path<span class="step-sub">Rebuild and reinstall the artifacts already owned by the healthy marker block.</span></span></summary>
+          <div class="step-body">
+            <pre><code>cd /home/serrecchia/Projects/oopsinput
+cargo build --release
+zsh/install.zsh</code></pre>
+            <div class="expect">
+              <b>Expected:</b> the installer says the existing config is left as-is, names the
+              installed binary and plugin, reports that it updated the plugin block, and tells
+              you to open a new terminal.
+            </div>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary><span class="step-no">L2</span><span class="step-title">Open a new terminal and verify the update<span class="step-sub">The live widgets must come from the newly installed plugin.</span></span></summary>
+          <div class="step-body">
+            <pre><code>"$HOME/.local/bin/oopsinput" doctor</code></pre>
+            <div class="expect"><b>Expected:</b> <code>widgets: 4/4 wrapped in this shell</code> and <code>result: ready</code>.</div>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary><span class="step-no">L3</span><span class="step-title">Exercise the real uninstaller<span class="step-sub">This removes installed runtime files and the marked shell block; user data remains.</span></span></summary>
+          <div class="step-body">
+            <p>Run this from the source checkout:</p>
+            <pre><code>cd /home/serrecchia/Projects/oopsinput
+zsh/uninstall.zsh</code></pre>
+            <div class="expect">
+              <b>Expected:</b> it reports removal of the marked <code>~/.zshrc</code> block, binary,
+              and plugin; then says recorded state and config remain. Do not run purge first
+              unless you separately intend to permanently delete your real recorded state.
+            </div>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary><span class="step-no">L4</span><span class="step-title">Open another new terminal<span class="step-sub">Confirm normal Zsh still works without the plugin.</span></span></summary>
+          <div class="step-body">
+            <pre><code>printf 'Zsh still works after uninstall\n'</code></pre>
+            <div class="expect"><b>Expected:</b> the sentence prints normally, with no oopsinput involvement.</div>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary><span class="step-no">L5</span><span class="step-title">Reinstall so the machine ends in its intended state<span class="step-sub">The retained config returns automatically.</span></span></summary>
+          <div class="step-body">
+            <pre><code>cd /home/serrecchia/Projects/oopsinput
+cargo build --release
+zsh/install.zsh</code></pre>
+            <div class="expect"><b>Expected:</b> a successful install with the existing config preserved.</div>
+          </div>
+        </details>
+
+        <details class="step">
+          <summary><span class="step-no">L6</span><span class="step-title">Open one final new terminal and run doctor<span class="step-sub">Do not end the lifecycle exercise until the restored installation is healthy.</span></span></summary>
+          <div class="step-body">
+            <pre><code>"$HOME/.local/bin/oopsinput" doctor</code></pre>
+            <div class="expect"><b>Pass condition:</b> <code>result: ready</code>.</div>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section id="limits">
+      <div class="section-head">
+        <h2>Know what you have—and have not—proven</h2>
+        <span class="section-kicker">A truthful finish line</span>
+      </div>
+
+      <div class="grid-2">
+        <article class="card">
+          <h3>You have directly exercised</h3>
+          <ul class="plain-list">
+            <li>live installation diagnosis and all four wrapped Zsh accept widgets;</li>
+            <li>ordinary byte-preserving pass-through;</li>
+            <li>Shadow observation and Suggest-mode typo accept, decline, and cancel;</li>
+            <li>Warn-mode edit, cancel, and run-unchanged outcomes;</li>
+            <li>the same Git command in dirty and clean contexts;</li>
+            <li>aggregate reporting, default raw-text omission, private permissions, and purge;</li>
+            <li>release build and acceptance gates, if you completed the developer section.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>You have not proven</h3>
+          <ul class="plain-list">
+            <li>that every dangerous command shape is recognized;</li>
+            <li>that fail-open behavior can protect against a genuinely destructive test;</li>
+            <li>that Bash, Fish, non-interactive scripts, or agent subprocesses are intercepted;</li>
+            <li>that the optional Ollama layer improves decisions—it is disabled by default;</li>
+            <li>that warning accuracy is ready for a default rollout; that requires a fresh natural-use pilot and review.</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="callout stop">
+        <strong>Commands that never belong in a manual product test</strong>
+        Do not type recursive deletion aimed at <code>/</code> or your home directory, destructive
+        commands in a real repository, force pushes to a real remote, writes to
+        <code>/dev/*</code> devices, filesystem-formatting commands, or privileged removal commands.
+        Automated golden cases test their analysis without executing them.
+      </div>
+
+      <div class="callout info">
+        <strong>If anything differs from the expected result</strong>
+        Stop at that card and preserve its complete terminal output. Reply in chat with the exact
+        sentence: “I stopped during the oopsinput hands-on walkthrough because the actual result
+        differed from the expected result,” then name the step number and paste the complete output
+        from that step. Do not change code, config, or permissions first; the original evidence is
+        what makes diagnosis possible.
+      </div>
+
+      <h3 style="margin-top: 30px">Where the claims in this guide come from</h3>
+      <div class="card file-map">
+        <ul class="plain-list">
+          <li><code>/home/serrecchia/Projects/oopsinput/SPEC.md</code> — canonical behavior, modes, security invariants, storage, and performance budgets.</li>
+          <li><code>/home/serrecchia/Projects/oopsinput/PLAN.md</code> — current M8 owner-familiarization status and latest acceptance measurements.</li>
+          <li><code>/home/serrecchia/Projects/oopsinput/README.md</code> — public install, trial, report, purge, and removal contract.</li>
+          <li><code>/home/serrecchia/Projects/oopsinput/ARCHITECTURE.md</code> — ground-up component map and three end-to-end Enter paths.</li>
+          <li><code>/home/serrecchia/Projects/oopsinput/tests/pty.rs</code> — real-terminal typo, warning, pass-through, and live-doctor behavior.</li>
+          <li><code>/home/serrecchia/Projects/oopsinput/scripts/lifecycle-gate.zsh</code> — isolated install-to-uninstall release acceptance.</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer class="footer">
+      This walkthrough is intentionally conservative: understanding the failure boundary is part of testing the product.
+    </footer>
+  </main>
+  <script>
+    (() => {
+      async function copyText(text) {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+          try {
+            await navigator.clipboard.writeText(text);
+            return true;
+          } catch (_) {
+            // Local file URLs can deny the modern Clipboard API. Use the
+            // browser's older user-gesture copy path as a self-contained fallback.
+          }
+        }
+
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        textarea.style.top = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        textarea.setSelectionRange(0, text.length);
+
+        let copied = false;
+        try {
+          copied = document.execCommand("copy");
+        } catch (_) {
+          copied = false;
+        }
+        textarea.remove();
+        return copied;
+      }
+
+      document.querySelectorAll("pre > code").forEach((code) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "copy-button";
+        button.textContent = "Copy";
+        button.setAttribute("aria-label", "Copy this command to the clipboard");
+        button.setAttribute("aria-live", "polite");
+
+        button.addEventListener("click", async () => {
+          const copied = await copyText(code.textContent);
+          button.classList.toggle("copied", copied);
+          button.classList.toggle("failed", !copied);
+          button.textContent = copied ? "Copied" : "Copy failed";
+          button.focus();
+
+          window.setTimeout(() => {
+            button.classList.remove("copied", "failed");
+            button.textContent = "Copy";
+          }, 1800);
+        });
+
+        code.parentElement.appendChild(button);
+      });
+    })();
+  </script>
+</body>
+</html>

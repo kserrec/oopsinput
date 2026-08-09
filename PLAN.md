@@ -468,6 +468,29 @@ acceptance gate.
 
 ### Phase 2 — Kyle learns and deliberately exercises the whole product
 
+**Next session starts here — owner-observed typo-prompt failure, hands-on
+walkthrough paused 2026-08-09.** Kyle reached the first Suggest-mode exercise
+using the isolated `oopspecialx` alias fixture, then stopped because the prompt
+surface did not provide clear, readable consent. Do not continue familiarization
+until both observations below are reproduced and resolved:
+
+- [ ] Diagnose and fix the typo prompt rendering on the same terminal row as
+      the submitted command instead of beginning on a clean line. Reproduce it
+      in a real interactive Zsh with a temporary `OOPSINPUT_STATE_DIR`, identify
+      the ZLE/terminal ordering from evidence before editing, then add a PTY
+      regression that pins a readable line boundary without changing command
+      bytes or prompt-key behavior.
+- [ ] Diagnose the prompt apparently advancing on its own after roughly one to
+      two seconds without Kyle entering a choice. The exact transcript was not
+      captured in this session, so first determine whether the corrected alias
+      actually ran or the original typo ran through the timeout/fail-open path;
+      also keep the isolated structural event and exact terminal transcript. A
+      correction without an explicit `y` is a consent violation; a timeout that
+      runs the original while looking like acceptance is still an unacceptable
+      prompt contract. Make no speculative fix, preserve the current code between
+      characterization runs, and regression-pin the proven cause before the
+      walkthrough resumes.
+
 - [ ] Teach the product from the ground up, one small section at a time: what
       the Zsh plugin intercepts, what the Rust binary analyzes, how the four
       evidence layers and policy modes interact, which bytes and local records

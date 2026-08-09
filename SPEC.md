@@ -476,6 +476,7 @@ oopsinput/
 ├── AGENTS.md            # Codex working agreement for coding sessions
 ├── CLAUDE.md            # Claude working agreement; keep in sync
 ├── README.md
+├── OOPSINPUT-HANDS-ON-WALKTHROUGH.html # owner-run product/testing guide
 ├── LICENSE              # Apache-2.0
 ├── Cargo.toml           # single binary crate — no workspace until earned
 ├── Cargo.lock           # exact resolved dependency graph
