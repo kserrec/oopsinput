@@ -438,11 +438,21 @@ acceptance gate.
 
 ### Phase 1 — Put the stabilized build under test
 
-- [ ] Re-run the complete M7 acceptance set from clean `main`, build the
-      release binary, and refresh the stable local binary and plugin without
-      replacing Kyle's config or accumulated state. Verify the installed bytes
-      against the tested artifacts and require `oopsinput doctor` to report the
-      expected live-shell state before beginning the walkthrough.
+- [x] Re-run the complete M7 acceptance set from `main` and build the release
+      binary — ✅ 2026-08-09. Formatting and Clippy passed; all 298 default
+      tests passed with the one live-model evaluation harness intentionally
+      ignored; the clean-machine lifecycle passed; release common/candidate
+      p95 latency was 2.16/19.24 ms; and the PTY gate preserved 10,000/10,000
+      commands at 4.67 ms per submission.
+- [x] Refresh the stable local binary and plugin without replacing Kyle's
+      config or accumulated state — ✅ 2026-08-09. Installed bytes match the
+      tested release binary and repository plugin exactly. `.zshrc` and config
+      checksums are unchanged, the existing 62-event sample remains present,
+      and private state/config permissions remain `0700`/`0600`.
+- [ ] In a newly opened interactive Zsh terminal, Kyle runs the installed
+      `oopsinput doctor` himself and confirms the complete output. This live
+      owner check cannot be inferred from the automated PTY gate or performed
+      by an agent in Kyle's place.
 
 ### Phase 2 — Kyle learns and deliberately exercises the whole product
 
