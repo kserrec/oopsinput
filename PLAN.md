@@ -453,6 +453,18 @@ acceptance gate.
       `oopsinput doctor` himself and confirms the complete output. This live
       owner check cannot be inferred from the automated PTY gate or performed
       by an agent in Kyle's place.
+- [ ] Before the follow-up release, resolve or explicitly disposition one
+      intermittent hosted-test failure from 2026-08-09. The first GitHub
+      `cargo test` run let the inert fixture's dirty `git reset --hard` run
+      unchanged instead of displaying the expected warning; the release-level
+      lifecycle, latency, and 10,000-command PTY job passed in that same run,
+      and the failed job passed unchanged on rerun. The exact test passed 30/30
+      locally, the full PTY suite passed 10/10 normally and once confined to a
+      single CPU, and two controlled load reproductions did not fail. No code
+      was changed: the evidence cannot yet distinguish a bounded Git/context
+      timeout from another fail-open path because the fixture deletes its event
+      log while unwinding. Stop here under the two-failed-hypotheses rule;
+      capture the structural event reason if it recurs before choosing a fix.
 
 ### Phase 2 — Kyle learns and deliberately exercises the whole product
 
