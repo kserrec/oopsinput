@@ -519,10 +519,17 @@ may weaken §9 invariants.
 
 ## 18. Success definition for v1
 
-v1 is done when: install/uninstall are clean on this machine; 10,000 scripted
-PTY submissions produce zero altered/lost buffers and zero hangs; the typo
-layer works with exact-resolution zero false positives; the danger+context
-layers pass the paired golden corpus; the inference layer produces valid
-schema output against a local model and degrades silently without one; the
-deterministic path meets its latency budget; a ≥1,000-command shadow pilot has
-been reviewed; and the repo is presentable enough to send to a friend.
+v1 is done when: Kyle has been taught the product from the ground up and has
+personally exercised its complete documented user workflow in a real
+interactive Zsh session; install/uninstall are clean on this machine; 10,000
+scripted PTY submissions produce zero altered/lost buffers and zero hangs; the
+typo layer works with exact-resolution zero false positives; the danger+context
+layers pass the paired golden corpus; the inference layer produces valid schema
+output against a local model and degrades silently without one; the
+deterministic path meets its latency budget; a fresh ≥1,000-command natural-use
+Shadow-or-Suggest pilot, begun only after that familiarization on the stabilized
+build, has been reviewed; and the tested stabilization work has been published
+in a follow-up alpha that is presentable enough to send to a friend. Automated
+tests, generated commands, scripted volume, replayed history, agent-produced
+explanations, and pre-familiarization events cannot substitute for Kyle's own
+hands-on acceptance or count toward the natural-use pilot.

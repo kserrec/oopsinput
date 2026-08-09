@@ -268,6 +268,13 @@ The removed pre-purge log held 637 development-contaminated events (all
 kept. Manual `check` probes must continue to set `OOPSINPUT_STATE_DIR` to a
 temporary directory so they never contaminate this passive sample.
 
+Status update — 2026-08-09: this observation was non-blocking for the public
+`v0.1.0` alpha only. It is not final v1 acceptance evidence. Kyle had not yet
+been taught the product or personally exercised its user workflows, and the
+installed binary and plugin predated the M7 stabilization work. M8 therefore
+starts a fresh, owner-run acceptance process; none of this pre-familiarization
+sample counts toward its natural-use threshold.
+
 ## M6 — Share-ready polish
 
 - [x] Shareable install: copy both the binary and plugin to stable user-owned
@@ -419,6 +426,66 @@ being added.
       live-model harness. Release latency: common 6.78/7.80 ms p50/p95,
       candidate 17.03/19.79 ms. Volume gate: 10,000/10,000 outputs, zero
       lost or altered commands, 13.59 ms/submission against a 40 ms ceiling.
+
+## M8 — Owner familiarization, genuine pilot, and stabilized follow-up release
+
+This milestone is intentionally larger than one session: its phases are the
+single-pass units for `$next`. It closes the gap between an agent-built,
+automatically verified product and one its owner understands and has personally
+tested. Automated tests, generated commands, replayed history, and an agent's
+description can support this milestone but cannot satisfy Kyle's hands-on
+acceptance gate.
+
+### Phase 1 — Put the stabilized build under test
+
+- [ ] Re-run the complete M7 acceptance set from clean `main`, build the
+      release binary, and refresh the stable local binary and plugin without
+      replacing Kyle's config or accumulated state. Verify the installed bytes
+      against the tested artifacts and require `oopsinput doctor` to report the
+      expected live-shell state before beginning the walkthrough.
+
+### Phase 2 — Kyle learns and deliberately exercises the whole product
+
+- [ ] Teach the product from the ground up, one small section at a time: what
+      the Zsh plugin intercepts, what the Rust binary analyzes, how the four
+      evidence layers and policy modes interact, which bytes and local records
+      are preserved, where fail-open behavior applies, and what the product
+      explicitly cannot protect against. Pause for Kyle's questions between
+      sections; familiarity is not inferred from having received prose.
+- [ ] With Kyle typing each command in his own interactive shell, exercise the
+      documented user lifecycle and every user-visible surface: install/update,
+      `doctor`, ordinary-command passthrough, typo correction, safe paired
+      danger/context cases, Shadow and Suggest behavior, prompt outcomes,
+      `report`, retention-visible state, `purge`, uninstall, and reinstall.
+      Dangerous-looking cases use disposable fixtures and inert targets, never
+      Kyle's real work. Record surprises and questions; only Kyle can confirm
+      that this phase is complete.
+
+### Phase 3 — Fresh natural-use pilot and review
+
+- [ ] After deliberate exercises are finished, purge their contaminated event
+      and policy data, record a zero-event baseline on the exact tested build,
+      and begin a fresh Shadow-or-Suggest pilot. Preserve config unless Kyle
+      explicitly decides to change it.
+- [ ] Accumulate at least 1,000 commands from Kyle's ordinary shell use. Do not
+      count generated commands, scripted volume, replayed history, deliberate
+      test cases, or any pre-M8 event. Manual probes continue to use a temporary
+      `OOPSINPUT_STATE_DIR`.
+- [ ] Review the resulting report, the highest-ranked candidate categories,
+      every visible intervention, and a random Allow sample. Document the
+      per-category accuracy decision in `eval/`; change thresholds only when
+      the reviewed evidence supports it.
+
+### Phase 4 — Publish the stabilized follow-up alpha
+
+- [ ] Fix only issues proven by Kyle's hands-on testing or the genuine pilot,
+      with regression fixtures for each product bug, then repeat the full
+      acceptance set.
+- [ ] Bump the package version, update truthful release documentation, cut an
+      annotated follow-up tag after `v0.1.0`, publish the corresponding GitHub
+      prerelease, and verify that the tag and release checks all pass. Do not
+      publish this milestone's release before Kyle completes Phase 2 and the
+      Phase 3 review.
 
 ## Later (v2+ candidates — see SPEC §17)
 
