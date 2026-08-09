@@ -15,6 +15,7 @@
 //!   1  = internal error (plugin fails open)
 
 mod distance;
+mod doctor;
 mod events;
 mod layers;
 mod lexer;
@@ -25,7 +26,7 @@ mod proposal;
 mod state;
 mod ui;
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
@@ -49,6 +50,20 @@ struct Timings {
     total: u128,
 }
 
+struct CheckAction {
+    decision: &'static str,
+    reason_code: &'static str,
+    exit_code: u8,
+    outcome: Option<&'static str>,
+}
+
+struct WarningChoiceAction {
+    outcome: &'static str,
+    ran_unchanged: bool,
+    timed_out: bool,
+    exit_code: u8,
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -59,7 +74,7 @@ fn main() -> ExitCode {
         Some("check") => check(&args[1..]),
         Some("report") => report(),
         Some("purge") => purge(&args[1..]),
-        Some("doctor") => doctor(),
+        Some("doctor") => doctor::run(),
         // Test seam (debug builds only): exercise the real /dev/tty + stty
         // prompt path under a PTY, without needing the full suggest-mode flow.
         #[cfg(debug_assertions)]
@@ -216,7 +231,7 @@ fn check(args: &[String]) -> ExitCode {
         ))
     .then_some(assessed.reason);
     let capped = policy::cap_for_mode(assessed, cfg.mode);
-    let (decision_str, reason_code, exit_code, outcome) = match capped.verdict {
+    let action = match capped.verdict {
         policy::Verdict::Warn | policy::Verdict::Confirm => warning_intervention(
             capped,
             &danger,
@@ -226,17 +241,19 @@ fn check(args: &[String]) -> ExitCode {
             &cfg,
         ),
         _ => match &suggestion {
-            Some(s) if cfg.mode != policy::Mode::Shadow => {
-                let (d, r, e) = typo_intervention(&proposal.buffer, s);
-                (d, r, e, None)
-            }
-            _ => (capped.verdict.as_str(), capped.reason, 0u8, None),
+            Some(s) if cfg.mode != policy::Mode::Shadow => typo_intervention(&proposal.buffer, s),
+            _ => CheckAction {
+                decision: capped.verdict.as_str(),
+                reason_code: capped.reason,
+                exit_code: 0,
+                outcome: None,
+            },
         },
     };
 
     let decision = Decision {
-        decision: decision_str,
-        reason_code,
+        decision: action.decision,
+        reason_code: action.reason_code,
         evidence,
         timings_us: Timings { total: duration_us },
     };
@@ -260,7 +277,7 @@ fn check(args: &[String]) -> ExitCode {
         ctx_target_entries: context
             .as_ref()
             .and_then(|c| c.targets.iter().filter_map(|t| t.entries).max()),
-        outcome,
+        outcome: action.outcome,
     });
 
     // The decision JSON is diagnostics; the exit code is the contract. Once
@@ -270,7 +287,7 @@ fn check(args: &[String]) -> ExitCode {
     if let Ok(json) = serde_json::to_string(&decision) {
         println!("{json}");
     }
-    ExitCode::from(exit_code)
+    ExitCode::from(action.exit_code)
 }
 
 /// Assemble the decision's evidence codes in stable order: lexer uncertainty
@@ -379,21 +396,23 @@ fn consult_model_if_gated(
     ))
 }
 
-/// The L1 prompt flow. Returns (decision, reason_code, exit code) — exit 10
-/// means "replacement delivered on fd 3", and is only ever returned after the
-/// full replacement (sentinel included) was written successfully; every
-/// failure degrades to exit 0, running the original unchanged (SPEC §9-8).
-fn typo_intervention(
-    buffer: &str,
-    s: &layers::typo::Suggestion,
-) -> (&'static str, &'static str, u8) {
+/// The L1 prompt flow. Exit 10 means "replacement delivered on fd 3", and is
+/// only ever returned after the full replacement (sentinel included) was
+/// written successfully; every failure degrades to exit 0, running the
+/// original unchanged (SPEC §9-8).
+fn typo_intervention(buffer: &str, s: &layers::typo::Suggestion) -> CheckAction {
     // Construct the replacement BEFORE asking: if it cannot be built with
     // byte-exact certainty there is nothing to offer.
     let Some(replacement) = layers::typo::replacement_buffer(buffer, &s.typed, &s.candidate) else {
-        return ("allow", "shadow.observed", 0);
+        return CheckAction {
+            decision: "allow",
+            reason_code: "shadow.observed",
+            exit_code: 0,
+            outcome: None,
+        };
     };
     PROMPT_ACTIVE.store(true, Ordering::SeqCst);
-    match ui::prompt_typo(&s.typed, &s.candidate) {
+    let (decision, reason_code, exit_code) = match ui::prompt_typo(&s.typed, &s.candidate) {
         ui::TypoChoice::Correct => {
             if write_replacement_fd3(&replacement).is_ok() {
                 ("replace", "typo.accepted", 10)
@@ -403,13 +422,20 @@ fn typo_intervention(
         }
         ui::TypoChoice::Original => ("allow", "typo.declined", 0),
         ui::TypoChoice::Cancel => ("cancel", "typo.cancelled", 12),
+        ui::TypoChoice::Timeout => ("allow", "typo.timed_out", 0),
+    };
+    CheckAction {
+        decision,
+        reason_code,
+        exit_code,
+        outcome: None,
     }
 }
 
 /// The L2+ warning flow (SPEC §7): gate through budget and cooldown, show
-/// the prompt, act on the answer, record the outcome. Returns (decision,
-/// reason, exit code, outcome). Exit codes: 11 = restore buffer for editing,
-/// 12 = cancel, 0 = run unchanged — the plugin holds up its end of each.
+/// the prompt, act on the answer, record the outcome. Exit codes: 11 =
+/// restore buffer for editing, 12 = cancel, 0 = run unchanged — the plugin
+/// holds up its end of each.
 fn warning_intervention(
     assessment: policy::Assessment,
     danger: &layers::danger::Analysis,
@@ -417,50 +443,95 @@ fn warning_intervention(
     recency: &[proposal::RecencyEntry],
     model: Option<&layers::infer::ModelEvidence>,
     cfg: &policy::Config,
-) -> (&'static str, &'static str, u8, Option<&'static str>) {
+) -> CheckAction {
     let rule = policy::primary_code(danger);
-    let history = policy::load_history();
-    let gated = policy::apply_gates(
+    let admission = policy::admit_intervention(
         assessment,
         rule,
         danger.catastrophic,
-        &history,
         events::now_ms(),
         cfg.budget_per_hour,
     );
+    let gated = admission.assessment;
+    let reservation = admission.reservation;
     if !matches!(
         gated.verdict,
         policy::Verdict::Warn | policy::Verdict::Confirm
     ) {
         // budget exhausted or rule in cooldown: degrade to shadow recording
-        return (gated.verdict.as_str(), gated.reason, 0, None);
+        return CheckAction {
+            decision: gated.verdict.as_str(),
+            reason_code: gated.reason,
+            exit_code: 0,
+            outcome: None,
+        };
     }
 
     let lines = ui::warning_lines(gated.reason, danger, context, recency, model);
     let pausing = gated.verdict == policy::Verdict::Confirm;
     PROMPT_ACTIVE.store(true, Ordering::SeqCst);
-    let choice = match ui::prompt_warning(&lines, pausing) {
+    let choice = match ui::prompt_warning(&lines) {
         ui::WarningPrompt::NotShown => {
-            return (gated.verdict.as_str(), gated.reason, 0, None);
+            policy::release_admission(reservation, events::now_ms());
+            return CheckAction {
+                decision: gated.verdict.as_str(),
+                reason_code: gated.reason,
+                exit_code: 0,
+                outcome: None,
+            };
         }
         ui::WarningPrompt::Shown(choice) => choice,
     };
-    let (outcome, ran_unchanged, exit_code) = match choice {
-        ui::WarnChoice::Edit => ("edited", false, 11u8),
-        ui::WarnChoice::Cancel => ("cancelled", false, 12),
-        ui::WarnChoice::RunOnce => ("ran_unchanged", true, 0),
-    };
-    // Recorded only now, because only a prompt the user actually saw spends
-    // budget — and the locked append keeps concurrent shells honest.
+    let action = warning_choice_action(choice, pausing);
+    // The admission already reserved exactly one budget slot. Completing it
+    // swaps that short-lived reservation for the shown prompt's outcome.
     if let Some(code) = rule {
-        policy::record_outcome(code, ran_unchanged, events::now_ms());
+        policy::record_admitted_outcome(
+            reservation,
+            code,
+            action.ran_unchanged,
+            action.timed_out,
+            events::now_ms(),
+        );
     }
-    (
-        gated.verdict.as_str(),
-        gated.reason,
-        exit_code,
-        Some(outcome),
-    )
+    CheckAction {
+        decision: gated.verdict.as_str(),
+        reason_code: gated.reason,
+        exit_code: action.exit_code,
+        outcome: Some(action.outcome),
+    }
+}
+
+/// Keep what physically happens after a timeout separate from what the user
+/// did. Advisory Warn still runs unchanged and pausing Confirm still cancels,
+/// but both are recorded as `timed_out`, never as a deliberate `r` or `c`.
+fn warning_choice_action(choice: ui::WarnChoice, pausing: bool) -> WarningChoiceAction {
+    match choice {
+        ui::WarnChoice::Edit => WarningChoiceAction {
+            outcome: "edited",
+            ran_unchanged: false,
+            timed_out: false,
+            exit_code: 11,
+        },
+        ui::WarnChoice::Cancel => WarningChoiceAction {
+            outcome: "cancelled",
+            ran_unchanged: false,
+            timed_out: false,
+            exit_code: 12,
+        },
+        ui::WarnChoice::RunOnce => WarningChoiceAction {
+            outcome: "ran_unchanged",
+            ran_unchanged: true,
+            timed_out: false,
+            exit_code: 0,
+        },
+        ui::WarnChoice::Timeout => WarningChoiceAction {
+            outcome: "timed_out",
+            ran_unchanged: !pausing,
+            timed_out: true,
+            exit_code: if pausing { 12 } else { 0 },
+        },
+    }
 }
 
 /// Deliver the replacement to the plugin: exact bytes on fd 3, terminated by
@@ -531,445 +602,6 @@ fn purge(args: &[String]) -> ExitCode {
     }
 }
 
-/// Complete installed-environment diagnosis for the interactive Zsh adapter.
-fn doctor() -> ExitCode {
-    println!("oopsinput doctor");
-    println!("  version:    {}", env!("CARGO_PKG_VERSION"));
-
-    let mut healthy = true;
-
-    let zsh = find_in_path("zsh");
-    let shown_zsh = zsh
-        .as_deref()
-        .map(ui::escape_for_display)
-        .unwrap_or_else(|| "NOT FOUND in PATH".to_string());
-    println!("  zsh:        {}", shown_zsh);
-    healthy &= zsh.is_some();
-
-    let plugin_ok = print_plugin_line();
-    let widgets_ok = print_widgets_line();
-    healthy &= plugin_ok && widgets_ok;
-
-    // Regression (bughunt 2026-08-06): this line once hardcoded
-    // ~/.config, contradicting the mode line below whenever
-    // XDG_CONFIG_HOME pointed elsewhere. Both must resolve identically.
-    let config = policy::inspect_config();
-    let config_ok = print_config_line(&config);
-    println!(
-        "  mode:       {}",
-        match config.config.mode {
-            policy::Mode::Shadow => "shadow",
-            policy::Mode::Suggest => "suggest (L1 typo prompts)",
-            policy::Mode::Warn => "warn (L1 prompts and visible warnings)",
-            policy::Mode::Confirm => {
-                "confirm (L1 prompts, warnings, and gated confirmations)"
-            }
-        }
-    );
-    let model_ok = print_model_line(&config.config);
-    let state_ok = print_state_line();
-    healthy &= config_ok && model_ok && state_ok;
-
-    if healthy {
-        println!("  result:     ready");
-        ExitCode::SUCCESS
-    } else {
-        println!("  result:     problems found");
-        ExitCode::from(1)
-    }
-}
-
-fn print_config_line(inspection: &policy::ConfigInspection) -> bool {
-    let path = inspection
-        .path
-        .as_deref()
-        .map(|path| ui::escape_for_display(&path.to_string_lossy()));
-    let file_ok = match (path.as_deref(), inspection.file_state) {
-        (Some(path), policy::ConfigFileState::Regular) => {
-            if inspection.config.warnings.is_empty() {
-                println!("  config:     {path} (present) — valid");
-                true
-            } else {
-                println!(
-                    "  config:     {path} (present) — INVALID ({} issue(s))",
-                    inspection.config.warnings.len()
-                );
-                false
-            }
-        }
-        (Some(path), policy::ConfigFileState::Missing) => {
-            println!("  config:     {path} (absent — defaults in effect) — valid");
-            true
-        }
-        (Some(path), policy::ConfigFileState::NonRegular) => {
-            println!(
-                "  config:     {path} (ignored — not a regular file; defaults in effect) — INVALID"
-            );
-            false
-        }
-        (Some(path), policy::ConfigFileState::Unavailable) => {
-            println!("  config:     {path} (unavailable — defaults in effect) — INVALID");
-            false
-        }
-        (None, _) => {
-            println!("  config:     unavailable — HOME/XDG_CONFIG_HOME did not resolve a path");
-            false
-        }
-    };
-    for warning in &inspection.config.warnings {
-        println!("              {}", ui::escape_for_display(warning));
-    }
-    if !inspection.mode_override_valid {
-        println!("              OOPSINPUT_MODE is invalid; using shadow");
-    }
-    file_ok && inspection.mode_override_valid
-}
-
-const ZSHRC_READ_CAP: u64 = 1024 * 1024;
-const MARK_BEGIN: &[u8] = b"# >>> oopsinput >>>";
-const MARK_END: &[u8] = b"# <<< oopsinput <<<";
-
-enum PluginInstallStatus {
-    Installed,
-    HomeUnavailable,
-    ZshrcMissing,
-    ZshrcUnsafe,
-    ZshrcUnreadable,
-    ZshrcTooLarge,
-    MarkerMissing,
-    MarkerDamaged,
-    PluginMissing,
-    PluginUnsafe,
-    PluginUnreadable,
-}
-
-fn print_plugin_line() -> bool {
-    let (message, ok) = match inspect_plugin_install() {
-        PluginInstallStatus::Installed => (
-            "installed (marked ~/.zshrc block + regular installed file)",
-            true,
-        ),
-        PluginInstallStatus::HomeUnavailable => {
-            ("unavailable — HOME must be a nonempty absolute path", false)
-        }
-        PluginInstallStatus::ZshrcMissing => (
-            "not installed — ~/.zshrc is absent (run zsh/install.zsh)",
-            false,
-        ),
-        PluginInstallStatus::ZshrcUnsafe => (
-            "invalid — ~/.zshrc is a symlink or not a regular file",
-            false,
-        ),
-        PluginInstallStatus::ZshrcUnreadable => {
-            ("invalid — ~/.zshrc could not be read safely", false)
-        }
-        PluginInstallStatus::ZshrcTooLarge => (
-            "invalid — ~/.zshrc exceeds the 1 MiB diagnostic read cap",
-            false,
-        ),
-        PluginInstallStatus::MarkerMissing => (
-            "not installed — marked block absent from ~/.zshrc (run zsh/install.zsh)",
-            false,
-        ),
-        PluginInstallStatus::MarkerDamaged => (
-            "invalid — marked block in ~/.zshrc is duplicated, mismatched, or reversed",
-            false,
-        ),
-        PluginInstallStatus::PluginMissing => (
-            "incomplete — ~/.local/share/oopsinput/oopsinput.zsh is absent",
-            false,
-        ),
-        PluginInstallStatus::PluginUnsafe => (
-            "invalid — installed plugin path is a symlink or not a regular file",
-            false,
-        ),
-        PluginInstallStatus::PluginUnreadable => {
-            ("invalid — installed plugin file is unreadable", false)
-        }
-    };
-    println!("  plugin:     {message}");
-    ok
-}
-
-fn inspect_plugin_install() -> PluginInstallStatus {
-    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
-        return PluginInstallStatus::HomeUnavailable;
-    };
-    if !home.is_absolute() || home.as_os_str().is_empty() {
-        return PluginInstallStatus::HomeUnavailable;
-    }
-    let zshrc = home.join(".zshrc");
-    match std::fs::symlink_metadata(&zshrc) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return PluginInstallStatus::ZshrcMissing;
-        }
-        Err(_) => return PluginInstallStatus::ZshrcUnreadable,
-        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
-            return PluginInstallStatus::ZshrcUnsafe;
-        }
-        Ok(_) => {}
-    }
-    let file = match std::fs::File::open(&zshrc) {
-        Ok(file) => file,
-        Err(_) => return PluginInstallStatus::ZshrcUnreadable,
-    };
-    if state::opened_regular_file_metadata(&zshrc, &file, "~/.zshrc").is_err() {
-        return PluginInstallStatus::ZshrcUnreadable;
-    }
-    let mut text = Vec::new();
-    if file
-        .take(ZSHRC_READ_CAP + 1)
-        .read_to_end(&mut text)
-        .is_err()
-    {
-        return PluginInstallStatus::ZshrcUnreadable;
-    }
-    if text.len() as u64 > ZSHRC_READ_CAP {
-        return PluginInstallStatus::ZshrcTooLarge;
-    }
-    let mut begins = Vec::new();
-    let mut ends = Vec::new();
-    for (line_no, line) in text.split(|byte| *byte == b'\n').enumerate() {
-        if bytes_contain(line, MARK_BEGIN) {
-            begins.push(line_no);
-        }
-        if bytes_contain(line, MARK_END) {
-            ends.push(line_no);
-        }
-    }
-    if begins.is_empty() && ends.is_empty() {
-        return PluginInstallStatus::MarkerMissing;
-    }
-    if begins.len() != 1 || ends.len() != 1 || ends[0] < begins[0] {
-        return PluginInstallStatus::MarkerDamaged;
-    }
-
-    let plugin = home.join(".local/share/oopsinput/oopsinput.zsh");
-    match std::fs::symlink_metadata(&plugin) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return PluginInstallStatus::PluginMissing;
-        }
-        Err(_) => return PluginInstallStatus::PluginUnreadable,
-        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
-            return PluginInstallStatus::PluginUnsafe;
-        }
-        Ok(_) => {}
-    }
-    let file = match std::fs::File::open(&plugin) {
-        Ok(file) => file,
-        Err(_) => return PluginInstallStatus::PluginUnreadable,
-    };
-    if state::opened_regular_file_metadata(&plugin, &file, "installed plugin").is_err() {
-        PluginInstallStatus::PluginUnreadable
-    } else {
-        PluginInstallStatus::Installed
-    }
-}
-
-fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
-}
-
-const ACCEPT_WIDGETS: [&str; 4] = [
-    "accept-line",
-    "accept-line-and-down-history",
-    "accept-and-hold",
-    "accept-and-infer-next-history",
-];
-
-enum WidgetStatus {
-    Inactive,
-    Invalid,
-    Wrapped(usize),
-}
-
-fn print_widgets_line() -> bool {
-    match inspect_widgets() {
-        WidgetStatus::Wrapped(count) if count == ACCEPT_WIDGETS.len() => {
-            println!(
-                "  widgets:    {count}/{} wrapped in this shell",
-                ACCEPT_WIDGETS.len()
-            );
-            true
-        }
-        WidgetStatus::Wrapped(count) => {
-            println!(
-                "  widgets:    {count}/{} wrapped — reload the plugin in this shell",
-                ACCEPT_WIDGETS.len()
-            );
-            false
-        }
-        WidgetStatus::Inactive => {
-            println!("  widgets:    plugin not active in this shell — open a new terminal");
-            false
-        }
-        WidgetStatus::Invalid => {
-            println!("  widgets:    plugin status is malformed — reload the plugin");
-            false
-        }
-    }
-}
-
-fn inspect_widgets() -> WidgetStatus {
-    match std::env::var("OOPSINPUT_PLUGIN_ACTIVE") {
-        Ok(value) if value == "1" => {}
-        Err(std::env::VarError::NotPresent) => return WidgetStatus::Inactive,
-        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => return WidgetStatus::Invalid,
-    }
-    let value = match std::env::var("OOPSINPUT_WRAPPED_WIDGETS") {
-        Ok(value) => value,
-        Err(_) => return WidgetStatus::Invalid,
-    };
-    let mut seen = [false; ACCEPT_WIDGETS.len()];
-    if !value.is_empty() {
-        for name in value.split(',') {
-            let Some(index) = ACCEPT_WIDGETS.iter().position(|expected| *expected == name) else {
-                return WidgetStatus::Invalid;
-            };
-            if seen[index] {
-                return WidgetStatus::Invalid;
-            }
-            seen[index] = true;
-        }
-    }
-    WidgetStatus::Wrapped(seen.into_iter().filter(|wrapped| *wrapped).count())
-}
-
-fn print_state_line() -> bool {
-    let inspection = state::inspect_state();
-    let Some(dir) = inspection.dir.as_deref() else {
-        println!("  state:      unavailable — no absolute state directory resolves");
-        return false;
-    };
-    let shown = ui::escape_for_display(&dir.to_string_lossy());
-    if inspection.issues.is_empty() {
-        if inspection.present {
-            println!(
-                "  state:      {shown} (0700; {} owned file(s) present at 0600)",
-                inspection.checked_files
-            );
-        } else {
-            println!("  state:      {shown} (not created yet — valid)");
-        }
-        return true;
-    }
-    println!(
-        "  state:      {shown} — INVALID ({} issue(s))",
-        inspection.issues.len()
-    );
-    for issue in inspection.issues {
-        match issue {
-            state::StateIssue::DirectoryUnavailable => {
-                println!("              state directory metadata is unavailable")
-            }
-            state::StateIssue::DirectoryNotReal => {
-                println!("              state path is a symlink or not a directory")
-            }
-            state::StateIssue::DirectoryUnreadable => {
-                println!("              state directory cannot be enumerated")
-            }
-            state::StateIssue::DirectoryMode(mode) => {
-                println!("              state directory mode is {mode:03o}; required 700")
-            }
-            state::StateIssue::EntryUnavailable(label) => {
-                println!("              {label} metadata is unavailable")
-            }
-            state::StateIssue::EntryNotRegular(label) => {
-                println!("              {label} is a symlink or not a regular file")
-            }
-            state::StateIssue::EntryMode(label, mode) => {
-                println!("              {label} mode is {mode:03o}; required 600")
-            }
-        }
-    }
-    false
-}
-
-/// Ollama's /api/show response carries the modelfile, license text, and
-/// tensor metadata — legitimately large. Generous cap; this is a reachability
-/// check, not model I/O.
-const SHOW_RESPONSE_CAP: usize = 4 * 1024 * 1024;
-
-/// Doctor's model line: is Ollama up, and is the configured model pulled?
-/// POST /api/show answers both without loading the model or running any
-/// inference. The model name comes from the config file — untrusted display
-/// text, so it goes through the escaper (SPEC §9-4, no exemptions).
-fn print_model_line(cfg: &policy::Config) -> bool {
-    let Some(name) = &cfg.model else {
-        println!("  model:      disabled (deterministic-only)");
-        return true;
-    };
-    let shown = ui::escape_for_display(name);
-    let body = serde_json::json!({ "model": name }).to_string();
-    let deadline = Instant::now() + std::time::Duration::from_millis(cfg.model_timeout_ms);
-    let result = model::post_json(
-        model::ollama_addr(),
-        "/api/show",
-        body.as_bytes(),
-        deadline,
-        SHOW_RESPONSE_CAP,
-    );
-    match result {
-        Ok(_) => {
-            println!("  model:      {shown} (Ollama reachable, model present)");
-            true
-        }
-        Err(model::ModelError::Status(404)) => {
-            println!(
-                "  model:      {shown} — Ollama is up but this model isn't pulled (ollama pull {shown})"
-            );
-            false
-        }
-        Err(model::ModelError::Connect) => {
-            println!(
-                "  model:      {shown} — Ollama not reachable at 127.0.0.1:11434; runs deterministic-only"
-            );
-            false
-        }
-        Err(model::ModelError::UntrustedPeer) => {
-            println!(
-                "  model:      {shown} — the process on 127.0.0.1:11434 is not owned by you or a \
-                 system account; refusing to talk to it (runs deterministic-only)"
-            );
-            false
-        }
-        Err(model::ModelError::Timeout) => {
-            println!(
-                "  model:      {shown} — Ollama didn't answer within {} ms; runs deterministic-only",
-                cfg.model_timeout_ms
-            );
-            false
-        }
-        Err(_) => {
-            println!(
-                "  model:      {shown} — unexpected reply from 127.0.0.1:11434; runs deterministic-only"
-            );
-            false
-        }
-    }
-}
-
-/// PATH lookup via direct metadata checks — never through a shell (SPEC §9).
-fn find_in_path(name: &str) -> Option<String> {
-    find_in_path_list(&std::env::var("PATH").ok()?, name)
-}
-
-fn find_in_path_list(path: &str, name: &str) -> Option<String> {
-    use std::os::unix::fs::PermissionsExt;
-    for dir in path.split(':').filter(|d| !d.is_empty()) {
-        let candidate = format!("{dir}/{name}");
-        if let Ok(meta) = std::fs::metadata(&candidate)
-            && meta.is_file()
-            && meta.permissions().mode() & 0o111 != 0
-        {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 fn print_help() {
     println!(
         "oopsinput {} — catches commands that probably aren't what you meant\n\n\
@@ -1011,6 +643,26 @@ pub(crate) fn golden_cases<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warning_timeout_keeps_outcome_distinct_from_physical_default() {
+        // SPEC §4 requires `timed_out` as its own outcome. Warn remains
+        // fail-open while Confirm remains pausing, but neither default is a
+        // deliberate run/cancel choice.
+        let warn = warning_choice_action(ui::WarnChoice::Timeout, false);
+        assert_eq!(warn.outcome, "timed_out");
+        assert!(warn.ran_unchanged && warn.timed_out);
+        assert_eq!(warn.exit_code, 0);
+
+        let confirm = warning_choice_action(ui::WarnChoice::Timeout, true);
+        assert_eq!(confirm.outcome, "timed_out");
+        assert!(!confirm.ran_unchanged && confirm.timed_out);
+        assert_eq!(confirm.exit_code, 12);
+
+        let deliberate = warning_choice_action(ui::WarnChoice::RunOnce, true);
+        assert_eq!(deliberate.outcome, "ran_unchanged");
+        assert!(deliberate.ran_unchanged && !deliberate.timed_out);
+    }
 
     /// SPEC §11 golden corpus, L1 slice: each case is buffer + resolution
     /// context + candidate names → expected suggestion and evidence codes.
@@ -1156,42 +808,5 @@ mod tests {
             "danger rules with no golden case: {uncovered:?} — every rule needs \
              a case, and a counterfactual pair per CLAUDE.md"
         );
-    }
-
-    #[test]
-    fn find_in_path_finds_sh() {
-        // Smoke test for the thin env wrapper: `find_in_path` must read $PATH
-        // and hand it to the (hermetically tested) lookup below. Its premise
-        // is environmental, so it says so when it fails rather than looking
-        // like a product bug (test-audit 2026-08-06).
-        assert!(
-            find_in_path("sh").is_some(),
-            "no `sh` on $PATH — this asserts the environment, not the code; \
-             the real lookup logic is pinned by find_in_path_requires_executable_bit"
-        );
-    }
-
-    #[test]
-    fn find_in_path_misses_nonsense() {
-        assert!(find_in_path("definitely-not-a-real-binary-xyz").is_none());
-    }
-
-    #[test]
-    fn find_in_path_requires_executable_bit() {
-        // Regression (bughunt #3): a plain file named like the binary was
-        // reported as found by doctor.
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("oopsinput-xbit-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("zsh");
-        std::fs::write(&file, "not a binary").unwrap();
-
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(find_in_path_list(dir.to_str().unwrap(), "zsh").is_none());
-
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(find_in_path_list(dir.to_str().unwrap(), "zsh").is_some());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

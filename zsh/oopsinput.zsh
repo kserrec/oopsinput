@@ -68,6 +68,25 @@ _oopsinput_publish_status() {
     typeset -gx OOPSINPUT_WRAPPED_WIDGETS=${(j:,:)wrapped}
 }
 
+# A load-time widget list is only a snapshot: a plugin sourced later can
+# replace every wrapper. Refresh immediately before the doctor process starts,
+# through preexec (which is independent of the accept widget being checked),
+# and clear freshness at every prompt so an old doctor run cannot vouch for a
+# later shell state.
+_oopsinput_preexec_status() {
+    local -a words
+    words=( ${(z)1} )
+    local command=${(Q)words[1]:-}
+    if [[ ${command:t} == oopsinput && ${(Q)words[2]:-} == doctor ]]; then
+        _oopsinput_publish_status
+        typeset -gx OOPSINPUT_WIDGET_STATUS_FRESH=1
+    fi
+}
+
+_oopsinput_precmd_clear_status() {
+    typeset -gx OOPSINPUT_WIDGET_STATUS_FRESH=0
+}
+
 # Invoke whatever this widget was before we wrapped it: a saved user widget
 # (another plugin's wrapper) if one existed, else the ZLE builtin (.name).
 _oopsinput_delegate() {
@@ -99,14 +118,6 @@ _oopsinput_handle() {
     # *character*) when the split yields a single word. Regression-tested.
     local -a _oi_words
     _oi_words=( ${(z)BUFFER} )
-    # (z) preserves source quoting. Remove that quoting before taking the
-    # basename: for the documented `"$HOME/.../oopsinput" doctor` spelling,
-    # `${_oi_words[1]:t}` otherwise ends in `oopsinput"` and misses the status
-    # refresh. (Q) only removes quoting; it does not evaluate expansions.
-    local _oi_command=${(Q)_oi_words[1]}
-    if [[ ${_oi_command:t} == oopsinput && ${_oi_words[2]:-} == doctor ]]; then
-        _oopsinput_publish_status
-    fi
     local word=${_oi_words[1]:-}
     local out kind=unknown
     if [[ -n $word ]]; then
@@ -233,3 +244,9 @@ _oopsinput_handle() {
     done
 }
 _oopsinput_publish_status
+_oopsinput_precmd_clear_status
+autoload -Uz add-zsh-hook
+add-zsh-hook -d preexec _oopsinput_preexec_status 2>/dev/null
+add-zsh-hook -d precmd _oopsinput_precmd_clear_status 2>/dev/null
+add-zsh-hook preexec _oopsinput_preexec_status
+add-zsh-hook precmd _oopsinput_precmd_clear_status

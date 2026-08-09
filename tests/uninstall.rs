@@ -75,6 +75,30 @@ fn end_marker_before_begin_refuses_and_leaves_file_untouched() {
 }
 
 #[test]
+fn marker_text_joined_to_a_user_line_is_not_an_ownership_receipt() {
+    // This is the exact corrupted shape produced by the pre-fix installer
+    // when `.zshrc` had no final newline. Treating the substring as a marker
+    // would delete the user's preceding bytes during uninstall.
+    let original = "export KEEP_ME=1# >>> oopsinput >>>\nsource plugin\n# <<< oopsinput <<<\n";
+    let (ok, result) = run_uninstall(original);
+    assert!(!ok, "an embedded marker must be refused as damaged");
+    assert_eq!(result, original, "refusal changed the user's shell file");
+}
+
+#[test]
+fn newline_receipt_does_not_merge_a_later_user_suffix() {
+    let installed = "export FIRST=1\n# >>> oopsinput >>>\n\
+                     # oopsinput: restore preceding no-final-newline\n\
+                     source plugin\n# <<< oopsinput <<<\nexport SECOND=2\n";
+    let (ok, result) = run_uninstall(installed);
+    assert!(ok, "healthy block with a later user line must uninstall");
+    assert_eq!(
+        result, "export FIRST=1\nexport SECOND=2\n",
+        "restoring the old final-byte shape merged two user commands"
+    );
+}
+
+#[test]
 fn no_block_is_a_clean_noop() {
     let original = "just a normal zshrc\nwith lines\n";
     let (ok, result) = run_uninstall(original);
@@ -170,6 +194,88 @@ fn fresh_install_uninstalls_runtime_artifacts_but_keeps_config_and_state() {
     assert!(
         state.exists(),
         "uninstall deliberately keeps recorded state"
+    );
+
+    cleanup(&home);
+}
+
+#[test]
+fn install_update_uninstall_preserves_zshrc_without_final_newline() {
+    // Reproduced on 2026-08-08: the marker joined the original final line,
+    // making zsh report a parse error; uninstall then removed that user line
+    // and overwrote the only good backup with the corrupted file.
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let home = std::env::temp_dir().join(format!(
+        "oopsinput-uninst-no-final-newline-{}-{id}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    let original = b"export OOPSINPUT_PROBE=preserve_me";
+    std::fs::write(home.join(".zshrc"), original).unwrap();
+
+    let fake_bin = home.join("fake-oopsinput");
+    let fake_plugin = home.join("fake-oopsinput.zsh");
+    std::fs::write(&fake_bin, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(&fake_plugin, "# fake plugin\n").unwrap();
+
+    let install = || {
+        Command::new("zsh")
+            .arg(install_script())
+            .env("HOME", &home)
+            .env("OOPSINPUT_BIN_SRC", &fake_bin)
+            .env("OOPSINPUT_PLUGIN_SRC", &fake_plugin)
+            .env_remove("XDG_CONFIG_HOME")
+            .output()
+            .expect("run install.zsh")
+    };
+    for pass in 1..=2 {
+        let out = install();
+        assert!(
+            out.status.success(),
+            "install pass {pass} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let installed_zshrc = home.join(".zshrc");
+    let installed = std::fs::read(&installed_zshrc).unwrap();
+    assert!(
+        installed.starts_with(b"export OOPSINPUT_PROBE=preserve_me\n# >>> oopsinput >>>\n"),
+        "marker was not separated from the original line: {installed:?}"
+    );
+    assert!(
+        installed
+            .windows(b"# oopsinput: restore preceding no-final-newline".len())
+            .any(|window| window == b"# oopsinput: restore preceding no-final-newline"),
+        "newline restoration receipt missing"
+    );
+    let syntax = Command::new("zsh")
+        .args(["-n", installed_zshrc.to_str().unwrap()])
+        .output()
+        .expect("parse installed zshrc");
+    assert!(
+        syntax.status.success(),
+        "installed zshrc is not parseable: {}",
+        String::from_utf8_lossy(&syntax.stderr)
+    );
+    assert_eq!(
+        std::fs::read(home.join(".zshrc.oopsinput-backup")).unwrap(),
+        original,
+        "repeat install overwrote the original recovery copy"
+    );
+
+    let out = uninstall(&home);
+    assert!(
+        out.status.success(),
+        "uninstall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(home.join(".zshrc")).unwrap(), original);
+    assert_eq!(
+        std::fs::read(home.join(".zshrc.oopsinput-backup")).unwrap(),
+        original,
+        "uninstall overwrote the good install backup"
     );
 
     cleanup(&home);

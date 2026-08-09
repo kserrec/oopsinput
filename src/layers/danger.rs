@@ -33,8 +33,12 @@ pub struct Analysis {
 const MAX_TARGETS: usize = 8;
 
 impl Analysis {
+    pub fn has(&self, code: &str) -> bool {
+        self.codes.contains(&code)
+    }
+
     fn note(&mut self, code: &'static str) {
-        if !self.codes.contains(&code) {
+        if !self.has(code) {
             self.codes.push(code);
         }
     }
@@ -835,6 +839,11 @@ mod tests {
         let a = run("rm -rf ./x && ls /");
         assert_eq!(a.codes, ["fs.rm_recursive", "fs.rm_force"]);
         assert!(!a.catastrophic);
+
+        // Regression (bughunt 2026-08-08): a newline already present in the
+        // initial ZLE buffer is a command separator, not PS2 continuation
+        // input. The second command must receive its own danger analysis.
+        assert_eq!(codes("echo harmless\ngit reset --hard"), ["git.reset_hard"]);
     }
 
     #[test]

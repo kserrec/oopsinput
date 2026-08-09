@@ -284,6 +284,26 @@ fn doctor_sees_the_installed_plugin_and_all_live_accept_widgets() {
 }
 
 #[test]
+fn doctor_detects_when_later_plugin_replaces_every_accept_widget() {
+    // Real-shell reproduction (2026-08-08): the exported load-time snapshot
+    // stayed at 4/4 after all live widgets were replaced, and doctor returned
+    // ready. preexec must refresh independently of those missing wrappers.
+    let s = Session::new(None, &[]);
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_oopsinput"));
+    let command = format!("{binary:?} doctor");
+    let replace = "_after_oopsinput() { zle .accept-line }; for w in accept-line accept-line-and-down-history accept-and-hold accept-and-infer-next-history; do zle -N $w _after_oopsinput; done";
+    let out = s.run(&[replace, &command]);
+    assert!(
+        out.contains("widgets:    0/4 wrapped"),
+        "doctor trusted a stale snapshot:\n{out}"
+    );
+    assert!(
+        out.contains("result:     problems found"),
+        "doctor returned ready without live wrappers:\n{out}"
+    );
+}
+
+#[test]
 fn missing_binary_diagnostic_escapes_hostile_path() {
     // Audit finding #4: the load diagnostic prints the env-supplied binary
     // path; a value carrying terminal escape sequences or bidi controls must
@@ -665,6 +685,19 @@ fn prompt_ctrl_c_cancels_on_real_tty() {
     );
 }
 
+#[test]
+fn long_csi_final_y_is_not_consent_on_real_tty() {
+    // Reproduced before the fix with this exact PTY input: the CSI final `y`
+    // was returned to the outer prompt loop and produced choice=Correct. The
+    // following ordinary `n` is now the only decision key.
+    let out = run_prompt_seam(b"\x1b[1111111111111111yn");
+    assert!(
+        out.contains("choice=Original"),
+        "CSI final byte became consent:\n{out}"
+    );
+    assert!(!out.contains("choice=Correct"), "false consent:\n{out}");
+}
+
 // ---- M3 warning UI: the flagship pair, end-to-end ----
 
 /// A repo with one committed file that has uncommitted modifications —
@@ -717,6 +750,42 @@ fn warn_session(
     let repo = make_repo(&s, dirty);
     let cd = format!("cd {repo:?}\recho {marker}\r");
     (s, repo, cd)
+}
+
+#[test]
+fn pasted_initial_buffer_newline_analyzes_every_command() {
+    // Reproduced in a real ZLE shell on 2026-08-08: newline was tokenized as
+    // spacing, so this buffer silently ran both `echo` and `git reset --hard`
+    // and discarded the fixture's tracked modification. A custom widget sets
+    // one initial BUFFER containing both lines; this is not PS2 continuation.
+    let (s, repo, cd) = warn_session(true, "marker-multiline", &[]);
+    let mut zshrc = std::fs::OpenOptions::new()
+        .append(true)
+        .open(s.dir.join(".zshrc"))
+        .unwrap();
+    zshrc
+        .write_all(
+            br#"_oopsinput_multiline_probe() {
+    BUFFER=$'echo pty-pasted-first\ngit reset --hard'
+    zle accept-line
+}
+zle -N _oopsinput_multiline_probe
+bindkey '^T' _oopsinput_multiline_probe
+"#,
+        )
+        .unwrap();
+
+    let out = s.run_staged(&[
+        ("PTYTEST%", 0, &cd),
+        ("marker-multiline", 0, "\u{14}"),
+        ("[e]dit", 0, "c"),
+    ]);
+    assert!(out.contains("git reset --hard"), "warning missing:\n{out}");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+        "DIRTY\n",
+        "the second command ran instead of being caught"
+    );
 }
 
 #[test]

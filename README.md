@@ -53,7 +53,8 @@ It does not:
   possible consequence;
 - intercept Bash, Fish, non-interactive scripts, or commands launched by agent
   subprocesses;
-- analyze continuation lines entered at Zsh's `PS2` prompt;
+- re-analyze continuation lines entered later at Zsh's `PS2` prompt (a pasted
+  or prefilled initial multi-line ZLE buffer is analyzed in full);
 - execute, expand, source, or evaluate the command during analysis;
 - send telemetry or use a cloud service;
 - enable danger warnings by default.
@@ -114,15 +115,22 @@ Before you run the installer, know exactly what it changes:
 - copies the release binary and plugin to the paths listed above;
 - creates a user-only config with `mode = suggest` only when no config already
   exists;
-- backs up an existing `~/.zshrc` to `~/.zshrc.oopsinput-backup`;
+- backs up an existing `~/.zshrc` byte-for-byte to
+  `~/.zshrc.oopsinput-backup` and keeps that original backup across updates
+  and uninstall;
 - adds one clearly marked source block to `~/.zshrc`.
 
 It refuses symbolic-link and non-regular destinations. On a fresh install it
 also refuses to overwrite same-named runtime files; a healthy marked
-`~/.zshrc` block is the ownership receipt that permits later updates. Rerunning
-the installer atomically updates the installed binary and plugin without
+`~/.zshrc` block, with both markers on exact standalone lines, is the ownership
+receipt that permits later updates. Rerunning the installer atomically updates
+the installed binary and plugin without
 changing an existing config. The installed shell hook does not depend on the
-checkout remaining in place.
+checkout remaining in place. A fresh install stages the shell edit and backup
+before installing runtime files, and removes newly installed runtime files if
+the final shell replacement fails; an interrupted failure cannot strand files
+that a retry and uninstaller both refuse. A `.zshrc` with no final newline is
+restored with that byte shape on uninstall.
 
 Open a new terminal, then verify the pieces that `doctor` currently checks:
 
@@ -131,9 +139,11 @@ Open a new terminal, then verify the pieces that `doctor` currently checks:
 ```
 
 `doctor` checks the marked shell block and installed plugin file, all four
-live accept-widget wrappers in that terminal, config validity and effective
-mode, the configured Ollama model when one is enabled, and `0700`/`0600` state
-permissions. A state directory that has not been created yet is valid. The
+accept-widget wrappers from a snapshot refreshed immediately before the
+doctor process in that terminal (stale snapshots fail), config validity and
+effective mode, the configured Ollama model when one is enabled, and
+`0700`/`0600` state permissions. A state directory that has not been created
+yet is valid. The
 check is read-only: it never installs, creates state, or repairs permissions.
 It prints `result: ready` and exits zero only when every required check passes;
 otherwise it prints `result: problems found` and exits nonzero.

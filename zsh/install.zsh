@@ -21,6 +21,7 @@ ZSHRC=$HOME/.zshrc
 ZSHRC_BACKUP=$HOME/.zshrc.oopsinput-backup
 MARK_BEGIN="# >>> oopsinput >>>"
 MARK_END="# <<< oopsinput <<<"
+MARK_RESTORE_NO_FINAL="# oopsinput: restore preceding no-final-newline"
 
 # Render terminal controls visibly. Zsh's (V) handles C0/C1/DEL, while the
 # explicit pass covers the Unicode bidi and invisible-format characters that
@@ -73,17 +74,29 @@ fi
 
 # Validate the marker block before installing anything. Multiple, missing, or
 # reversed markers make the edit boundary ambiguous, so leave ~/.zshrc alone.
-integer B_COUNT=0 E_COUNT=0 B=0 E=0
+integer B_COUNT=0 E_COUNT=0 B=0 E=0 ADDED_SEPARATOR=0
 if [[ -f $ZSHRC ]]; then
     B_COUNT=$(grep -cF -- $MARK_BEGIN $ZSHRC || true)
     E_COUNT=$(grep -cF -- $MARK_END $ZSHRC || true)
-    if (( B_COUNT != E_COUNT || B_COUNT > 1 )); then
+    integer B_EXACT E_EXACT
+    B_EXACT=$(grep -cxF -- $MARK_BEGIN $ZSHRC || true)
+    E_EXACT=$(grep -cxF -- $MARK_END $ZSHRC || true)
+    if (( B_COUNT != B_EXACT || E_COUNT != E_EXACT || B_COUNT != E_COUNT || B_COUNT > 1 )); then
         fail "oopsinput block markers in $ZSHRC are damaged; refusing to edit the file"
     fi
     if (( B_COUNT == 1 )); then
-        B=$(grep -nF -m1 -- $MARK_BEGIN $ZSHRC | cut -d: -f1)
-        E=$(grep -nF -m1 -- $MARK_END $ZSHRC | cut -d: -f1)
+        B=$(grep -nxF -m1 -- $MARK_BEGIN $ZSHRC | cut -d: -f1)
+        E=$(grep -nxF -m1 -- $MARK_END $ZSHRC | cut -d: -f1)
         (( E >= B )) || fail "oopsinput block markers in $ZSHRC are out of order; refusing to edit the file"
+        integer RESTORE_COUNT
+        RESTORE_COUNT=$(sed -n "${B},${E}p" -- $ZSHRC | grep -cxF -- $MARK_RESTORE_NO_FINAL || true)
+        (( RESTORE_COUNT <= 1 )) || fail "oopsinput newline receipt in $ZSHRC is damaged; refusing to edit the file"
+        ADDED_SEPARATOR=$RESTORE_COUNT
+    elif [[ -s $ZSHRC ]]; then
+        # Command substitution strips a final newline. Any nonempty result
+        # therefore means the existing final byte is not newline (zsh startup
+        # files cannot meaningfully contain NUL).
+        [[ -z $(tail -c 1 -- $ZSHRC) ]] || ADDED_SEPARATOR=1
     fi
 fi
 
@@ -116,35 +129,29 @@ fi
 mkdir -p -- $BIN_DIR $PLUGIN_DIR
 chmod 700 -- $PLUGIN_DIR
 
-# Stage complete files beside their destinations, then rename them into place.
-# A shell pressing Enter during an update therefore sees either whole version,
-# never a partly-copied executable or plugin.
+# Stage every complete file before installing any runtime asset. In particular,
+# a backup or `.zshrc` staging failure must happen before fresh binary/plugin
+# destinations exist; otherwise the missing marker makes both retry and
+# uninstall correctly refuse those now-stranded paths.
 BIN_TMP=""
 PLUGIN_TMP=""
 ZSHRC_TMP=""
+integer FRESH_BIN_INSTALLED=0 FRESH_PLUGIN_INSTALLED=0
 cleanup() {
     [[ -z ${BIN_TMP:-} ]] || rm -f -- $BIN_TMP
     [[ -z ${PLUGIN_TMP:-} ]] || rm -f -- $PLUGIN_TMP
     [[ -z ${ZSHRC_TMP:-} ]] || rm -f -- $ZSHRC_TMP
+    if (( B_COUNT == 0 )); then
+        (( FRESH_BIN_INSTALLED == 0 )) || rm -f -- $BIN_DST
+        (( FRESH_PLUGIN_INSTALLED == 0 )) || rm -f -- $PLUGIN_DST
+    fi
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
-BIN_TMP=$(mktemp $BIN_DIR/.oopsinput.install.XXXXXX)
-PLUGIN_TMP=$(mktemp $PLUGIN_DIR/.oopsinput.zsh.install.XXXXXX)
-
-cp -- $BIN_SRC $BIN_TMP
-chmod 755 -- $BIN_TMP
-cp -- $PLUGIN_SRC $PLUGIN_TMP
-chmod 600 -- $PLUGIN_TMP
-mv -f -- $BIN_TMP $BIN_DST
-BIN_TMP=""
-mv -f -- $PLUGIN_TMP $PLUGIN_DST
-PLUGIN_TMP=""
-print -r -- "installed binary: $(_oopsinput_escape_for_display "$BIN_DST")"
-print -r -- "installed plugin: $(_oopsinput_escape_for_display "$PLUGIN_DST")"
 
 write_plugin_block() {
     print -r -- $MARK_BEGIN
+    (( ADDED_SEPARATOR == 0 )) || print -r -- $MARK_RESTORE_NO_FINAL
     print -r -- "source ${(q)PLUGIN_DST}"
     print -r -- $MARK_END
 }
@@ -154,28 +161,47 @@ write_plugin_block() {
 # preserve the shell file's mode.
 ZSHRC_TMP=$(mktemp $HOME/.zshrc.oopsinput.XXXXXX)
 if [[ -f $ZSHRC ]]; then
-    cp -p -- $ZSHRC $ZSHRC_BACKUP
     if (( B_COUNT == 1 )); then
-        {
-            (( B > 1 )) && sed -n "1,$(( B - 1 ))p" -- $ZSHRC
-            write_plugin_block
-            sed -n "$(( E + 1 )),\$p" -- $ZSHRC
-        } > $ZSHRC_TMP
+        : > $ZSHRC_TMP
+        (( B <= 1 )) || sed -n "1,$(( B - 1 ))p" -- $ZSHRC >> $ZSHRC_TMP
+        write_plugin_block >> $ZSHRC_TMP
+        sed -n "$(( E + 1 )),\$p" -- $ZSHRC >> $ZSHRC_TMP
     else
-        {
-            sed -n '1,$p' -- $ZSHRC
-            write_plugin_block
-        } > $ZSHRC_TMP
+        sed -n '1,$p' -- $ZSHRC > $ZSHRC_TMP
+        (( ADDED_SEPARATOR == 0 )) || print -r -- "" >> $ZSHRC_TMP
+        write_plugin_block >> $ZSHRC_TMP
     fi
     chmod --reference=$ZSHRC $ZSHRC_TMP
-    print -r -- "backed up $(_oopsinput_escape_for_display "$ZSHRC") -> $(_oopsinput_escape_for_display "$ZSHRC_BACKUP")"
+    if (( B_COUNT == 0 )) || [[ ! -e $ZSHRC_BACKUP ]]; then
+        cp -p -- $ZSHRC $ZSHRC_BACKUP
+        print -r -- "backed up $(_oopsinput_escape_for_display "$ZSHRC") -> $(_oopsinput_escape_for_display "$ZSHRC_BACKUP")"
+    else
+        print -r -- "kept original backup: $(_oopsinput_escape_for_display "$ZSHRC_BACKUP")"
+    fi
 else
     write_plugin_block > $ZSHRC_TMP
     chmod 600 -- $ZSHRC_TMP
 fi
+
+BIN_TMP=$(mktemp $BIN_DIR/.oopsinput.install.XXXXXX)
+PLUGIN_TMP=$(mktemp $PLUGIN_DIR/.oopsinput.zsh.install.XXXXXX)
+cp -- $BIN_SRC $BIN_TMP
+chmod 755 -- $BIN_TMP
+cp -- $PLUGIN_SRC $PLUGIN_TMP
+chmod 600 -- $PLUGIN_TMP
+(( B_COUNT != 0 )) || FRESH_BIN_INSTALLED=1
+mv -f -- $BIN_TMP $BIN_DST
+BIN_TMP=""
+(( B_COUNT != 0 )) || FRESH_PLUGIN_INSTALLED=1
+mv -f -- $PLUGIN_TMP $PLUGIN_DST
+PLUGIN_TMP=""
+
 mv -f -- $ZSHRC_TMP $ZSHRC
 ZSHRC_TMP=""
 trap - EXIT HUP INT TERM
+
+print -r -- "installed binary: $(_oopsinput_escape_for_display "$BIN_DST")"
+print -r -- "installed plugin: $(_oopsinput_escape_for_display "$PLUGIN_DST")"
 
 if (( B_COUNT == 1 )); then
     print -r -- "updated plugin block in $(_oopsinput_escape_for_display "$ZSHRC")"

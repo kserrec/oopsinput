@@ -44,7 +44,7 @@ pub struct Event {
     pub ctx_target_entries: Option<u32>,
     /// What the user did at a visible L2+ intervention (SPEC §4 — central to
     /// evaluation, distinct from the decision): edited | cancelled |
-    /// ran_unchanged. Absent when nothing was shown.
+    /// ran_unchanged | timed_out. Absent when nothing was shown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<&'static str>,
 }

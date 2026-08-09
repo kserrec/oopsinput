@@ -261,6 +261,24 @@ fn damaged_marker_block_refuses_before_installing_assets() {
 }
 
 #[test]
+fn marker_text_joined_to_a_user_line_is_refused_before_installing_assets() {
+    // Upgrade regression for the no-final-newline bug: an older broken
+    // install could join the begin marker to the user's last line. It is not
+    // an ownership receipt and must never authorize deleting that line.
+    let h = FakeHome::new();
+    let damaged = "export KEEP_ME=1# >>> oopsinput >>>\nsource old-plugin\n# <<< oopsinput <<<\n";
+    std::fs::write(h.dir.join(".zshrc"), damaged).unwrap();
+
+    assert!(!h.run_install(), "embedded marker must be refused");
+    assert_eq!(
+        std::fs::read_to_string(h.dir.join(".zshrc")).unwrap(),
+        damaged
+    );
+    assert!(!h.installed_bin().exists());
+    assert!(!h.installed_plugin().exists());
+}
+
+#[test]
 fn fresh_install_does_not_claim_a_preexisting_binary() {
     let h = FakeHome::new();
     std::fs::create_dir_all(h.installed_bin().parent().unwrap()).unwrap();
@@ -289,6 +307,31 @@ fn fresh_install_does_not_claim_a_preexisting_plugin() {
     assert_eq!(
         std::fs::read_to_string(h.installed_plugin()).unwrap(),
         "someone else's plugin\n"
+    );
+}
+
+#[test]
+fn backup_failure_happens_before_assets_and_retry_remains_possible() {
+    // Reproduced on 2026-08-08: runtime assets were installed before this
+    // backup copy failed. The absent marker then made both retry and uninstall
+    // refuse the stranded files.
+    let h = FakeHome::new();
+    let zshrc = h.dir.join(".zshrc");
+    let backup = h.dir.join(".zshrc.oopsinput-backup");
+    std::fs::write(&zshrc, "# original\n").unwrap();
+    std::fs::write(&backup, "# existing backup\n").unwrap();
+    std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+    let failed = h.run_install_output(None);
+    assert!(!failed.status.success(), "unwritable backup must fail");
+    assert!(!h.installed_bin().exists(), "binary was stranded");
+    assert!(!h.installed_plugin().exists(), "plugin was stranded");
+    assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), "# original\n");
+
+    std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        h.run_install(),
+        "fixing the backup permission must make an ordinary retry succeed"
     );
 }
 

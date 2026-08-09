@@ -175,13 +175,18 @@ does not ask for credentials. On a fresh install it leaves every existing
 binary or plugin destination untouched, including dangling symbolic links and
 same-named regular files. It also leaves any existing config path byte-exact.
 
-A healthy marked block in `~/.zshrc` is the ownership receipt that authorizes
-later atomic replacement of regular installed binary and plugin files. No
+A healthy marked block with exact standalone lines in `~/.zshrc` is the
+ownership receipt that authorizes later atomic replacement of regular installed
+binary and plugin files. No
 marked block means a fresh install and cannot authorize overwriting an existing
 runtime destination. Duplicated, reversed, mismatched, or otherwise damaged
 markers cause refusal before installation changes anything. The installer
 refuses symbolic-link and non-regular shell, backup, binary, and plugin
-destinations.
+destinations. It stages the shell edit and backup before installing fresh
+runtime assets, and removes any newly placed asset if the final shell
+replacement fails. The backup preserves the original bytes (including no
+final newline), is not overwritten by later installs, and uninstall restores
+that newline shape while retaining the backup.
 
 The uninstaller uses the same receipt. It removes the marked block and runtime
 files it owns, but deliberately keeps configuration, state, the shell backup,
@@ -190,7 +195,9 @@ for the exact lifecycle.
 
 `oopsinput doctor` diagnoses both sides of the installation contract: the
 healthy marked block plus regular installed plugin file, and the four live
-accept widgets published by the current interactive shell. It is an
+accept widgets published by the current interactive shell in a snapshot
+refreshed immediately before the doctor process; a stale load-time snapshot is
+reported as a problem. It is an
 inspection command, not an installer or repair path.
 
 ### The optional model is untrusted and loopback-only

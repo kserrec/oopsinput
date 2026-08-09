@@ -49,7 +49,9 @@ mkdir -p -- $GATE_HOME
 ORIGINAL_ZSHRC=$GATE_ROOT/original.zshrc
 {
     print -r -- "# clean-machine lifecycle fixture"
-    print -r -- "PS1='LIFECYCLE%% '"
+    # No final newline: a valid startup-file shape the release gate once
+    # missed, allowing install to join its marker onto the user's last line.
+    print -rn -- "PS1='LIFECYCLE%% '"
 } > $ORIGINAL_ZSHRC
 cp -- $ORIGINAL_ZSHRC $GATE_HOME/.zshrc
 
@@ -64,6 +66,7 @@ run_clean() {
         -u OOPSINPUT_BIN \
         -u OOPSINPUT_PLUGIN_ACTIVE \
         -u OOPSINPUT_WRAPPED_WIDGETS \
+        -u OOPSINPUT_WIDGET_STATUS_FRESH \
         -u OOPSINPUT_TEST_DEADLINE_MS \
         -u OOPSINPUT_TEST_HANG \
         -u OOPSINPUT_TEST_OLLAMA_PORT \

@@ -18,6 +18,7 @@ fn doctor_command(home: &Path, xdg: Option<&Path>) -> Command {
         .env_remove("XDG_STATE_HOME")
         .env_remove("OOPSINPUT_PLUGIN_ACTIVE")
         .env_remove("OOPSINPUT_WRAPPED_WIDGETS")
+        .env_remove("OOPSINPUT_WIDGET_STATUS_FRESH")
         .env_remove("OOPSINPUT_TEST_OLLAMA_PORT");
     match xdg {
         Some(dir) => cmd.env("XDG_CONFIG_HOME", dir),
@@ -64,7 +65,8 @@ fn healthy_setup(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
 fn healthy_doctor(home: &Path, xdg: &Path) -> Command {
     let mut cmd = doctor_command(home, Some(xdg));
     cmd.env("OOPSINPUT_PLUGIN_ACTIVE", "1")
-        .env("OOPSINPUT_WRAPPED_WIDGETS", ALL_WRAPPED);
+        .env("OOPSINPUT_WRAPPED_WIDGETS", ALL_WRAPPED)
+        .env("OOPSINPUT_WIDGET_STATUS_FRESH", "1");
     cmd
 }
 
@@ -300,6 +302,26 @@ fn doctor_rejects_an_invalid_config_and_names_each_safe_issue() {
 }
 
 #[test]
+fn doctor_rejects_an_oversized_config_instead_of_validating_a_prefix() {
+    // Reproduced on 2026-08-08: the loader read exactly 64 KiB of comments,
+    // silently missed `mode = confirm` after the cap, and doctor reported the
+    // file valid while displaying Shadow.
+    let (base, home, xdg) = healthy_setup("config-oversized");
+    let config = format!("{}mode = confirm\n", "# padding\n".repeat(8_000));
+    assert!(config.len() > 64 * 1_024, "fixture must cross the read cap");
+    std::fs::write(xdg.join("oopsinput/config"), config).unwrap();
+
+    let out = healthy_doctor(&home, &xdg).output().expect("run doctor");
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("exceeds 65536-byte limit"), "{stdout}");
+    assert!(stdout.contains("mode:       shadow"), "{stdout}");
+    assert!(!stdout.contains("(present) — valid"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
 fn doctor_rejects_missing_plugin_artifact_despite_a_marker_block() {
     let (base, home, xdg) = healthy_setup("plugin-missing");
     std::fs::remove_file(home.join(".local/share/oopsinput/oopsinput.zsh")).unwrap();
@@ -317,18 +339,60 @@ fn doctor_rejects_missing_plugin_artifact_despite_a_marker_block() {
 }
 
 #[test]
+fn doctor_rejects_marker_text_joined_to_a_user_line() {
+    // A pre-fix no-final-newline install could create this corrupted shape.
+    // Doctor must not call a substring match a valid ownership receipt.
+    let (base, home, xdg) = healthy_setup("joined-marker");
+    std::fs::write(
+        home.join(".zshrc"),
+        "export KEEP_ME=1# >>> oopsinput >>>\nsource plugin\n# <<< oopsinput <<<\n",
+    )
+    .unwrap();
+
+    let out = healthy_doctor(&home, &xdg).output().expect("run doctor");
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("marked block") && stdout.contains("invalid"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("result:     problems found"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
 fn doctor_rejects_a_partially_wrapped_live_shell() {
     let (base, home, xdg) = healthy_setup("widgets-partial");
     let mut cmd = doctor_command(&home, Some(&xdg));
-    cmd.env("OOPSINPUT_PLUGIN_ACTIVE", "1").env(
-        "OOPSINPUT_WRAPPED_WIDGETS",
-        "accept-line,accept-line-and-down-history,accept-and-hold",
-    );
+    cmd.env("OOPSINPUT_PLUGIN_ACTIVE", "1")
+        .env(
+            "OOPSINPUT_WRAPPED_WIDGETS",
+            "accept-line,accept-line-and-down-history,accept-and-hold",
+        )
+        .env("OOPSINPUT_WIDGET_STATUS_FRESH", "1");
 
     let out = cmd.output().expect("run doctor");
     assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("widgets:    3/4 wrapped"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn doctor_rejects_a_stale_widget_snapshot() {
+    let (base, home, xdg) = healthy_setup("widgets-stale");
+    let mut cmd = doctor_command(&home, Some(&xdg));
+    cmd.env("OOPSINPUT_PLUGIN_ACTIVE", "1")
+        .env("OOPSINPUT_WRAPPED_WIDGETS", ALL_WRAPPED)
+        .env("OOPSINPUT_WIDGET_STATUS_FRESH", "0");
+
+    let out = cmd.output().expect("run doctor");
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("live status unavailable"), "{stdout}");
+    assert!(stdout.contains("result:     problems found"), "{stdout}");
 
     let _ = std::fs::remove_dir_all(&base);
 }

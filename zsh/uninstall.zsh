@@ -14,6 +14,7 @@ PLUGIN_DIR=$HOME/.local/share/oopsinput
 PLUGIN=$PLUGIN_DIR/oopsinput.zsh
 MARK_BEGIN="# >>> oopsinput >>>"
 MARK_END="# <<< oopsinput <<<"
+MARK_RESTORE_NO_FINAL="# oopsinput: restore preceding no-final-newline"
 
 # Keep every path printed by the uninstaller inert in a terminal. Zsh's (V)
 # covers control bytes; the explicit pass covers bidi and invisible formats.
@@ -49,34 +50,56 @@ fail() {
 [[ ! -e $PLUGIN_DIR || -d $PLUGIN_DIR ]] || fail "refusing to enter non-directory at $PLUGIN_DIR"
 [[ ! -e $PLUGIN || -f $PLUGIN || -L $PLUGIN ]] || fail "refusing to remove non-file at $PLUGIN"
 
-integer B_COUNT=0 E_COUNT=0 B=0 E=0
+integer B_COUNT=0 E_COUNT=0 B=0 E=0 ADDED_SEPARATOR=0
 if [[ -f $ZSHRC ]]; then
     B_COUNT=$(grep -cF -- $MARK_BEGIN $ZSHRC || true)
     E_COUNT=$(grep -cF -- $MARK_END $ZSHRC || true)
-    if (( B_COUNT != E_COUNT || B_COUNT > 1 )); then
+    integer B_EXACT E_EXACT
+    B_EXACT=$(grep -cxF -- $MARK_BEGIN $ZSHRC || true)
+    E_EXACT=$(grep -cxF -- $MARK_END $ZSHRC || true)
+    if (( B_COUNT != B_EXACT || E_COUNT != E_EXACT || B_COUNT != E_COUNT || B_COUNT > 1 )); then
         fail "oopsinput block markers in $ZSHRC are damaged; refusing to edit the file"
     fi
     if (( B_COUNT == 1 )); then
-        B=$(grep -nF -m1 -- $MARK_BEGIN $ZSHRC | cut -d: -f1)
-        E=$(grep -nF -m1 -- $MARK_END $ZSHRC | cut -d: -f1)
+        B=$(grep -nxF -m1 -- $MARK_BEGIN $ZSHRC | cut -d: -f1)
+        E=$(grep -nxF -m1 -- $MARK_END $ZSHRC | cut -d: -f1)
         (( E >= B )) || fail "oopsinput block markers in $ZSHRC are out of order; refusing to edit the file"
+        integer RESTORE_COUNT
+        RESTORE_COUNT=$(sed -n "${B},${E}p" -- $ZSHRC | grep -cxF -- $MARK_RESTORE_NO_FINAL || true)
+        (( RESTORE_COUNT <= 1 )) || fail "oopsinput newline receipt in $ZSHRC is damaged; refusing to edit the file"
+        ADDED_SEPARATOR=$RESTORE_COUNT
+        (( ADDED_SEPARATOR == 0 || B > 1 )) || fail "oopsinput newline receipt in $ZSHRC has no preceding content; refusing to edit the file"
     fi
 fi
 
 ZSHRC_TMP=""
+ZSHRC_SUFFIX_TMP=""
 cleanup() {
     [[ -z ${ZSHRC_TMP:-} ]] || rm -f -- $ZSHRC_TMP
+    [[ -z ${ZSHRC_SUFFIX_TMP:-} ]] || rm -f -- $ZSHRC_SUFFIX_TMP
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 if (( B_COUNT == 1 )); then
     ZSHRC_TMP=$(mktemp $HOME/.zshrc.oopsinput.XXXXXX)
-    cp -p -- $ZSHRC $ZSHRC_BACKUP
-    {
-        (( B > 1 )) && sed -n "1,$(( B - 1 ))p" -- $ZSHRC
-        sed -n "$(( E + 1 )),\$p" -- $ZSHRC
-    } > $ZSHRC_TMP
+    if [[ ! -e $ZSHRC_BACKUP ]]; then
+        cp -p -- $ZSHRC $ZSHRC_BACKUP
+    fi
+    : > $ZSHRC_TMP
+    (( B <= 1 )) || sed -n "1,$(( B - 1 ))p" -- $ZSHRC >> $ZSHRC_TMP
+    ZSHRC_SUFFIX_TMP=$(mktemp $HOME/.zshrc.oopsinput-suffix.XXXXXX)
+    sed -n "$(( E + 1 )),\$p" -- $ZSHRC > $ZSHRC_SUFFIX_TMP
+    if (( ADDED_SEPARATOR == 1 )) && [[ ! -s $ZSHRC_SUFFIX_TMP ]]; then
+        # The installer added exactly this one byte to put its marker on a
+        # separate parseable line. Restore the old final-byte shape only while
+        # the block is still last; a user-added suffix needs that separator or
+        # its first line would merge into the preceding command.
+        truncate -s -1 -- $ZSHRC_TMP
+    fi
+    sed -n '1,$p' -- $ZSHRC_SUFFIX_TMP >> $ZSHRC_TMP
+    rm -f -- $ZSHRC_SUFFIX_TMP
+    ZSHRC_SUFFIX_TMP=""
     chmod --reference=$ZSHRC $ZSHRC_TMP
     mv -f -- $ZSHRC_TMP $ZSHRC
     ZSHRC_TMP=""

@@ -29,10 +29,8 @@ pub struct GitFacts {
 
 pub struct TargetFact {
     pub exists: bool,
-    /// Collected as part of the fact set but not consumed by policy's
-    /// current matrix — only tests read it today. Kept because a stat
-    /// already computes it and the M5 pilot may want it as evidence.
-    #[allow(dead_code)]
+    /// Whether the resolved target is a directory. Policy does not currently
+    /// consume this fact, but the inference request includes it as evidence.
     pub is_dir: bool,
     pub is_symlink: bool,
     /// Entry count for a directory target, capped at ENTRY_CAP.

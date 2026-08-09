@@ -40,8 +40,12 @@ oopsinput is three things working together:
    copy the binary into `~/.local/bin` and the plugin into
    `~/.local/share/oopsinput`, add/remove one clearly-marked block in
    `~/.zshrc`, and write a default config file on first install. The shell
-   edit is backed up; the marker block is also the receipt that authorizes
-   later updates and removal of the two installed runtime files.
+   edit is backed up byte-for-byte (including a missing final newline), and
+   the original backup is retained across updates and uninstall. The marker
+   block is also the receipt that authorizes later updates and removal of the
+   two installed runtime files. A fresh install stages the shell edit and
+   backup before runtime assets and removes newly installed assets if the
+   final shell replacement fails, so failure cannot strand unowned files.
 
 The trust and failure model in one sentence: the plugin treats the binary as
 something that can crash, hang, or be missing at any moment, and in every one
@@ -127,9 +131,11 @@ see §4.8 for the modes and how one is chosen. The release binary lands at
 `~/.local/share/oopsinput/oopsinput.zsh`, and the marked `~/.zshrc` block
 sources that installed copy. Moving or deleting the checkout therefore does
 not break a new shell. Rerunning the installer atomically updates both runtime
-files and migrates an older checkout-pointing block in place.
+files and migrates an older checkout-pointing block in place, while preserving
+the original pre-install shell backup.
 
-Before editing, the installer requires an unambiguous marker boundary and
+Before editing, the installer requires one exact, standalone marker boundary
+(marker text joined to a user line is damaged, never an ownership receipt) and
 refuses symbolic-link or non-regular destinations. On a fresh install it also
 refuses to overwrite same-named regular files: only an existing healthy marker
 block authorizes update behavior.
@@ -141,9 +147,11 @@ zsh/uninstall.zsh
 ```
 
 The uninstaller uses the same healthy marker block as its ownership receipt.
-It removes that block and the two installed runtime files, but preserves any
-unrecognized file in the plugin directory. Configuration and recorded state
-also remain; run `oopsinput purge` first when recorded state should be removed.
+It removes that block and the two installed runtime files, restores whether
+the preceding shell line originally lacked a final newline, and preserves any
+unrecognized file in the plugin directory. Configuration, the original shell
+backup, and recorded state remain; run `oopsinput purge` first when recorded
+state should be removed.
 
 ## 3. The zsh side, ground-up
 
@@ -154,8 +162,10 @@ Editor (ZLE)**. Every keypress runs a **widget** — a named editing function.
 Typing `a` runs the `self-insert` widget; pressing Enter runs the
 `accept-line` widget, which submits the buffer for execution. Crucially, zsh
 lets you *replace* a widget with your own shell function. That is the entire
-interception mechanism: no patched zsh, no traps, no preexec tricks — just
-widgets swapped for wrappers.
+command-interception mechanism: no patched zsh and no trap drives analysis,
+just widgets swapped for wrappers. A separate `preexec` hook refreshes only
+the read-only `doctor` status described below; it never sees the analysis
+payload or decides whether a command runs.
 
 Enter is not the only way to submit a buffer. The plugin wraps all four
 "accept" widgets (`accept-line`, `accept-line-and-down-history`,
@@ -165,10 +175,12 @@ keymap-independent, the same wrappers cover both Emacs and Vi modes.
 A child process cannot inspect the ZLE widgets in its parent shell. After
 wrapping, the plugin therefore publishes only a closed status vocabulary:
 `OOPSINPUT_PLUGIN_ACTIVE=1` and a comma-separated subset of those four static
-widget names in `OOPSINPUT_WRAPPED_WIDGETS`. It refreshes that status
-immediately before an interactively entered `oopsinput doctor` command, so
-`doctor` can verify the live adapter without receiving command text or
-user-defined widget names.
+widget names in `OOPSINPUT_WRAPPED_WIDGETS`. A load-time value is explicitly
+stale: a later plugin could replace the wrappers. The independent `preexec`
+hook refreshes the list immediately before an interactively entered
+`oopsinput doctor` process and marks that snapshot fresh; `precmd` invalidates
+it again at the next prompt. Doctor therefore refuses an old snapshot without
+receiving command text or user-defined widget names.
 
 ### What the wrapper does (`_oopsinput_handle` in `zsh/oopsinput.zsh`)
 
@@ -177,9 +189,10 @@ On each accepted buffer, the wrapper:
 1. **Passes through untouched** — without invoking the binary at all — if any
    of these hold: we're already inside a wrapped call (recursion guard via a
    dynamically-scoped `_OOPSINPUT_ACTIVE` variable), the buffer is empty or
-   whitespace-only, or this is a continuation line (`$CONTEXT != start` —
-   e.g. the second line of a command with an unclosed quote, typed at the
-   `PS2` prompt). Only the initial line of a command is analyzed.
+   whitespace-only, or this is a continuation buffer (`$CONTEXT != start` —
+   e.g. more text for an unclosed quote, typed at the `PS2` prompt). The
+   initial ZLE buffer is analyzed in full, including embedded newlines from a
+   paste; only later PS2 submissions bypass analysis.
 2. **Resolves the command word.** Only the live shell knows the user's
    aliases and functions, so the plugin asks `whence -w` what the first word
    is (`alias`, `function`, `builtin`, `command`, `hashed`, `reserved`, or
@@ -272,7 +285,7 @@ All were real bugs, now pinned by tests:
 The Rust modules run analysis strictly cheapest-first, and each layer can be
 read on its own:
 
-### 4.1 `src/main.rs` — dispatch, watchdog, the `check` path
+### 4.1 `src/main.rs` + `src/doctor.rs` — dispatch, checking, and diagnosis
 
 Hand-rolled subcommand dispatch (no CLI-parsing dependency; SPEC §12):
 `version`, `check`, `report`, `purge`, `doctor`, `help`.
@@ -325,17 +338,19 @@ builds** (`#[cfg(debug_assertions)]`, meaning the code is compiled out of
 release binaries entirely). The PTY suite uses them to prove the watchdog
 works end-to-end; a release binary has a fixed deadline and no hang hook.
 
-`doctor` is a read-only setup diagnosis. It checks the version and whether a
-real executable `zsh` is on PATH (via direct file-metadata lookup — never by
-asking a shell, per SPEC §9); the unique marked block in regular `~/.zshrc`
-and the regular installed plugin file; all four live accept-widget wrappers;
-the config file, every parser issue, any `OOPSINPUT_MODE` override, and the
-effective mode; the optional Ollama peer and configured model; and exact
-`0700`/`0600` modes on the state directory and every owned state file. A
-missing state directory is healthy because the first write creates it. The
-command never creates, repairs, or rewrites anything: it prints `result:
-ready` and exits zero only when every required check passes, otherwise it
-prints `result: problems found` and exits one.
+`src/doctor.rs` owns the read-only `doctor` setup diagnosis. It checks the
+version and whether a real executable `zsh` is on PATH (via direct
+file-metadata lookup — never by asking a shell, per SPEC §9); the unique
+marked block in regular `~/.zshrc` and the regular installed plugin file; all
+four accept-widget wrappers from a snapshot refreshed immediately before this
+doctor process (a stale load-time snapshot is a problem); the config file,
+every parser issue, any
+`OOPSINPUT_MODE` override, and the effective mode; the optional Ollama peer
+and configured model; and exact `0700`/`0600` modes on the state directory and
+every owned state file. A missing state directory is healthy because the
+first write creates it. The command never creates, repairs, or rewrites
+anything: it prints `result: ready` and exits zero only when every required
+check passes, otherwise it prints `result: problems found` and exits one.
 
 The model check is a POST to `/api/show` through §4.10's client; it loads
 nothing and runs no inference. The config line and the mode line resolve
@@ -391,6 +406,13 @@ extracts the words in command position — first word of each segment,
 skipping `VAR=value` assignments and redirect targets. The uncertainty codes
 flow into `check`'s decision evidence and the shadow event log, so shadow
 data can measure the unsupported-syntax rate (SPEC §11).
+
+At top level, an embedded newline is a control operator like `;`, not ordinary
+spacing. That matters when a paste or prefilled ZLE buffer contains multiple
+commands: every segment is analyzed before any of them run. Newlines inside
+quotes and substitutions remain part of their owning word. A heredoc makes
+the remainder opaque at its first body newline, so command-looking data fed to
+stdin is never mistaken for another executable segment.
 
 One subtlety worth knowing before you touch this file: **word separators are
 space, tab, and newline only** (`is_shell_whitespace`), deliberately *not*
@@ -617,9 +639,11 @@ Three deliberately separate pieces:
 
 **`warranted`** is the mode-blind decision matrix: given the evidence, what
 does this *deserve*? Catastrophic deletes ask for confirmation, always.
-`git reset --hard` and `git clean -f` warn only when there is actually work
-to lose, and are silently allowed on a clean tree. `push --force` warns only
-on a main-like branch. A recursive delete warns when the target is the
+`git reset --hard` warns only for tracked/staged changes, while `git clean -f`
+warns only for untracked files; evidence about the file class that command
+cannot delete does not justify an intervention. Each is silently allowed when
+its own affected class is clear. `push --force` warns only on a main-like
+branch. A recursive delete warns when the target is the
 current directory, its parent, or a near-miss of a real neighbor, and is
 allowed when every target plainly exists. Everything else recognized records
 as `observe` — recognized but not yet graduated to speaking. Each arm exists
@@ -644,38 +668,45 @@ while any edit or cancel wakes it. Direct-catastrophic findings are exempt
 from both. Exhausting the budget degrades to silent recording; it never
 degrades to nagging.
 
-It is a *pure read* over history: checking the gates writes nothing, and only
-a prompt the user actually saw is recorded afterwards. That ordering is what
-makes "an intervention nobody saw cannot spend budget" structural rather than
-a flag somebody has to remember to pass.
+`apply_gates` itself is a pure decision, but the live admission path surrounds
+the history load, that decision, and a reservation append with one shared
+cross-process lock. A visible non-catastrophic prompt therefore claims its
+budget slot before the lock is released; simultaneous shells cannot all claim
+the same last slot. The outcome later completes that reservation, a terminal
+setup failure releases it, and an abandoned reservation expires after ten
+minutes. The displayed prompt still spends exactly one slot, while a prompt
+nobody saw spends none.
 
 The module also owns the full SPEC §15 **config surface**: `mode`, `model`,
-`model_timeout_ms`, `det_timeout_ms`, `budget_per_hour`, `log_raw`. Invalid
-values fall back to the documented default and say so; unknown keys are
-reported **by line number only**, never by echoing the key — config text is
-untrusted input and must not reach a terminal. Complaints are printed once
-per distinct set, tracked by a fingerprint file in the state directory. The
-fingerprint comparison, display, and marker replacement hold the shared state
+`model_timeout_ms`, `det_timeout_ms`, `budget_per_hour`, `log_raw`. A config
+over 64 KiB is rejected whole and `doctor` reports it invalid; no valid prefix
+is silently accepted. Invalid values fall back to the documented default and
+say so; unknown keys are reported **by line number only**, never by echoing the
+key — config text is untrusted input and must not reach a terminal. Complaints
+are printed once per distinct set, tracked by a fingerprint file in the state
+directory. The fingerprint comparison, display, and marker replacement hold
+the shared state
 lock as one transaction, so simultaneous shells cannot all print the same
 complaint. The plugin opts into direct `/dev/tty` delivery only on this warning
 path—ordinary commands open no extra terminal descriptor—and the marker is
 committed only after the whole diagnostic is written successfully.
 `$OOPSINPUT_MODE` overrides the file's mode.
 
-Cooldown and budget state live in `policy.jsonl` (user-only): one appended
-line per shown intervention, recording when it happened, which rule, and what
-the user did. Reading takes only the tail — the budget looks back an hour and
-a cooldown a day — so a long-lived file costs a bounded read; a torn or
-partial line simply fails to parse and is skipped, and the path is never
-written through a symlink.
+Cooldown and budget state live in `policy.jsonl` (user-only): append-only
+reservation, release, and shown-outcome records say when an admission happened,
+which rule it belongs to, and what the user did. The reader folds each
+reservation/outcome pair into one logical intervention. It takes only a bounded
+tail — the budget looks back an hour and a cooldown a day — so a long-lived
+file has bounded cost; a torn or partial line simply fails to parse and is
+skipped, and the path is never written through a symlink.
 
-**Append semantics are load-bearing, not a style choice.** The first version was a
-JSON blob loaded, modified and written back, which meant two shells finishing
-warnings in the same instant each recorded a spend and the second write
-dropped the first: the hourly cap silently under-counted and a cooldown could
-disappear. New outcomes therefore append under the stable state lock; the only
-rewrite is retention's locked atomic replacement of expired records. An
-8-thread test fails if anyone reintroduces an uncoordinated read-modify-write.
+**Append and admission semantics are load-bearing, not style choices.** The
+first version was a JSON blob whose concurrent writers lost outcomes. The
+append-only replacement fixed that but still let concurrent shells pass one
+remaining budget slot before any prompt finished. Admissions now append their
+reservation inside the same locked history transaction; outcomes still append,
+and retention's locked atomic replacement remains the only rewrite. Focused
+contention tests fail if either lost appends or over-admission returns.
 
 ### 4.9 `src/ui.rs` — prompts, message building, and the display escaper
 
@@ -706,17 +737,20 @@ stdout, which carries the decision JSON and is discarded by the plugin:
 - `prompt_typo` asks the L1 question. `y` accepts, Ctrl-C cancels, and
   everything else (`n`, any other key, a ten-second timeout, a missing
   terminal, any internal failure) runs the original command, which is the
-  safe outcome since that command could not have run anyway.
+  safe outcome since that command could not have run anyway. Timeout is still
+  recorded as `typo.timed_out`, not as a deliberate `n`.
 - `prompt_warning` shows the L2+ warning, whose anatomy is fixed by SPEC §7:
   what the command does, the concrete facts, why the context is unusual,
   then the keys. `e` restores your exact buffer to ZLE for editing, `c`
   cancels and runs nothing, `r` runs the original unchanged once. The
   timeout default depends on the tier: an advisory warning runs the command,
   a pausing confirmation cancels it — running is never the default for a
-  command whose consequences are predicted to be irreversible. Any failure
-  to display fails open to running unchanged, but returns a distinct
-  `NotShown` result: it is absent from the visible-outcome report and never
-  spends the hourly budget or advances a cooldown.
+  command whose consequences are predicted to be irreversible. In either
+  tier the recorded outcome is `timed_out`, distinct from the physical default
+  and therefore unable to manufacture a deliberate run-unchanged cooldown.
+  Any failure to display fails open to running unchanged, but returns a
+  distinct `NotShown` result: it is absent from the visible-outcome report and
+  never spends the hourly budget or advances a cooldown.
 
 `warning_lines` builds those message lines from evidence codes and context
 counts, with every untrusted fragment escaped and every line framed by the
@@ -728,8 +762,10 @@ that as an answer and left the remaining bytes behind, where they leaked
 into the next command line as stray characters. The reader now consumes
 complete sequences (CSI, SS3, alt-chords) and ignores them, while a lone
 `ESC` still means "dismiss". Unrecognized keys are ignored rather than
-guessed at, and the whole loop is bounded so hostile input cannot hold the
-prompt open.
+guessed at. Long CSI sequences receive a second bounded drain; an over-cap or
+incomplete sequence ends the prompt with its non-consent timeout outcome, so
+its final `y` or `r` can never be reinterpreted as a fresh answer. The whole
+loop remains bounded so hostile input cannot hold the prompt open.
 
 Switching the terminal into single-keypress mode requires the `stty`
 program, because Rust's standard library exposes no terminal-mode control
@@ -885,7 +921,7 @@ You type `git status` and press Enter:
    real `accept-line`. zsh executes `git status` exactly as typed.
 
 Measured on the dev machine, release build, including process spawn:
-**p50 2.14 ms, p95 3.13 ms** — against a 25 ms p95 budget (SPEC §10). If steps
+**p50 6.78 ms, p95 7.80 ms** — against a 25 ms p95 budget (SPEC §10). If steps
 3–5 fail *in any way* — binary missing, crash, watchdog fired, weird exit
 code — step 6 still happens identically.
 
@@ -934,8 +970,9 @@ tests. In `warn` mode you type `git reset --hard`:
    runs the hardened `git status`, which reports 17 dirty files.
 5. Policy (`src/policy.rs`) sees a work-loss command with work to lose and
    returns `warn` / `policy.dirty_work_at_risk`. The mode is `warn`, so the
-   ceiling doesn't lower it. The gates pass (budget available, rule not in
-   cooldown).
+   ceiling doesn't lower it. Under the shared state lock, the gates pass
+   (budget available, rule not in cooldown) and atomically reserve one budget
+   slot before another shell can inspect the same history.
 6. `warning_intervention` (`src/main.rs`) marks the prompt active and
    displays:
 
@@ -946,8 +983,8 @@ tests. In `warn` mode you type `git reset --hard`:
    oopsinput: [e]dit  [c]ancel  [r]un unchanged
    ```
 
-7. You press `c`. The binary records the outcome `cancelled`, saves the
-   updated cooldown state, and exits **12**. The plugin clears the buffer.
+7. You press `c`. The binary appends outcome `cancelled`, which completes the
+   reservation without creating a cooldown, and exits **12**. The plugin clears the buffer.
    Nothing runs; your 17 files are untouched. (`e` would exit 11 and hand the
    exact command back to ZLE for editing; `r` would exit 0 and run it.)
 
@@ -957,7 +994,7 @@ prompt is shown at all, and the command runs in silence. The event log still
 records the reason, which is what makes the decision auditable later.
 
 Measured on the candidate path (release, including both our spawn and git's):
-**p50 7.44 ms, p95 9.09 ms**, against the same 75 ms p95 budget.
+**p50 17.03 ms, p95 19.79 ms**, against the same 75 ms p95 budget.
 
 ## 6. How it's tested
 
@@ -982,7 +1019,8 @@ separately.
   interactive zsh inside a pseudo-terminal via util-linux
   `script -qec "zsh -i" /dev/null`, feeds it keystrokes, and asserts on what
   the terminal displayed. Covered: ordinary passthrough, unicode and quoting
-  survival, PS2 multiline continuation, missing binary fails open, hostile
+  survival, PS2 multiline continuation, every command in a pasted initial
+  multiline buffer, missing binary fails open, hostile
   terminal and bidi controls in the load diagnostic are neutralized under the
   C locale, a hanging binary is killed by the watchdog within deadline, secrets
   never reach the event log, resolution kinds are extracted correctly,
@@ -992,11 +1030,14 @@ separately.
   alone enables prompts); and the full warning flow (both halves of the
   flagship pair, edit restoring the exact buffer to a live ZLE, run-once
   executing unchanged, cancel leaving the dirty bytes untouched *on disk*,
-  warnings outranking the typo prompt, arrow keys leaving no stray bytes, and
+  warnings outranking the typo prompt, arrow keys leaving no stray bytes,
+  long CSI final bytes never becoming consent, and
   recency overlap counting shared targets but not shared flags). It also proves
   a config warning reaches the actual terminal exactly once through the plugin,
   and that an interactively invoked `doctor` sees the installed plugin plus all
-  four live wrappers and reports `ready`.
+  four live wrappers and reports `ready`; replacing every wrapper after plugin
+  load makes that same interactive doctor report the live 0/4 problem rather
+  than trusting its stale load-time snapshot.
 
   Some of these need a **staged** runner (`Session::run_staged`) that waits
   for expected text to appear on the terminal before sending the next keys.
@@ -1009,18 +1050,25 @@ separately.
 - **`tests/uninstall.rs`** — damaged or multiple marker blocks refuse without
   editing; a healthy install removes only its marker, binary, and plugin while
   preserving config, state, and unrecognized files; no marker means no
-  authority to remove same-named files; displayed paths cannot inject terminal
-  or bidi controls.
+  authority to remove same-named files; a no-final-newline shell file survives
+  install, update, and uninstall byte-exact with its original backup intact;
+  a later user suffix stays on its own line, and old marker text joined to a
+  user line is refused rather than treated as ownership; displayed paths
+  cannot inject terminal or bidi controls.
 - **`tests/install.rs`** — the installed defaults and lifecycle: a fresh
   install writes `mode = suggest` with user-only permissions, copies both
   runtime artifacts outside the checkout, migrates and updates an old source
   block without changing surrounding lines, and refuses existing or symlinked
-  destinations rather than claiming or writing through them. Its authored path
-  messages are inert under both control bytes and bidi controls.
+  destinations rather than claiming or writing through them. A forced backup
+  failure happens before runtime assets exist and an ordinary retry succeeds
+  after the cause is removed. Joined marker text is refused before either
+  runtime asset exists. Its authored path messages are inert under both control
+  bytes and bidi controls.
 - **`tests/doctor.rs`** — a complete healthy installation reports `ready`;
   missing runtime files, partial wrapper coverage, unsafe state permissions,
-  invalid config, and an unreachable configured model each report problems and
-  exit nonzero. The state failure proves diagnosis does not repair permissions.
+  invalid or over-cap config, a stale wrapper snapshot, and an unreachable
+  configured model each report problems and exit nonzero. The state failure
+  proves diagnosis does not repair permissions.
   Config and mode lines must agree under XDG redirection and when a symlinked
   config is ignored; invalid config reports only safe line-level diagnostics,
   and environment-derived config and PATH results are terminal-escaped.
@@ -1044,8 +1092,9 @@ separately.
   ready in Shadow mode, record and report three commands, purge state, and
   uninstall. It proves the original `.zshrc` bytes return exactly, runtime and
   state disappear, and only the deliberately retained config plus `.zshrc`
-  backup remain. The first probe exposed an unmarked separator newline left by
-  uninstall; the gate regression-locks its removal.
+  backup remain. Its fixture deliberately lacks a final newline, covering both
+  the original unmarked-separator regression and the later marker-joined-to-
+  user-line failure.
 - **`scripts/pty-gate.zsh`** — the volume acceptance gate: N unique
   submissions (default 10,000) through a PTY shell; every output must appear,
   nothing may hang. M1's run: 10,000/10,000, zero altered buffers, in 128 s.
@@ -1156,8 +1205,10 @@ Honest about what today's code does *not* do:
   2026-08-06.md) decided the model does NOT join the default config: zero
   categories improved, and reference-class local models miss the latency
   budget on this hardware by ~35×.
-- **Only the first line of a multi-line command is analyzed.** Continuation
-  lines typed at the `PS2` prompt pass through untouched.
+- **PS2 continuation submissions are not re-analyzed.** A pasted or prefilled
+  initial ZLE buffer is analyzed in full, with top-level newlines separating
+  commands. Text entered later after Zsh has moved to its `PS2` continuation
+  prompt passes through untouched.
 - **Linux and interactive zsh only.** The `/dev/fd/3` mechanism works on the
   BSDs too, but nothing else is tested there, and there is no bash adapter.
 - **The candidate scan is bounded, not exhaustive.** Directory entries and
@@ -1180,9 +1231,12 @@ report, purge, retention, and security hardening are complete and tested —
 capture, lexing, all four layers, policy, prompts, model gating and fallback,
 structural logging, and pilot-data summaries. Both CI workflows and the public
 security policy are also live, and `doctor` now covers the complete installed,
-live-shell, config, optional-model, and state-permission setup. The
-clean-machine release lifecycle is CI-enforced end to end. The `v0.1.0` code,
-documentation, and acceptance baseline is published as the first public alpha,
-so M6 is complete. Later work is tracked in PLAN; its next candidate is the
-promptless agent request contract and one named-agent adapter. Passive local M5
-observation continues only as an optional future data point.
+freshly verified live-shell, config, optional-model, and state-permission
+setup. The clean-machine release lifecycle is CI-enforced end to end. The
+`v0.1.0` code, documentation, and acceptance baseline is published as the
+first public alpha; M7's post-refactor stabilization then closed all nine
+reproduced correctness findings and passed the complete 298-test, lifecycle,
+latency, and 10,000-submission acceptance run. Later work is tracked in PLAN;
+its next candidate is the promptless agent request contract and one named-agent
+adapter. Passive local M5 observation continues only as an optional future
+data point.

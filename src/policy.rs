@@ -10,7 +10,8 @@
 //! hypothetical-intervention report.
 
 use std::io::{Read, Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -61,26 +62,38 @@ pub fn warranted(danger: &Analysis, ctx: Option<&Context>) -> Assessment {
     if danger.catastrophic {
         return assess(Verdict::Confirm, "policy.direct_catastrophic");
     }
-    let has = |code: &str| danger.codes.contains(&code);
     let git = ctx.and_then(|c| c.git.as_ref());
     let targets = ctx.map(|c| c.targets.as_slice()).unwrap_or(&[]);
 
-    // Work-loss git commands: the question is whether there is work to lose.
-    if has("git.reset_hard") || has("git.clean_force") {
+    // Work-loss Git commands affect different file classes: reset --hard
+    // discards tracked/staged work, while clean -f deletes untracked work.
+    // A fact about the other class cannot justify an intervention.
+    let reset_hard = danger.has("git.reset_hard");
+    let clean_force = danger.has("git.clean_force");
+    if reset_hard || clean_force {
         return match git {
-            Some(g) => match (g.dirty, g.untracked) {
-                (Some(d), u) if d > 0 || u == Some(true) => {
+            Some(g) => {
+                let tracked_at_risk = reset_hard && g.dirty.is_some_and(|dirty| dirty > 0);
+                let untracked_at_risk = clean_force && g.untracked == Some(true);
+                if tracked_at_risk || untracked_at_risk {
                     assess(Verdict::Warn, "policy.dirty_work_at_risk")
+                } else {
+                    let reset_clear = !reset_hard || g.dirty == Some(0);
+                    let clean_clear = !clean_force || g.untracked == Some(false);
+                    if reset_clear && clean_clear {
+                        assess(Verdict::Allow, "policy.context_clear")
+                    } else {
+                        // A relevant status fact is unavailable: no claim, no
+                        // nag — fail toward silence.
+                        assess(Verdict::Observe, "policy.evidence_unavailable")
+                    }
                 }
-                (Some(_), Some(_)) => assess(Verdict::Allow, "policy.context_clear"),
-                // status unavailable: no claim, no nag — fail toward silence
-                _ => assess(Verdict::Observe, "policy.evidence_unavailable"),
-            },
+            }
             // not in a repo: the command will fail on its own
             None => assess(Verdict::Observe, "policy.evidence_unavailable"),
         };
     }
-    if has("git.push_force") {
+    if danger.has("git.push_force") {
         return match git {
             Some(g) if g.branch_main_like => assess(Verdict::Warn, "policy.main_branch_force"),
             Some(_) => assess(Verdict::Allow, "policy.context_clear"),
@@ -89,12 +102,12 @@ pub fn warranted(danger: &Analysis, ctx: Option<&Context>) -> Assessment {
     }
     // Writing to a block device by name shape is warn-worthy on its own —
     // there is no benign-context read of it that L3 can establish.
-    if has("fs.target_blockdev") {
+    if danger.has("fs.target_blockdev") {
         return assess(Verdict::Warn, "policy.blockdev_write");
     }
-    if has("fs.rm_recursive") {
-        let target_flagged = has("fs.target_cwd")
-            || has("fs.target_parent")
+    if danger.has("fs.rm_recursive") {
+        let target_flagged = danger.has("fs.target_cwd")
+            || danger.has("fs.target_parent")
             || targets
                 .iter()
                 .any(|t| t.is_cwd || t.is_parent || t.near_miss);
@@ -105,7 +118,7 @@ pub fn warranted(danger: &Analysis, ctx: Option<&Context>) -> Assessment {
         // operands were all knowable — the target list is shared across
         // rules, and a redirect's existing file must not clear an
         // `rm -rf $DIR` (bughunt 2026-08-06).
-        if has("fs.rm_target_unknown") {
+        if danger.has("fs.rm_target_unknown") {
             return assess(Verdict::Observe, "policy.evidence_unavailable");
         }
         if !targets.is_empty() && targets.iter().all(|t| t.exists) {
@@ -212,25 +225,75 @@ struct Intervention {
     ts_ms: u64,
     rule: String,
     ran_unchanged: bool,
+    /// A timeout may physically run unchanged in Warn mode, but it is not the
+    /// deliberate repeated `r` that earns a rule cooldown. Default preserves
+    /// compatibility with policy records written before this field existed.
+    #[serde(default)]
+    timed_out: bool,
+    /// The admission this outcome completes. Old records have no ID; keeping
+    /// the field optional makes the append-only format backward compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reservation_id: Option<String>,
 }
 
-/// Recent shown interventions, oldest first. Read once per candidate command.
+#[derive(Serialize, Deserialize)]
+struct ReservationRecord {
+    ts_ms: u64,
+    rule: String,
+    reservation_id: String,
+    reservation_state: ReservationState,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReservationState {
+    Reserved,
+    Released,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PolicyRecord {
+    Intervention(Intervention),
+    Reservation(ReservationRecord),
+}
+
+/// Recent shown interventions and prompt admissions, oldest first. A prompt
+/// admission temporarily spends one budget slot until it is completed,
+/// released because no prompt was shown, or expires after the maximum prompt
+/// lifetime. That makes the read/check/spend decision atomic across shells.
 #[derive(Default)]
 pub struct History {
     shown: Vec<Intervention>,
+    reservations: Vec<ReservationRecord>,
 }
 
 const HOUR_MS: u64 = 3_600_000;
 const COOLDOWN_MS: u64 = 24 * HOUR_MS;
+/// The warning prompt's bounded retry loop lasts at most 320 seconds. Ten
+/// minutes leaves ample room for a live prompt while ensuring a killed or
+/// suspended process cannot consume budget indefinitely.
+const RESERVATION_TTL_MS: u64 = 10 * 60 * 1_000;
 /// Run-unchanged outcomes in a row before a rule goes quiet for a day.
 const COOLDOWN_TRIGGER: usize = 3;
+static RESERVATION_ID: AtomicU64 = AtomicU64::new(0);
 
 impl History {
     fn shown_within_hour(&self, now_ms: u64) -> usize {
-        self.shown
+        let shown = self
+            .shown
             .iter()
             .filter(|i| now_ms.saturating_sub(i.ts_ms) < HOUR_MS)
-            .count()
+            .count();
+        let reserved = self
+            .reservations
+            .iter()
+            .filter(|reservation| {
+                let age = now_ms.saturating_sub(reservation.ts_ms);
+                age < RESERVATION_TTL_MS
+            })
+            .count();
+        shown + reserved
     }
 
     /// A rule is asleep when its last `COOLDOWN_TRIGGER` outcomes were all
@@ -246,7 +309,7 @@ impl History {
             .take(COOLDOWN_TRIGGER)
             .collect();
         recent.len() == COOLDOWN_TRIGGER
-            && recent.iter().all(|i| i.ran_unchanged)
+            && recent.iter().all(|i| i.ran_unchanged && !i.timed_out)
             && recent
                 .first()
                 .is_some_and(|newest| now_ms.saturating_sub(newest.ts_ms) < COOLDOWN_MS)
@@ -257,9 +320,10 @@ impl History {
 /// Direct-catastrophic is exempt from both (SPEC §7). Exhaustion degrades to
 /// observe (shadow recording), never to nagging.
 ///
-/// This is a pure decision over history — showing is what spends budget, and
-/// only `record_outcome` (called after the prompt) writes. That ordering is
-/// why an intervention nobody saw can no longer consume anything.
+/// This is a pure decision over history. `admit_intervention` holds the shared
+/// state lock around loading that history, applying this function, and
+/// appending a short-lived reservation, so concurrent shells cannot all pass
+/// the same last budget slot.
 pub fn apply_gates(
     assessment: Assessment,
     primary_code: Option<&str>,
@@ -294,63 +358,253 @@ pub fn primary_code(danger: &Analysis) -> Option<&'static str> {
 /// Only the tail matters — the budget looks back an hour and a cooldown a
 /// day — so a long-lived log costs one bounded read, not a growing one
 /// (audit 2026-08-06: our own file is not a size guarantee).
-const HISTORY_TAIL_BYTES: u64 = 64 * 1024;
-/// Records parsed from that tail. Far more than an hour or a day can hold.
+const HISTORY_TAIL_BYTES: u64 = 512 * 1024;
+/// The configured hourly budget is capped at 1,000. Reservations and their
+/// outcomes are folded to one logical admission before this cap is applied,
+/// so the bounded history still holds a full worst-case budget window.
 const MAX_HISTORY_RECORDS: usize = 2_048;
-
-pub fn load_history() -> History {
-    match crate::state::state_dir() {
-        Some(dir) => load_history_from(&dir),
-        None => History::default(),
-    }
-}
 
 /// The loader with the state directory explicit — the seam tests run through,
 /// matching `events::append_to`. (A test that re-implements this logic in its
 /// own body proves nothing about this function: test-audit 2026-08-06 deleted
 /// the caps from the old loader and watched the old test pass anyway.)
+#[cfg(test)]
 pub(crate) fn load_history_from(dir: &std::path::Path) -> History {
+    try_load_history_from(dir).unwrap_or_default()
+}
+
+/// Admission must distinguish an empty history from one it could not verify:
+/// treating an unreadable/symlinked file as empty would reopen every budget
+/// slot. The test-only wrapper above retains the old fail-silent inspection
+/// seam; the live admission path consumes this result directly.
+fn try_load_history_from(dir: &Path) -> std::io::Result<History> {
     let path = dir.join("policy.jsonl");
-    if !std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
-        return History::default();
-    }
-    let Ok(mut f) = std::fs::File::open(&path) else {
-        return History::default();
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => {
+            return Err(std::io::Error::other(
+                "policy history is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(History::default());
+        }
+        Err(error) => return Err(error),
     };
-    if crate::state::opened_regular_file_metadata(&path, &f, "policy history").is_err() {
-        return History::default();
-    }
+    let mut f = std::fs::File::open(&path)?;
+    crate::state::opened_regular_file_metadata(&path, &f, "policy history")?;
     // Read only the tail; seek past everything older.
-    if let Ok(meta) = f.metadata()
-        && meta.len() > HISTORY_TAIL_BYTES
-    {
-        let _ = f.seek(std::io::SeekFrom::End(-(HISTORY_TAIL_BYTES as i64)));
+    if f.metadata()?.len() > HISTORY_TAIL_BYTES {
+        f.seek(std::io::SeekFrom::End(-(HISTORY_TAIL_BYTES as i64)))?;
     }
     let mut text = String::new();
-    if f.read_to_string(&mut text).is_err() {
-        return History::default();
-    }
+    f.read_to_string(&mut text)?;
     // The first line of a tail read is usually cut mid-record; it simply
     // fails to parse, along with any line a partial write left behind.
-    let mut shown: Vec<Intervention> = text
+    let mut shown = Vec::new();
+    let mut reservations = std::collections::HashMap::new();
+    for record in text
         .lines()
-        .filter_map(|l| serde_json::from_str::<Intervention>(l).ok())
-        .collect();
+        .filter_map(|line| serde_json::from_str::<PolicyRecord>(line).ok())
+    {
+        match record {
+            PolicyRecord::Intervention(intervention) => {
+                if let Some(id) = intervention.reservation_id.as_deref() {
+                    reservations.remove(id);
+                }
+                shown.push(intervention);
+            }
+            PolicyRecord::Reservation(reservation) => match reservation.reservation_state {
+                ReservationState::Reserved => {
+                    reservations.insert(reservation.reservation_id.clone(), reservation);
+                }
+                ReservationState::Released => {
+                    reservations.remove(&reservation.reservation_id);
+                }
+            },
+        }
+    }
     if shown.len() > MAX_HISTORY_RECORDS {
         let cut = shown.len() - MAX_HISTORY_RECORDS;
         shown.drain(..cut);
     }
-    History { shown }
+    Ok(History {
+        shown,
+        reservations: reservations.into_values().collect(),
+    })
 }
 
-/// Record what the user did at a warning we actually showed. One buffered
-/// append under the shared state lock keeps concurrent shells from
-/// interleaving or overwriting each other (test-audit 2026-08-06).
-pub fn record_outcome(code: &str, ran_unchanged: bool, now_ms: u64) {
-    let Some(dir) = crate::state::state_dir() else {
+/// The result of atomically checking and, when visible, reserving one warning
+/// budget slot. The opaque token follows the prompt so its outcome or a
+/// not-shown release can close the reservation.
+pub(crate) struct Admission {
+    pub(crate) assessment: Assessment,
+    pub(crate) reservation: Option<ReservationToken>,
+}
+
+pub(crate) struct ReservationToken {
+    dir: PathBuf,
+    id: String,
+    rule: String,
+}
+
+/// Atomically load policy history, apply budget/cooldown gates, and reserve a
+/// visible non-catastrophic intervention. State failures suppress the prompt:
+/// the original command runs unchanged instead of allowing an uncoordinated
+/// shell to exceed the user's hourly cap.
+pub(crate) fn admit_intervention(
+    assessment: Assessment,
+    primary_code: Option<&str>,
+    catastrophic: bool,
+    now_ms: u64,
+    budget_per_hour: u32,
+) -> Admission {
+    let dir = crate::state::state_dir();
+    admit_intervention_in(
+        dir.as_deref(),
+        assessment,
+        primary_code,
+        catastrophic,
+        now_ms,
+        budget_per_hour,
+    )
+}
+
+fn admit_intervention_in(
+    dir: Option<&Path>,
+    assessment: Assessment,
+    primary_code: Option<&str>,
+    catastrophic: bool,
+    now_ms: u64,
+    budget_per_hour: u32,
+) -> Admission {
+    if !matches!(assessment.verdict, Verdict::Warn | Verdict::Confirm) || catastrophic {
+        return Admission {
+            assessment,
+            reservation: None,
+        };
+    }
+    let (Some(dir), Some(code)) = (dir, primary_code) else {
+        return Admission {
+            assessment: assess(Verdict::Observe, "policy.evidence_unavailable"),
+            reservation: None,
+        };
+    };
+    let transaction = match crate::state::StateTransaction::begin(dir) {
+        Ok(transaction) => transaction,
+        Err(_) => {
+            return Admission {
+                assessment: assess(Verdict::Observe, "policy.evidence_unavailable"),
+                reservation: None,
+            };
+        }
+    };
+    if transaction.prepare_jsonl("policy.jsonl", now_ms).is_err() {
+        return Admission {
+            assessment: assess(Verdict::Observe, "policy.evidence_unavailable"),
+            reservation: None,
+        };
+    }
+    let history = match try_load_history_from(dir) {
+        Ok(history) => history,
+        Err(_) => {
+            return Admission {
+                assessment: assess(Verdict::Observe, "policy.evidence_unavailable"),
+                reservation: None,
+            };
+        }
+    };
+    let gated = apply_gates(
+        assessment,
+        Some(code),
+        false,
+        &history,
+        now_ms,
+        budget_per_hour,
+    );
+    if !matches!(gated.verdict, Verdict::Warn | Verdict::Confirm) {
+        return Admission {
+            assessment: gated,
+            reservation: None,
+        };
+    }
+
+    let id = format!(
+        "{}-{now_ms}-{}",
+        std::process::id(),
+        RESERVATION_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let Some(line) = reservation_line(code, &id, ReservationState::Reserved, now_ms) else {
+        return Admission {
+            assessment: assess(Verdict::Observe, "policy.evidence_unavailable"),
+            reservation: None,
+        };
+    };
+    if transaction
+        .append_jsonl("policy.jsonl", line.as_bytes())
+        .is_err()
+    {
+        return Admission {
+            assessment: assess(Verdict::Observe, "policy.evidence_unavailable"),
+            reservation: None,
+        };
+    }
+    Admission {
+        assessment: gated,
+        reservation: Some(ReservationToken {
+            dir: dir.to_path_buf(),
+            id,
+            rule: code.to_string(),
+        }),
+    }
+}
+
+/// Release a slot when terminal setup failed before a warning was visible.
+/// A failed bounded append is safe: the reservation expires on its own.
+pub(crate) fn release_admission(reservation: Option<ReservationToken>, now_ms: u64) {
+    let Some(reservation) = reservation else {
         return;
     };
-    let Some(line) = outcome_line(code, ran_unchanged, now_ms) else {
+    let Some(line) = reservation_line(
+        &reservation.rule,
+        &reservation.id,
+        ReservationState::Released,
+        now_ms,
+    ) else {
+        return;
+    };
+    let _ =
+        crate::state::append_jsonl_after_prompt(&reservation.dir, "policy.jsonl", line.as_bytes());
+}
+
+/// Complete a reserved admission with the outcome of the prompt. Before this
+/// append the reservation spends the slot; after it, the shown intervention
+/// spends the same slot, so no observer can see a gap between them.
+pub(crate) fn record_admitted_outcome(
+    reservation: Option<ReservationToken>,
+    code: &str,
+    ran_unchanged: bool,
+    timed_out: bool,
+    now_ms: u64,
+) {
+    let (dir, rule, reservation_id) = match reservation {
+        Some(reservation) => (
+            Some(reservation.dir),
+            reservation.rule,
+            Some(reservation.id),
+        ),
+        None => (crate::state::state_dir(), code.to_string(), None),
+    };
+    let (Some(dir), Some(line)) = (
+        dir,
+        outcome_line(
+            &rule,
+            ran_unchanged,
+            timed_out,
+            reservation_id.as_deref(),
+            now_ms,
+        ),
+    ) else {
         return;
     };
     let _ = crate::state::append_jsonl_after_prompt(&dir, "policy.jsonl", line.as_bytes());
@@ -363,17 +617,42 @@ pub(crate) fn append_outcome_to(
     ran_unchanged: bool,
     now_ms: u64,
 ) {
-    let Some(line) = outcome_line(code, ran_unchanged, now_ms) else {
+    let Some(line) = outcome_line(code, ran_unchanged, false, None, now_ms) else {
         return;
     };
     let _ = crate::state::append_jsonl(dir, "policy.jsonl", line.as_bytes(), now_ms);
 }
 
-fn outcome_line(code: &str, ran_unchanged: bool, now_ms: u64) -> Option<String> {
+fn outcome_line(
+    code: &str,
+    ran_unchanged: bool,
+    timed_out: bool,
+    reservation_id: Option<&str>,
+    now_ms: u64,
+) -> Option<String> {
     let mut line = serde_json::to_string(&Intervention {
         ts_ms: now_ms,
         rule: code.to_string(),
         ran_unchanged,
+        timed_out,
+        reservation_id: reservation_id.map(str::to_string),
+    })
+    .ok()?;
+    line.push('\n');
+    Some(line)
+}
+
+fn reservation_line(
+    code: &str,
+    reservation_id: &str,
+    reservation_state: ReservationState,
+    now_ms: u64,
+) -> Option<String> {
+    let mut line = serde_json::to_string(&ReservationRecord {
+        ts_ms: now_ms,
+        rule: code.to_string(),
+        reservation_id: reservation_id.to_string(),
+        reservation_state,
     })
     .ok()?;
     line.push('\n');
@@ -436,6 +715,12 @@ pub(crate) enum ConfigFileState {
     Regular,
     Missing,
     NonRegular,
+    TooLarge,
+    Unavailable,
+}
+
+enum ConfigReadError {
+    TooLarge,
     Unavailable,
 }
 
@@ -473,8 +758,11 @@ pub(crate) fn inspect_config() -> ConfigInspection {
     let (mut cfg, file_state) = match path.as_deref() {
         Some(path) => match config_file_state(path) {
             ConfigFileState::Regular => match read_config_file(path) {
-                Some(text) => (parse_config(&text), ConfigFileState::Regular),
-                None => (Config::default(), ConfigFileState::Unavailable),
+                Ok(text) => (parse_config(&text), ConfigFileState::Regular),
+                Err(ConfigReadError::TooLarge) => (Config::default(), ConfigFileState::TooLarge),
+                Err(ConfigReadError::Unavailable) => {
+                    (Config::default(), ConfigFileState::Unavailable)
+                }
             },
             state => (Config::default(), state),
         },
@@ -502,12 +790,18 @@ pub(crate) fn inspect_config() -> ConfigInspection {
     }
 }
 
-fn read_config_file(path: &std::path::Path) -> Option<String> {
+fn read_config_file(path: &std::path::Path) -> Result<String, ConfigReadError> {
     let mut buf = Vec::new();
-    let file = std::fs::File::open(path).ok()?;
-    crate::state::opened_regular_file_metadata(path, &file, "config file").ok()?;
-    file.take(CONFIG_READ_CAP).read_to_end(&mut buf).ok()?;
-    String::from_utf8(buf).ok()
+    let file = std::fs::File::open(path).map_err(|_| ConfigReadError::Unavailable)?;
+    crate::state::opened_regular_file_metadata(path, &file, "config file")
+        .map_err(|_| ConfigReadError::Unavailable)?;
+    file.take(CONFIG_READ_CAP + 1)
+        .read_to_end(&mut buf)
+        .map_err(|_| ConfigReadError::Unavailable)?;
+    if buf.len() as u64 > CONFIG_READ_CAP {
+        return Err(ConfigReadError::TooLarge);
+    }
+    String::from_utf8(buf).map_err(|_| ConfigReadError::Unavailable)
 }
 
 /// `key = value`, `#` comments, first occurrence of a key wins, unknown keys
@@ -844,8 +1138,11 @@ mod tests {
                     ts_ms: *ts,
                     rule: rule.to_string(),
                     ran_unchanged: *ran,
+                    timed_out: false,
+                    reservation_id: None,
                 })
                 .collect(),
+            reservations: Vec::new(),
         }
     }
 
@@ -960,6 +1257,37 @@ mod tests {
     }
 
     #[test]
+    fn timeouts_spend_budget_but_never_manufacture_a_cooldown() {
+        // Reproduced by tracing the real prompt path on 2026-08-08: advisory
+        // timeouts were stored as deliberate run-unchanged outcomes, so three
+        // unattended prompts silenced the rule for 24 hours.
+        let warn = assess(Verdict::Warn, "policy.target_context");
+        let now = 100 * HOUR_MS;
+        let h = History {
+            shown: (1..=3)
+                .map(|n| Intervention {
+                    ts_ms: now - n * 1_000,
+                    rule: "fs.rm_recursive".to_string(),
+                    ran_unchanged: true,
+                    timed_out: true,
+                    reservation_id: None,
+                })
+                .collect(),
+            reservations: Vec::new(),
+        };
+        assert_eq!(
+            apply_gates(warn, Some("fs.rm_recursive"), false, &h, now, 99).verdict,
+            Verdict::Warn,
+            "a timeout is not the user saying 'I mean it'"
+        );
+        assert_eq!(
+            apply_gates(warn, Some("other"), false, &h, now, 3).reason,
+            "policy.budget_exhausted",
+            "the visibly displayed prompts still spend the hourly budget"
+        );
+    }
+
+    #[test]
     fn checking_the_gates_never_records_anything() {
         // Structural replacement for the old `commit: false` flag: gating is
         // a pure read, and only a prompt the user actually saw is recorded.
@@ -978,6 +1306,114 @@ mod tests {
             !dir.join("policy.jsonl").exists(),
             "gate checks must not write anything"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_admission_never_exceeds_the_warning_budget() {
+        // Reproduced in the pre-fix flow on 2026-08-08: eight callers could
+        // all load the same two-record history, pass a budget of three, and
+        // show eight prompts before any outcome append happened. Admission
+        // now reserves the slot while the shared state lock is still held.
+        let dir =
+            std::env::temp_dir().join(format!("oopsinput-admission-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let warn = assess(Verdict::Warn, "policy.dirty_work_at_risk");
+        let now = 20 * HOUR_MS;
+
+        let admissions = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let dir = dir.clone();
+                let barrier = barrier.clone();
+                handles.push(scope.spawn(move || {
+                    barrier.wait();
+                    admit_intervention_in(Some(&dir), warn, Some("git.reset_hard"), false, now, 3)
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        let mut granted = Vec::new();
+        for admission in admissions {
+            if admission.assessment.verdict == Verdict::Warn {
+                granted.push(
+                    admission
+                        .reservation
+                        .expect("every visible admission must reserve its slot"),
+                );
+            } else {
+                assert_eq!(admission.assessment.verdict, Verdict::Observe);
+                assert_eq!(admission.assessment.reason, "policy.budget_exhausted");
+                assert!(admission.reservation.is_none());
+            }
+        }
+        assert_eq!(granted.len(), 3, "simultaneous callers exceeded the cap");
+
+        for reservation in granted {
+            record_admitted_outcome(Some(reservation), "git.reset_hard", false, false, now + 1);
+        }
+        let after =
+            admit_intervention_in(Some(&dir), warn, Some("git.reset_hard"), false, now + 2, 3);
+        assert_eq!(after.assessment.reason, "policy.budget_exhausted");
+        assert!(after.reservation.is_none());
+
+        let loaded = load_history_from(&dir);
+        assert_eq!(loaded.shown.len(), 3);
+        assert!(loaded.reservations.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unseen_and_abandoned_admissions_do_not_spend_budget_forever() {
+        let dir = std::env::temp_dir().join(format!(
+            "oopsinput-admission-release-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let warn = assess(Verdict::Warn, "policy.target_context");
+        let now = 30 * HOUR_MS;
+
+        let unseen =
+            admit_intervention_in(Some(&dir), warn, Some("fs.rm_recursive"), false, now, 1);
+        assert_eq!(unseen.assessment.verdict, Verdict::Warn);
+        release_admission(unseen.reservation, now + 1);
+        let abandoned =
+            admit_intervention_in(Some(&dir), warn, Some("fs.rm_recursive"), false, now + 2, 1);
+        assert_eq!(
+            abandoned.assessment.verdict,
+            Verdict::Warn,
+            "a terminal setup failure must release its unused slot"
+        );
+
+        let blocked =
+            admit_intervention_in(Some(&dir), warn, Some("fs.rm_recursive"), false, now + 3, 1);
+        assert_eq!(blocked.assessment.reason, "policy.budget_exhausted");
+        assert!(blocked.reservation.is_none());
+
+        // Simulate the admitted process dying before it can release or
+        // complete. Its token is intentionally dropped.
+        drop(abandoned.reservation);
+        let after_expiry = admit_intervention_in(
+            Some(&dir),
+            warn,
+            Some("fs.rm_recursive"),
+            false,
+            now + 2 + RESERVATION_TTL_MS + 1,
+            1,
+        );
+        assert_eq!(
+            after_expiry.assessment.verdict,
+            Verdict::Warn,
+            "an abandoned reservation became a permanent denial"
+        );
+        release_admission(after_expiry.reservation, now + RESERVATION_TTL_MS + 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1133,9 +1569,12 @@ mod tests {
 
         assert_eq!(config_file_state(&link), ConfigFileState::NonRegular);
         assert_eq!(config_file_state(&regular), ConfigFileState::Regular);
-        assert!(read_config_file(&link).is_none());
+        assert!(matches!(
+            read_config_file(&link),
+            Err(ConfigReadError::Unavailable)
+        ));
         assert_eq!(
-            read_config_file(&regular).as_deref(),
+            read_config_file(&regular).ok().as_deref(),
             Some("mode = confirm\n")
         );
 

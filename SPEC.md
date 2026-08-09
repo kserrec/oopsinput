@@ -371,6 +371,10 @@ zsh-specific globs. Opaque nodes carry uncertainty evidence
 (`syntax.opaque_substitution`); policy treats uncertainty conservatively
 (observe/escalate for consequential commands, never invented semantics).
 The lexer never expands anything and never panics on any input (fuzzed).
+Top-level newlines already present in the submitted ZLE buffer are command
+operators like `;`, so every pasted/prefilled segment is analyzed. Newlines
+inside quotes/substitutions remain inside their owning word. Once a heredoc is
+declared, its body is opaque data rather than a source of command evidence.
 
 Alias/function visibility: the plugin ships the resolution kind of the command
 word (alias→what, function, builtin, external path) with each proposal, since
@@ -384,29 +388,36 @@ uncertainty, not as safety.
   `$HOME/.local/state/oopsinput`. A nonempty relative explicit override disables
   state; a relative XDG root is ignored in favor of HOME; relative or absent
   HOME leaves state unavailable. State failure always fails open.
-- `~/.config/oopsinput/config` — plain `key = value`. A symlink or other
-  non-regular config-file leaf is ignored, and the opened inode is checked
-  against the inspected path before any bytes are consumed.
+- `~/.config/oopsinput/config` — plain `key = value`, capped at 64 KiB. An
+  oversized file is rejected whole (defaults apply and `doctor` reports it
+  invalid), never parsed as a valid prefix. A symlink or other non-regular
+  config-file leaf is ignored, and the opened inode is checked against the
+  inspected path before any bytes are consumed.
 - `~/.local/state/oopsinput/events.jsonl` — structural events. New records
   append one JSON line at a time: timestamp, decision, evidence codes, layer,
   timings, outcome, keyed fingerprints, the explicit mode-blind policy reason
   when Shadow/Suggest suppressed a Warn/Confirm, and (when L4 runs) model
   state immediately before inference: `warm`, `cold`, or `unknown`. No raw
   commands, paths, or goal text by default. Retention is the only rewrite.
-- `~/.local/state/oopsinput/policy.jsonl` — habituation state: one appended
-  line per *shown* intervention (timestamp, rule code, what the user did), read
-  tail-first to compute the budget and per-rule cooldown. Every writer uses a
-  stable cross-process state lock, so concurrent shells cannot lose each
-  other's appends when retention atomically replaces a compacted log.
+- `~/.local/state/oopsinput/policy.jsonl` — append-only habituation state.
+  Before a visible non-catastrophic prompt, one state-locked transaction reads
+  the bounded tail, applies budget/cooldown gates, and appends a short-lived
+  reservation. The shown outcome completes it; a prompt that could not be
+  displayed releases it; an abandoned reservation expires after ten minutes.
+  This prevents concurrent shells from claiming the same last budget slot.
+  Outcome records carry timestamp, rule code, and what the user did; the reader
+  folds reservation/outcome pairs before computing budget and cooldown. Every
+  writer uses the stable lock, so retention cannot lose concurrent appends.
 - `~/.local/state/oopsinput/key` — local random fingerprint key, 0600.
 - `~/.local/state/oopsinput/.oopsinput.lock` plus two retention markers —
   user-only coordination metadata; they contain no command data.
 - Analysis-time state writes wait for the coordination lock under the existing
   process watchdog, preserving concurrent records without creating a new
   unbounded wait. After prompt setup begins, state writes wait at most 25 ms
-  and append only: if the lock remains busy, that evidence record is omitted;
-  if retention is due, it is deferred to the next analysis-time write. The
-  user's edit/cancel/run choice therefore takes effect without a full-log
+  and append only: if the lock remains busy, that outcome record is omitted
+  and its existing reservation expires rather than opening an extra budget
+  slot; if retention is due, it is deferred to the next analysis-time write.
+  The user's edit/cancel/run choice therefore takes effect without a full-log
   sweep after it. Explicit `purge` waits for the lock because completing
   deletion is the command's sole requested effect.
 - `oopsinput report` — decision/model/intervention rates, deterministic and
@@ -473,7 +484,8 @@ oopsinput/
 │   ├── ci.yml                # fmt, clippy, tests + release acceptance gates
 │   └── dependency-policy.yml # cargo-deny on changes + weekly
 ├── src/
-│   ├── main.rs          # dispatch: check/report/purge/doctor/help/version
+│   ├── main.rs          # dispatch + check/report/purge/help/version
+│   ├── doctor.rs        # read-only install/environment diagnosis
 │   ├── proposal.rs      # Zsh proposal input + metadata    (M1)
 │   ├── lexer.rs         # conservative shell lexer          (M2)
 │   ├── distance.rs      # bounded edit distance, shared by typo + context (M3)

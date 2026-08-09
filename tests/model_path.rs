@@ -519,7 +519,10 @@ fn model_warn_is_capped_at_warn_even_in_confirm_mode() {
     // evidence may not — its ceiling is Warn by construction. (Without a
     // tty the warning fails open to run-unchanged, which is exactly the
     // no-tty contract.)
-    let env = TestEnv::new("confirmcap", "model = mock\nmode = confirm\n");
+    let env = TestEnv::new(
+        "confirmcap",
+        "model = mock\nmode = confirm\nbudget_per_hour = 1\n",
+    );
     let (port, _) = mock_ollama(PROBABLE, Duration::ZERO);
     let (decision, code, _) = run_check(&env, "git reset --hard", port, None);
     let decision = decision.expect("decision JSON");
@@ -535,8 +538,28 @@ fn model_warn_is_capped_at_warn_even_in_confirm_mode() {
         "prompt was not visible: {event}"
     );
     assert!(event["hypothetical_reason"].is_null(), "{event}");
-    assert!(
-        !env.base.join("state/policy.jsonl").exists(),
-        "an unavailable prompt spent the intervention budget"
+    let policy = std::fs::read_to_string(env.base.join("state/policy.jsonl")).unwrap();
+    let records: Vec<serde_json::Value> = policy
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2, "unexpected admission trail: {policy}");
+    assert_eq!(records[0]["reservation_state"], "reserved", "{policy}");
+    assert_eq!(records[1]["reservation_state"], "released", "{policy}");
+    assert_eq!(
+        records[0]["reservation_id"], records[1]["reservation_id"],
+        "the unavailable prompt left an active reservation: {policy}"
     );
+
+    // Budget is one: if that released admission counted as shown, the next
+    // identical request would degrade to policy.budget_exhausted.
+    let (port, _) = mock_ollama(PROBABLE, Duration::ZERO);
+    let (second, code, _) = run_check(&env, "git reset --hard", port, None);
+    let second = second.expect("second decision JSON");
+    assert_eq!(code, 0);
+    assert_eq!(
+        second["decision"], "warn",
+        "released slot stayed spent: {second}"
+    );
+    assert_eq!(second["reason_code"], "policy.model_mismatch", "{second}");
 }

@@ -16,6 +16,14 @@
     "expect_reason": "policy.context_clear"
   },
   {
+    "name": "reset-hard-untracked-only",
+    "pair": "flagship",
+    "buffer": "git reset --hard",
+    "git": { "main_like": false, "dirty": 0, "untracked": true },
+    "expect_verdict": "allow",
+    "expect_reason": "policy.context_clear"
+  },
+  {
     "name": "reset-hard-status-unavailable-stays-silent",
     "buffer": "git reset --hard",
     "git": { "main_like": true, "dirty": null, "untracked": null },
@@ -35,6 +43,14 @@
     "pair": "git-clean",
     "buffer": "git clean -fdx",
     "git": { "main_like": false, "dirty": 0, "untracked": false },
+    "expect_verdict": "allow",
+    "expect_reason": "policy.context_clear"
+  },
+  {
+    "name": "clean-force-tracked-only",
+    "pair": "git-clean",
+    "buffer": "git clean -fdx",
+    "git": { "main_like": false, "dirty": 3, "untracked": false },
     "expect_verdict": "allow",
     "expect_reason": "policy.context_clear"
   },

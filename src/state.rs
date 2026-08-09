@@ -188,6 +188,35 @@ pub(crate) fn append_jsonl_after_prompt(
     append_private_file(&dir.join(log_name), line)
 }
 
+/// One short cross-process state transaction. Policy uses this to make
+/// warning-budget admission a single lock-protected read-and-reserve step;
+/// exposing only append keeps the mutation surface as small as the existing
+/// JSONL writers.
+pub(crate) struct StateTransaction {
+    _lock: StateLock,
+    dir: PathBuf,
+}
+
+impl StateTransaction {
+    pub(crate) fn begin(dir: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            _lock: StateLock::acquire(dir)?,
+            dir: dir.to_path_buf(),
+        })
+    }
+
+    pub(crate) fn append_jsonl(&self, log_name: &'static str, line: &[u8]) -> std::io::Result<()> {
+        append_private_file(&self.dir.join(log_name), line)
+    }
+
+    /// Run the same bounded retention check as an ordinary JSONL append,
+    /// while keeping this transaction's lock held for the caller's following
+    /// read and write.
+    pub(crate) fn prepare_jsonl(&self, log_name: &'static str, now_ms: u64) -> std::io::Result<()> {
+        maybe_prune_log(&self.dir, log_name, now_ms)
+    }
+}
+
 /// Atomically replace one small, product-owned state file under the shared
 /// lock. This never truncates or writes through a symlink.
 #[cfg(test)]

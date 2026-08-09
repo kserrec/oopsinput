@@ -22,14 +22,15 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 
 /// Outcome of the L1 typo prompt (SPEC §7): `y` consents to the correction,
-/// Ctrl-C cancels outright, and everything else — `n`, any other key, the
-/// timeout, a missing tty, any error — runs the original unchanged (it was
-/// unexecutable anyway, so that is the do-nothing outcome).
+/// Ctrl-C cancels outright, and everything else runs the original unchanged
+/// (it was unexecutable anyway). Timeout stays distinct from a deliberate `n`
+/// so evaluation never credits the user with a choice they did not make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypoChoice {
     Correct,
     Original,
     Cancel,
+    Timeout,
 }
 
 /// Outcome of an L2+ warning/confirmation prompt (SPEC §7): `e` restores the
@@ -42,6 +43,7 @@ pub enum WarnChoice {
     Edit,
     Cancel,
     RunOnce,
+    Timeout,
 }
 
 /// Whether a complete L2+ prompt reached the terminal. `NotShown` still
@@ -58,6 +60,11 @@ const PROMPT_TIMEOUT_DS: &str = "100";
 /// Drain timeout while consuming an escape sequence's remaining bytes: the
 /// terminal delivers the whole sequence in one burst, so 0.1 s is plenty.
 const DRAIN_TIMEOUT_DS: &str = "1";
+/// Bytes normally sufficient for an emitted CSI sequence before we switch to
+/// a larger bounded drain. A final byte beyond this boundary must still be
+/// consumed as part of the sequence, never reinterpreted as a consent key.
+const CSI_FAST_BYTES: usize = 16;
+const CSI_DRAIN_BYTES: usize = 256;
 
 /// A terminal a prompt can read decision keys from. `set_drain` flips the
 /// read timeout between "wait for a human" and "collect the rest of an
@@ -147,13 +154,13 @@ pub fn prompt_typo(typed: &str, candidate: &str) -> TypoChoice {
 /// prefix and the keys line. Total failure reports `NotShown`; the caller
 /// still fails open and runs the original unchanged, without recording a
 /// visible intervention or spending budget (SPEC §9-6/8).
-pub fn prompt_warning(lines: &[String], pausing: bool) -> WarningPrompt {
+pub fn prompt_warning(lines: &[String]) -> WarningPrompt {
     #[cfg(debug_assertions)]
     if std::env::var_os("OOPSINPUT_TEST_NO_TTY").is_some() {
         return WarningPrompt::NotShown;
     }
     match open_prompt_tty() {
-        Some((mut tty, _restore)) => run_warning_prompt(&mut tty, lines, pausing),
+        Some((mut tty, _restore)) => run_warning_prompt(&mut tty, lines),
         None => WarningPrompt::NotShown,
     }
 }
@@ -236,6 +243,9 @@ enum Key {
     Seq,
     /// Terminal-level read timeout (`min 0 time N` expired).
     Timeout,
+    /// Input exceeded the bounded escape-sequence drain without a final byte.
+    /// The prompt takes its non-consent default and stops reading.
+    InvalidSequence,
     Err,
 }
 
@@ -269,20 +279,36 @@ fn consume_escape_sequence<T: Read>(tty: &mut T) -> Key {
         Ok(0) | Err(_) => Key::Esc,
         Ok(_) => match b[0] {
             // CSI: parameter/intermediate bytes 0x20–0x3F, one final byte
-            // 0x40–0x7E. Bounded — hostile input cannot hold the prompt.
+            // 0x40–0x7E. The second bounded drain is essential: returning
+            // after exactly 16 parameter bytes once left the final `y`/`r`
+            // for the outer prompt loop, where it became false consent.
             b'[' => {
-                for _ in 0..16 {
+                for _ in 0..CSI_FAST_BYTES {
                     match tty.read(&mut b) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) if (0x40..=0x7e).contains(&b[0]) => break,
-                        Ok(_) => {}
+                        Ok(0) | Err(_) => return Key::InvalidSequence,
+                        Ok(_) if (0x40..=0x7e).contains(&b[0]) => return Key::Seq,
+                        Ok(_) if (0x20..=0x3f).contains(&b[0]) => {}
+                        Ok(_) => return Key::InvalidSequence,
                     }
                 }
-                Key::Seq
+                for _ in 0..CSI_DRAIN_BYTES {
+                    match tty.read(&mut b) {
+                        Ok(0) | Err(_) => return Key::InvalidSequence,
+                        Ok(_) if (0x40..=0x7e).contains(&b[0]) => return Key::Seq,
+                        Ok(_) if (0x20..=0x3f).contains(&b[0]) => {}
+                        Ok(_) => return Key::InvalidSequence,
+                    }
+                }
+                Key::InvalidSequence
             }
             b'O' => {
-                let _ = tty.read(&mut b); // SS3 carries one final byte
-                Key::Seq
+                // SS3 carries one final byte. If it does not arrive in the
+                // drain window, stop this prompt: treating a delayed final
+                // byte as a fresh key could turn it into consent.
+                match tty.read(&mut b) {
+                    Ok(0) | Err(_) => Key::InvalidSequence,
+                    Ok(_) => Key::Seq,
+                }
             }
             _ => Key::Seq, // alt-modified character: consumed, ignored
         },
@@ -312,8 +338,10 @@ fn run_typo_prompt<T: PromptTty>(tty: &mut T, typed: &str, candidate: &str) -> T
             Key::Char(0x03) => TypoChoice::Cancel, // Ctrl-C
             // an escape sequence is not an answer — keep waiting
             Key::Seq => continue,
-            // any other key, lone ESC, timeout, error: the do-nothing outcome
-            _ => TypoChoice::Original,
+            Key::Timeout | Key::InvalidSequence => TypoChoice::Timeout,
+            // any other key, lone ESC, or read error: the do-nothing outcome
+            Key::Char(_) | Key::Esc => TypoChoice::Original,
+            Key::Err => TypoChoice::Timeout,
         };
         break;
     }
@@ -323,15 +351,10 @@ fn run_typo_prompt<T: PromptTty>(tty: &mut T, typed: &str, candidate: &str) -> T
 
 /// The L2+ warning prompt (SPEC §7 anatomy: the caller's lines say what the
 /// command does, what it hits, and why context is unusual; this adds the
-/// keys). Only deliberate keys decide — unrecognized keys are ignored, and
-/// the timeout default depends on the tier: advisory warnings run the
-/// command, pausing confirmations cancel it.
-fn run_warning_prompt<T: PromptTty>(tty: &mut T, lines: &[String], pausing: bool) -> WarningPrompt {
-    let timeout_default = if pausing {
-        WarnChoice::Cancel
-    } else {
-        WarnChoice::RunOnce
-    };
+/// keys). Only deliberate keys decide and unrecognized keys are ignored.
+/// Timeout is returned distinctly; the caller applies the tier-specific
+/// physical default without misrecording it as a deliberate choice.
+fn run_warning_prompt<T: PromptTty>(tty: &mut T, lines: &[String]) -> WarningPrompt {
     let mut msg = String::new();
     for line in lines {
         msg.push_str("oopsinput: ");
@@ -346,14 +369,14 @@ fn run_warning_prompt<T: PromptTty>(tty: &mut T, lines: &[String], pausing: bool
     {
         return WarningPrompt::NotShown; // fail open (SPEC §9-8)
     }
-    let mut choice = timeout_default;
+    let mut choice = WarnChoice::Timeout;
     for _ in 0..MAX_PROMPT_KEYS {
         choice = match read_key(tty) {
             Key::Char(b'e' | b'E') => WarnChoice::Edit,
             Key::Char(b'c' | b'C') | Key::Char(0x03) | Key::Esc => WarnChoice::Cancel,
             Key::Char(b'r' | b'R') => WarnChoice::RunOnce,
-            Key::Timeout => timeout_default,
-            Key::Err => WarnChoice::RunOnce, // fail open
+            Key::Timeout | Key::InvalidSequence => WarnChoice::Timeout,
+            Key::Err => WarnChoice::Timeout,
             // not an answer: escape sequences and unrecognized keys
             Key::Seq | Key::Char(_) => continue,
         };
@@ -373,79 +396,23 @@ pub fn warning_lines(
     recency: &[crate::proposal::RecencyEntry],
     model: Option<&crate::layers::infer::ModelEvidence>,
 ) -> Vec<String> {
-    let has = |code: &str| danger.codes.contains(&code);
-    let git = context.and_then(|c| c.git.as_ref());
-    let targets = || -> String {
-        let joined = danger
-            .targets
-            .iter()
-            .map(|t| format!("'{}'", escape_for_display(t)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if joined.is_empty() {
-            "its target".to_string()
-        } else {
-            joined
-        }
-    };
     match reason {
-        "policy.dirty_work_at_risk" => {
-            let action = if has("git.reset_hard") {
-                "git reset --hard will discard uncommitted changes in tracked files"
-            } else {
-                "git clean -f will delete untracked files"
-            };
-            let mut facts = Vec::new();
-            if let Some(d) = git.and_then(|g| g.dirty)
-                && d > 0
-            {
-                facts.push(format!(
-                    "{d} modified tracked file{}",
-                    if d == 1 { "" } else { "s" }
-                ));
-            }
-            if git.and_then(|g| g.untracked) == Some(true) {
-                facts.push("untracked files present".to_string());
-            }
-            let mut lines = vec![
-                action.to_string(),
-                format!("right now: {}", facts.join(", ")),
-            ];
-            // "right after git diff" (SPEC §5-L3): name the previous command.
-            // These words are charset-restricted twice (plugin, then parser),
-            // and escaped here anyway — SPEC §9-4 says *all* displayed
-            // untrusted text goes through the escaper, with no exemption for
-            // text believed to be safe already (audit 2026-08-06: a rule that
-            // holds only while a distant charset check stays correct is a
-            // rule that breaks silently when that check is edited).
-            if let Some(prev) = recency.first()
-                && prev.age == 1
-                && prev.cmd != "_"
-            {
-                let mut line = format!("previous command: {}", escape_for_display(&prev.cmd));
-                if prev.sub != "_" {
-                    line.push(' ');
-                    line.push_str(&escape_for_display(&prev.sub));
-                }
-                lines.push(line);
-            }
-            lines
-        }
+        "policy.dirty_work_at_risk" => dirty_work_lines(danger, context, recency),
         "policy.main_branch_force" => vec![
             "force-push will rewrite the remote branch's history".to_string(),
             "the current branch is a primary branch (main/master/trunk)".to_string(),
         ],
         "policy.target_context" => {
             let t = context.map(|c| c.targets.as_slice()).unwrap_or(&[]);
-            let why = if has("fs.target_cwd") || t.iter().any(|t| t.is_cwd) {
+            let why = if danger.has("fs.target_cwd") || t.iter().any(|t| t.is_cwd) {
                 "the target is the current directory itself"
-            } else if has("fs.target_parent") || t.iter().any(|t| t.is_parent) {
+            } else if danger.has("fs.target_parent") || t.iter().any(|t| t.is_parent) {
                 "the target is the parent of the current directory"
             } else {
                 "the target does not exist, but a similarly-named neighbor does — typo?"
             };
             vec![
-                format!("recursive delete of {}", targets()),
+                format!("recursive delete of {}", display_targets(danger)),
                 why.to_string(),
             ]
         }
@@ -462,7 +429,7 @@ pub fn warning_lines(
             ]
         }
         "policy.direct_catastrophic" => {
-            let what = if has("fs.target_home") {
+            let what = if danger.has("fs.target_home") {
                 "your entire home directory"
             } else {
                 "the filesystem root"
@@ -487,28 +454,92 @@ pub fn warning_lines(
                 format!(
                     "high-consequence command targeting {}, and the local \
                      model sees a probable mismatch with what you meant",
-                    targets()
+                    display_targets(danger)
                 )
             };
-            let mut lines = vec![what];
-            if let Some(m) = model {
-                lines.push(format!("model: {}", escape_for_display(&m.reason)));
-            }
-            lines
+            model_warning_lines(what, model)
         }
-        "policy.model_adversarial" => {
-            let mut lines = vec![
-                "this command's text appears designed to manipulate the guard itself".to_string(),
-            ];
-            if let Some(m) = model {
-                lines.push(format!("model: {}", escape_for_display(&m.reason)));
-            }
-            lines
-        }
+        "policy.model_adversarial" => model_warning_lines(
+            "this command's text appears designed to manipulate the guard itself".to_string(),
+            model,
+        ),
         _ => vec![format!(
             "high-consequence command flagged by policy ({reason})"
         )],
     }
+}
+
+fn dirty_work_lines(
+    danger: &crate::layers::danger::Analysis,
+    context: Option<&crate::layers::context::Context>,
+    recency: &[crate::proposal::RecencyEntry],
+) -> Vec<String> {
+    let action = if danger.has("git.reset_hard") {
+        "git reset --hard will discard uncommitted changes in tracked files"
+    } else {
+        "git clean -f will delete untracked files"
+    };
+    let git = context.and_then(|c| c.git.as_ref());
+    let mut facts = Vec::new();
+    if let Some(d) = git.and_then(|g| g.dirty)
+        && d > 0
+    {
+        facts.push(format!(
+            "{d} modified tracked file{}",
+            if d == 1 { "" } else { "s" }
+        ));
+    }
+    if git.and_then(|g| g.untracked) == Some(true) {
+        facts.push("untracked files present".to_string());
+    }
+    let mut lines = vec![
+        action.to_string(),
+        format!("right now: {}", facts.join(", ")),
+    ];
+    // "right after git diff" (SPEC §5-L3): name the previous command.
+    // These words are charset-restricted twice (plugin, then parser), and
+    // escaped here anyway — SPEC §9-4 says *all* displayed untrusted text
+    // goes through the escaper, with no exemption for text believed to be
+    // safe already (audit 2026-08-06: a rule that holds only while a distant
+    // charset check stays correct is a rule that breaks silently when that
+    // check is edited).
+    if let Some(prev) = recency.first()
+        && prev.age == 1
+        && prev.cmd != "_"
+    {
+        let mut line = format!("previous command: {}", escape_for_display(&prev.cmd));
+        if prev.sub != "_" {
+            line.push(' ');
+            line.push_str(&escape_for_display(&prev.sub));
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+fn display_targets(danger: &crate::layers::danger::Analysis) -> String {
+    let joined = danger
+        .targets
+        .iter()
+        .map(|target| format!("'{}'", escape_for_display(target)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if joined.is_empty() {
+        "its target".to_string()
+    } else {
+        joined
+    }
+}
+
+fn model_warning_lines(
+    summary: String,
+    model: Option<&crate::layers::infer::ModelEvidence>,
+) -> Vec<String> {
+    let mut lines = vec![summary];
+    if let Some(model) = model {
+        lines.push(format!("model: {}", escape_for_display(&model.reason)));
+    }
+    lines
 }
 
 /// Neutralize text for display (SPEC §9-5): C0/C1 controls and DEL become
@@ -731,6 +762,48 @@ mod tests {
     }
     impl PromptTty for FakeTty {} // all bytes pre-buffered: no drain switch
 
+    /// A terminal stream with an explicit read timeout between bytes. Real
+    /// terminals can split an escape sequence across the 0.1-second drain
+    /// window; a later final byte must not become a fresh prompt answer.
+    struct GappedTty {
+        input: std::collections::VecDeque<Option<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl GappedTty {
+        fn new(input: impl IntoIterator<Item = Option<u8>>) -> Self {
+            Self {
+                input: input.into_iter().collect(),
+                output: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for GappedTty {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.input.pop_front().flatten() {
+                Some(byte) => {
+                    buf[0] = byte;
+                    Ok(1)
+                }
+                None => Ok(0),
+            }
+        }
+    }
+
+    impl Write for GappedTty {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl PromptTty for GappedTty {}
+
     struct UnwritableTty;
 
     impl Read for UnwritableTty {
@@ -799,10 +872,7 @@ mod tests {
     fn timeout_empty_read_runs_the_original() {
         // `min 0 time N` expiry surfaces as a 0-byte read.
         let mut tty = FakeTty::new(b"");
-        assert_eq!(
-            run_typo_prompt(&mut tty, "gti", "git"),
-            TypoChoice::Original
-        );
+        assert_eq!(run_typo_prompt(&mut tty, "gti", "git"), TypoChoice::Timeout);
     }
 
     #[test]
@@ -833,6 +903,47 @@ mod tests {
     }
 
     #[test]
+    fn long_csi_final_byte_never_becomes_a_prompt_answer() {
+        // Real-PTY reproduction (2026-08-08): after sixteen CSI parameter
+        // bytes, the old bounded reader returned early and the sequence's
+        // final `y` became typo consent. A following ordinary `n` must be the
+        // answer; without one, the prompt reports timeout.
+        let mut tty = FakeTty::new(b"\x1b[1111111111111111yn");
+        assert_eq!(
+            run_typo_prompt(&mut tty, "gti", "git"),
+            TypoChoice::Original
+        );
+        assert_eq!(tty.input.position() as usize, tty.input.get_ref().len());
+
+        let mut tty = FakeTty::new(b"\x1b[1111111111111111y");
+        assert_eq!(run_typo_prompt(&mut tty, "gti", "git"), TypoChoice::Timeout);
+
+        let mut tty = FakeTty::new(b"\x1b[1111111111111111rc");
+        assert_eq!(
+            run_warning_prompt(&mut tty, &["x".into()]),
+            WarningPrompt::Shown(WarnChoice::Cancel)
+        );
+
+        // A sequence that pauses longer than the drain window is incomplete,
+        // not complete-plus-a-new-key. Before the fix, the delayed final `y`
+        // or `r` was consumed by the outer prompt loop as consent.
+        let mut tty = GappedTty::new([Some(0x1b), Some(b'['), Some(b'1'), None, Some(b'y')]);
+        assert_eq!(run_typo_prompt(&mut tty, "gti", "git"), TypoChoice::Timeout);
+        assert_eq!(
+            tty.input.len(),
+            1,
+            "delayed CSI final was read as an answer"
+        );
+
+        let mut tty = GappedTty::new([Some(0x1b), Some(b'['), Some(b'1'), None, Some(b'r')]);
+        assert_eq!(
+            run_warning_prompt(&mut tty, &["x".into()]),
+            WarningPrompt::Shown(WarnChoice::Timeout)
+        );
+        assert_eq!(tty.input.len(), 1, "delayed CSI final was read as consent");
+    }
+
+    #[test]
     fn lone_esc_runs_the_original() {
         let mut tty = FakeTty::new(b"\x1b");
         assert_eq!(
@@ -853,8 +964,8 @@ mod tests {
         );
         let mut tty = FakeTty::new(&soup);
         assert_eq!(
-            run_warning_prompt(&mut tty, &["x".into()], false),
-            WarningPrompt::Shown(WarnChoice::RunOnce)
+            run_warning_prompt(&mut tty, &["x".into()]),
+            WarningPrompt::Shown(WarnChoice::Timeout)
         );
     }
 
@@ -871,7 +982,7 @@ mod tests {
     fn warning_shows_anatomy_and_keys_with_trusted_framing() {
         let mut tty = FakeTty::new(b"c");
         assert_eq!(
-            run_warning_prompt(&mut tty, &lines(), false),
+            run_warning_prompt(&mut tty, &lines()),
             WarningPrompt::Shown(WarnChoice::Cancel)
         );
         let shown = tty.shown();
@@ -904,7 +1015,7 @@ mod tests {
         ] {
             let mut tty = FakeTty::new(keys);
             assert_eq!(
-                run_warning_prompt(&mut tty, &lines(), false),
+                run_warning_prompt(&mut tty, &lines()),
                 WarningPrompt::Shown(want),
                 "keys {keys:?}"
             );
@@ -912,19 +1023,11 @@ mod tests {
     }
 
     #[test]
-    fn warning_timeout_default_depends_on_tier() {
-        // advisory warning: timeout runs the command (nonblocking notice)
+    fn warning_timeout_stays_distinct_from_deliberate_keys() {
         let mut tty = FakeTty::new(b"");
         assert_eq!(
-            run_warning_prompt(&mut tty, &lines(), false),
-            WarningPrompt::Shown(WarnChoice::RunOnce)
-        );
-        // pausing confirmation: timeout cancels — running is never the
-        // default for predicted-irreversible commands (SPEC §7)
-        let mut tty = FakeTty::new(b"");
-        assert_eq!(
-            run_warning_prompt(&mut tty, &lines(), true),
-            WarningPrompt::Shown(WarnChoice::Cancel)
+            run_warning_prompt(&mut tty, &lines()),
+            WarningPrompt::Shown(WarnChoice::Timeout)
         );
     }
 
@@ -935,7 +1038,7 @@ mod tests {
         // chose `r`, causing the caller to spend budget for a warning nobody
         // saw.
         assert_eq!(
-            run_warning_prompt(&mut UnwritableTty, &lines(), false),
+            run_warning_prompt(&mut UnwritableTty, &lines()),
             WarningPrompt::NotShown
         );
     }

@@ -13,10 +13,11 @@ refactor/bughunt/audit passes — ✅ 2026-08-06. The archive also holds the
 2026-08-05 name decision — settled, don't re-litigate.
 
 Current measured cost, release build including process spawn (budgets 25 /
-75 p95): common path p50 2.14 ms / p95 3.13 ms; typo path p50 16.3 ms /
-p95 19.5 ms; candidate path incl. the git helper p50 7.44 ms / p95 9.09 ms.
-Common/candidate numbers are the 60-run M5 retention gate on 2026-08-07;
-the typo number is the latest dedicated measurement from 2026-08-06.
+75 p95): common path p50 6.78 ms / p95 7.80 ms; typo path p50 16.3 ms /
+p95 19.5 ms; candidate path incl. the git helper p50 17.03 ms / p95
+19.79 ms. Common/candidate numbers are the final 60-run M7 stabilization gate on
+2026-08-08; the typo number is the latest dedicated measurement from
+2026-08-06.
 
 Standing rules carried out of archived milestones:
 
@@ -54,18 +55,19 @@ Standing rules carried out of archived milestones:
 - **Word boundaries follow the shell, not Unicode**: `lexer::is_shell_whitespace`
   (space/tab/newline only) governs every decision about where a word starts
   or ends (bughunt 2026-08-06).
-- **Habituation writes append, and uncoordinated read-modify-write must never
-  return** (fixed 2026-08-06 from a test-audit finding): the budget and
-  cooldown once lived
-  in a JSON blob that was loaded, modified and written back, so two shells
-  finishing warnings in the same instant each recorded a spend and the second
-  write dropped the first — the hourly cap under-counted and a cooldown could
-  vanish. `policy.jsonl` now takes one locked append per shown intervention
-  and the gates are a pure read over its tail. M5 retention is the sole
-  rewrite: every writer coordinates on a stable cross-process lock and the
-  compactor atomically replaces the log, so it cannot race away another
-  shell's append. Pinned by 8-thread policy and 16-thread event tests. Any
-  future per-command state gets the same treatment.
+- **Habituation writes append, and admission is one locked transaction**
+  (fixed 2026-08-06 and 2026-08-08): the budget and cooldown once lived in a
+  JSON blob that concurrent shells overwrote, losing outcomes. Append-only
+  outcomes fixed that loss, but a later bughunt proved concurrent shells could
+  still all read the same last available budget slot before any prompt
+  finished. `policy.jsonl` now uses the stable cross-process lock to load
+  history, apply gates, and append a short-lived reservation atomically.
+  Completion replaces that reservation logically with the shown outcome;
+  terminal setup failure releases it, and a killed process's reservation
+  expires after ten minutes. Retention is the sole rewrite and atomically
+  replaces the log under that same lock. Pinned by simultaneous-admission,
+  8-thread policy-append, and 16-thread event-append tests. Any future
+  per-command quota gets the same treatment.
 - **Performance is gated, but only on the binary side** (test-audit
   2026-08-06): `scripts/perf-gate.zsh` enforces SPEC §10 budgets for the
   common and candidate paths, and `scripts/pty-gate.zsh` now enforces a
@@ -369,6 +371,54 @@ temporary directory so they never contaminate this passive sample.
       requested, and ungraduated danger categories remain silent in both trial
       modes. Release:
       https://github.com/kserrec/oopsinput/releases/tag/v0.1.0
+
+## M7 — Post-refactor stabilization ✅ 2026-08-08
+
+This milestone closes the whole-codebase bughunt findings reproduced on
+2026-08-08 before any further tester invitation. Each phase is independently
+verifiable and keeps the existing v1 contract; no new product feature is
+being added.
+
+### Phase 1 — Analysis and policy correctness
+
+- [x] Treat an embedded newline in an initial ZLE buffer as a command
+      separator, while continuing to bypass genuine PS2 continuation input.
+- [x] Gate `git reset --hard` only on tracked/staged work and `git clean -f`
+      only on untracked work, with both crossed-state counterfactuals pinned.
+
+### Phase 2 — Prompt and outcome correctness
+
+- [x] Preserve timeout as its own recorded outcome while retaining the
+      tier-specific physical default action.
+- [x] Consume bounded CSI input without allowing an over-cap sequence tail to
+      become a consent key.
+
+### Phase 3 — Lifecycle and diagnostics correctness
+
+- [x] Preserve a `.zshrc` whose final line has no newline through install and
+      uninstall, including a recoverable original backup.
+- [x] Make fresh install failure transactional so a late `.zshrc`/backup
+      failure cannot strand runtime assets that retry and uninstall reject.
+- [x] Make `doctor` distinguish a stale widget snapshot from verified live
+      wrappers.
+- [x] Reject an over-cap config as unavailable/invalid instead of silently
+      parsing a prefix and reporting it valid.
+
+### Phase 4 — Cross-shell admission correctness
+
+- [x] Make warning-budget admission atomic across shells so concurrent
+      prompts cannot exceed the configured hourly cap; abandoned admissions
+      must not permanently consume budget.
+
+### Phase 5 — Acceptance
+
+- [x] Targeted regressions, full tests, formatting, Clippy, release build,
+      clean-machine lifecycle, latency gate, and 10,000-submission PTY gate
+      all pass; descriptive documentation matches the corrected behavior — ✅
+      2026-08-08. `cargo test --locked`: 298 passed, one intentionally ignored
+      live-model harness. Release latency: common 6.78/7.80 ms p50/p95,
+      candidate 17.03/19.79 ms. Volume gate: 10,000/10,000 outputs, zero
+      lost or altered commands, 13.59 ms/submission against a 40 ms ceiling.
 
 ## Later (v2+ candidates — see SPEC §17)
 

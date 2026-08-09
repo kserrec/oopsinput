@@ -9,7 +9,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     Word(Word),
-    /// Control operator: `&&` `||` `|` `|&` `;` `;;` `&` `(` `)`
+    /// Control operator: `&&` `||` `|` `|&` `;` `;;` `&` newline `(` `)`
     Op(&'static str),
     /// Redirection operator with any fd prefix, e.g. `>` `2>>` `<<<` `&>`
     Redirect(String),
@@ -51,6 +51,7 @@ pub fn lex(input: &str) -> Lexed {
         i: 0,
         tokens: Vec::new(),
         uncertainty: Vec::new(),
+        pending_heredoc: false,
     };
     lx.run();
     Lexed {
@@ -110,6 +111,7 @@ struct Lexer {
     i: usize,
     tokens: Vec<Token>,
     uncertainty: Vec<&'static str>,
+    pending_heredoc: bool,
 }
 
 impl Lexer {
@@ -132,6 +134,22 @@ impl Lexer {
     fn run(&mut self) {
         while let Some(c) = self.cur() {
             match c {
+                // At the top level, newline terminates a complete command just
+                // like `;`. Newlines inside quotes/substitutions are consumed
+                // by their owning scanner before control returns here.
+                '\n' => {
+                    // A pasted initial buffer can contain the heredoc body.
+                    // We deliberately do not parse that data as commands; the
+                    // heredoc is already opaque, so stop at its first body
+                    // line rather than manufacture danger evidence from text
+                    // the shell will feed to stdin.
+                    if self.pending_heredoc {
+                        self.i = self.chars.len();
+                        continue;
+                    }
+                    self.i += 1;
+                    self.tokens.push(Token::Op("\n"));
+                }
                 c if is_shell_whitespace(c) => self.i += 1,
                 '&' | '|' | ';' => self.lex_control(c),
                 '<' | '>' if self.peek(1) == Some('(') => self.lex_word(), // <(cmd)
@@ -229,7 +247,9 @@ impl Lexer {
                             op.push('-'); // <<-
                             self.i += 1;
                         }
-                        // Heredoc body lives on later PS2 lines we never see.
+                        // The body is later PS2 input or follows in a pasted
+                        // initial buffer; either way it is opaque command data.
+                        self.pending_heredoc = true;
                         self.note("syntax.heredoc");
                     }
                 }
@@ -576,6 +596,25 @@ mod tests {
     }
 
     #[test]
+    fn top_level_newline_splits_commands_but_quoted_newline_does_not() {
+        // Reproduced through the real ZLE adapter on 2026-08-08: a pasted
+        // initial buffer containing `echo harmless\ngit reset --hard` ran both
+        // commands, but the lexer treated the newline as ordinary spacing and
+        // analyzed only `echo`.
+        let l = lex("echo harmless\ngit reset --hard");
+        let cmds: Vec<&str> = command_words(&l).iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(cmds, ["echo", "git"]);
+        assert!(l.tokens.iter().any(|t| matches!(t, Token::Op("\n"))));
+
+        let quoted = lex("echo 'harmless\ngit reset --hard'");
+        let cmds: Vec<&str> = command_words(&quoted)
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect();
+        assert_eq!(cmds, ["echo"]);
+    }
+
+    #[test]
     fn quoting_resolves_where_safe() {
         let l = lex(r#"echo 'a b' "c d" e\ f '' "#);
         let ws = words(&l);
@@ -678,6 +717,14 @@ mod tests {
         assert!(l.uncertainty.contains(&"syntax.heredoc"));
         let cmds: Vec<&str> = command_words(&l).iter().map(|w| w.text.as_str()).collect();
         assert_eq!(cmds, ["cat"], "heredoc delimiter is not a command word");
+
+        let l = lex("cat <<EOF\ngit reset --hard\nEOF\n");
+        let cmds: Vec<&str> = command_words(&l).iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(
+            cmds,
+            ["cat"],
+            "pasted heredoc data was analyzed as executable commands"
+        );
     }
 
     #[test]
