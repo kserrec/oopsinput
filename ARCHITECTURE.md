@@ -738,7 +738,8 @@ stdout, which carries the decision JSON and is discarded by the plugin:
   everything else (`n`, any other key, a ten-second timeout, a missing
   terminal, any internal failure) runs the original command, which is the
   safe outcome since that command could not have run anyway. Timeout is still
-  recorded as `typo.timed_out`, not as a deliberate `n`.
+  recorded as `typo.timed_out`, not as a deliberate `n`, and is named on the
+  terminal before the original runs so it cannot look like correction consent.
 - `prompt_warning` shows the L2+ warning, whose anatomy is fixed by SPEC §7:
   what the command does, the concrete facts, why the context is unusual,
   then the keys. `e` restores your exact buffer to ZLE for editing, `c`
@@ -754,7 +755,10 @@ stdout, which carries the decision JSON and is discarded by the plugin:
 
 `warning_lines` builds those message lines from evidence codes and context
 counts, with every untrusted fragment escaped and every line framed by the
-fixed `oopsinput:` prefix.
+fixed `oopsinput:` prefix. Both prompt types first write a terminal line break:
+ZLE has intercepted Enter but has not delegated the accept widget yet, so
+without that break the question would be joined directly to the submitted
+buffer on the same row.
 
 **Reading a keypress** is subtler than it looks: an arrow key is not one
 byte but a short escape sequence (`ESC [ A`). Reading a single byte treated
@@ -1000,7 +1004,7 @@ Measured on the candidate path (release, including both our spawn and git's):
 
 The testing philosophy: **buffer exactness and fail-open behavior are the
 product**, so the highest-value tests drive a real interactive zsh, not mocks.
-281 automated tests today (280 passing by default plus one ignored live-model
+299 automated tests today (298 passing by default plus one ignored live-model
 harness) across unit and nine integration suites, plus three gates that run
 separately.
 
@@ -1025,7 +1029,8 @@ separately.
   C locale, a hanging binary is killed by the watchdog within deadline, secrets
   never reach the event log, resolution kinds are extracted correctly,
   double-sourcing is harmless, Vi keymap accepts work; the full typo flow (`y`
-  runs the correction with arguments preserved byte-for-byte, `n` runs the
+  runs the correction with arguments preserved byte-for-byte, prompts begin on
+  a clean line, a timeout names its unchanged-original outcome, `n` runs the
   original, Ctrl-C runs nothing, resolving words never prompt, the config file
   alone enables prompts); and the full warning flow (both halves of the
   flagship pair, edit restoring the exact buffer to a live ZLE, run-once

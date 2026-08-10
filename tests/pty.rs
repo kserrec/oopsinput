@@ -446,6 +446,9 @@ fn suggest_mode_y_runs_the_correction_exactly() {
     // with every other byte (the --flag argument) preserved. The 300 ms pause
     // before answering sits past the 150 ms analysis deadline, proving the
     // watchdog retires while a prompt is on screen.
+    // Owner-session reproduction (2026-08-09): before the prompt wrote a
+    // leading CRLF, ZLE had not yet accepted the buffer and the transcript
+    // joined `oopspecialxq --flag` directly to `oopsinput:` on one row.
     // Executed markers use $((...)) so the echoed command line (which shows
     // the source text) can never satisfy an assertion about executed output.
     let s = Session::new(None, &[("OOPSINPUT_MODE", "suggest")]);
@@ -461,6 +464,16 @@ fn suggest_mode_y_runs_the_correction_exactly() {
     assert!(
         out.contains("did you mean 'oopspecialx'?"),
         "prompt missing or wrong candidate:\n{out}"
+    );
+    let (_, after_buffer) = out
+        .split_once("oopspecialxq --flag")
+        .expect("submitted typo missing from terminal transcript");
+    let (line_boundary, _) = after_buffer
+        .split_once("oopsinput:")
+        .expect("framed typo prompt missing from terminal transcript");
+    assert!(
+        line_boundary.contains('\n'),
+        "typo prompt did not begin on a clean line after the submitted buffer:\n{out}"
     );
     assert!(
         out.contains("CORRECTED-5 --flag"),
@@ -806,6 +819,16 @@ fn warn_mode_dirty_reset_cancel_has_zero_side_effects() {
     assert!(
         out.contains("1 modified tracked file"),
         "context facts not named:\n{out}"
+    );
+    let (_, after_buffer) = out
+        .split_once("git reset --hard")
+        .expect("submitted reset missing from terminal transcript");
+    let (line_boundary, _) = after_buffer
+        .split_once("oopsinput:")
+        .expect("framed warning missing from terminal transcript");
+    assert!(
+        line_boundary.contains('\n'),
+        "warning did not begin on a clean line after the submitted buffer:\n{out}"
     );
     assert!(
         out.contains("marker-w2"),

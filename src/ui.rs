@@ -320,7 +320,7 @@ fn consume_escape_sequence<T: Read>(tty: &mut T) -> Key {
 /// every piece of untrusted text in the message.
 fn run_typo_prompt<T: PromptTty>(tty: &mut T, typed: &str, candidate: &str) -> TypoChoice {
     let msg = format!(
-        "oopsinput: '{}' not found — did you mean '{}'? [y/n] ",
+        "\r\noopsinput: '{}' not found — did you mean '{}'? [y/n] ",
         escape_for_display(typed),
         escape_for_display(candidate),
     );
@@ -345,7 +345,12 @@ fn run_typo_prompt<T: PromptTty>(tty: &mut T, typed: &str, candidate: &str) -> T
         };
         break;
     }
-    let _ = tty.write_all(b"\r\n");
+    let ending: &[u8] = if choice == TypoChoice::Timeout {
+        "\r\noopsinput: timed out — running original unchanged\r\n".as_bytes()
+    } else {
+        b"\r\n"
+    };
+    let _ = tty.write_all(ending);
     choice
 }
 
@@ -355,7 +360,7 @@ fn run_typo_prompt<T: PromptTty>(tty: &mut T, typed: &str, candidate: &str) -> T
 /// Timeout is returned distinctly; the caller applies the tier-specific
 /// physical default without misrecording it as a deliberate choice.
 fn run_warning_prompt<T: PromptTty>(tty: &mut T, lines: &[String]) -> WarningPrompt {
-    let mut msg = String::new();
+    let mut msg = String::from("\r\n");
     for line in lines {
         msg.push_str("oopsinput: ");
         msg.push_str(line);
@@ -830,8 +835,8 @@ mod tests {
         assert_eq!(run_typo_prompt(&mut tty, "gti", "git"), TypoChoice::Correct);
         let shown = tty.shown();
         assert!(
-            shown.starts_with("oopsinput: "),
-            "trusted prefix missing: {shown}"
+            shown.starts_with("\r\noopsinput: "),
+            "prompt did not begin on a clean, framed line: {shown:?}"
         );
         assert!(
             shown.contains("'gti' not found"),
@@ -870,9 +875,19 @@ mod tests {
 
     #[test]
     fn timeout_empty_read_runs_the_original() {
+        // Owner-session reproduction (2026-08-09): the structural event was
+        // `typo.timed_out`, but the same-row prompt ended without naming that
+        // outcome, making fail-open look like unprompted acceptance. A direct
+        // unchanged PTY probe measured the configured timeout at 10.07 s.
         // `min 0 time N` expiry surfaces as a 0-byte read.
         let mut tty = FakeTty::new(b"");
         assert_eq!(run_typo_prompt(&mut tty, "gti", "git"), TypoChoice::Timeout);
+        assert!(
+            tty.shown()
+                .ends_with("\r\noopsinput: timed out — running original unchanged\r\n"),
+            "timeout outcome was not made explicit: {:?}",
+            tty.shown()
+        );
     }
 
     #[test]
@@ -986,6 +1001,10 @@ mod tests {
             WarningPrompt::Shown(WarnChoice::Cancel)
         );
         let shown = tty.shown();
+        assert!(
+            shown.starts_with("\r\n"),
+            "warning did not begin on a clean line: {shown:?}"
+        );
         for line in shown.lines().filter(|l| !l.trim().is_empty()) {
             assert!(
                 line.starts_with("oopsinput: "),

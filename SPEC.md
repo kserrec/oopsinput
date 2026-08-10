@@ -1,6 +1,6 @@
 # oopsinput — Specification
 
-**Version:** 1.0-draft · **Status:** canonical · **License:** Apache-2.0 · **Updated:** 2026-08-08
+**Version:** 1.0-draft · **Status:** canonical · **License:** Apache-2.0 · **Updated:** 2026-08-09
 
 This document is the source of truth for the project. It supersedes the earlier
 "Binput Guard" canonical spec (kept privately as background reading; its long-horizon
@@ -115,10 +115,14 @@ this intervention is free: the alternative was an error message.
 
 - Find nearest candidates by edit distance (self-written, bounded) against
   PATH executables + plugin-supplied aliases/functions/builtins.
-- Prompt: `oopsinput: 'gti' not found — did you mean 'git pull ...'? [y/n]`
+- Prompt, beginning on a clean terminal line:
+  `oopsinput: 'gti' not found — did you mean 'git pull ...'? [y/n]`
 - **`y` runs the corrected command** — strong consent is acceptable here
   precisely because the original was unexecutable. `n` runs the original
-  unchanged (it fails naturally). Ctrl-C cancels. Default on timeout: `n`.
+  unchanged (it fails naturally). Ctrl-C cancels. Default on the ten-second
+  timeout: `n`; before the original runs, the prompt explicitly says it timed
+  out and is running the original unchanged. A timeout can never look like
+  consent to the correction.
 - Never fires when the command word resolves. Zero tolerance for false
   positives here: resolution check must be exact.
 
@@ -245,6 +249,10 @@ Two consent strengths, matched to what the user typed:
 |---|---|---|---|
 | L1 typo (command couldn't run) | `'gti' not found — did you mean 'git'? [y/n]` | `y` = run corrected · `n` = run original · Ctrl-C = cancel | Original was unexecutable; `y` is explicit consent, not auto-fix |
 | L2–L4 (command is real) | Specific warning: what it does, what it hits, why context is unusual | `e` = edit (exact buffer restored to ZLE) · `c` = cancel · `r` = run unchanged once | The command has teeth; suggestions are only ever placed in the **editable buffer**, never run |
+
+Every intervention begins on a clean terminal line. This is part of the
+consent surface: the question must be visually separate from the command the
+user submitted.
 
 Warning anatomy (always): 1) what the command appears to do, 2) the concrete
 target/scope/environment, 3) why the current context is unusual, 4) the keys.

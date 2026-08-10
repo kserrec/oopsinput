@@ -468,19 +468,25 @@ acceptance gate.
 
 ### Phase 2 — Kyle learns and deliberately exercises the whole product
 
-**Next session starts here — owner-observed typo-prompt failure, hands-on
-walkthrough paused 2026-08-09.** Kyle reached the first Suggest-mode exercise
-using the isolated `oopspecialx` alias fixture, then stopped because the prompt
-surface did not provide clear, readable consent. Do not continue familiarization
-until both observations below are reproduced and resolved:
+**Prompt blockers resolved 2026-08-09; owner familiarization resumes here.**
+Kyle reached the first Suggest-mode exercise using the isolated `oopspecialx`
+alias fixture, then stopped because the prompt surface did not provide clear,
+readable consent. The two observations below are now reproduced, fixed, and
+regression-pinned; Kyle still needs to re-exercise the corrected surface before
+the rest of the walkthrough continues.
 
-- [ ] Diagnose and fix the typo prompt rendering on the same terminal row as
+- [x] Diagnose and fix the typo prompt rendering on the same terminal row as
       the submitted command instead of beginning on a clean line. Reproduce it
       in a real interactive Zsh with a temporary `OOPSINPUT_STATE_DIR`, identify
       the ZLE/terminal ordering from evidence before editing, then add a PTY
       regression that pins a readable line boundary without changing command
-      bytes or prompt-key behavior.
-- [ ] Diagnose the prompt apparently advancing on its own after roughly one to
+      bytes or prompt-key behavior — ✅ 2026-08-09. The unchanged PTY transcript
+      joined `oopspecialxq accepted` directly to `oopsinput:` because the wrapped
+      ZLE accept widget had not yet delegated Enter when the binary wrote to
+      `/dev/tty`. Both prompt types now begin with a terminal line break; the
+      real-Zsh regression requires a line-feed boundary, while the existing
+      correction, original, cancel, and byte-integrity assertions still pass.
+- [x] Diagnose the prompt apparently advancing on its own after roughly one to
       two seconds without Kyle entering a choice. The exact transcript was not
       captured in this session, so first determine whether the corrected alias
       actually ran or the original typo ran through the timeout/fail-open path;
@@ -489,7 +495,21 @@ until both observations below are reproduced and resolved:
       runs the original while looking like acceptance is still an unacceptable
       prompt contract. Make no speculative fix, preserve the current code between
       characterization runs, and regression-pin the proven cause before the
-      walkthrough resumes.
+      walkthrough resumes — ✅ 2026-08-09. The surviving isolated owner event
+      records `allow` / `typo.timed_out`, proving the corrected alias did not run.
+      An unchanged no-input PTY probe expired at 10.07 s, and 10/10 installed-
+      release trials held for 2.5 s accepted only after an explicit `y`; no early
+      advance reproduced. The actual failure was an unlabeled normal timeout
+      made ambiguous by the same-row rendering. Timeout now prints
+      `oopsinput: timed out — running original unchanged` before fail-open; an
+      end-to-end Zsh transcript and structural event pin that the original runs,
+      the correction does not, and the outcome remains `typo.timed_out`.
+      Completion checks: formatting, Clippy, all 298 default tests, release
+      build, and the binary performance gate passed; the 10,000-submission PTY
+      gate preserved every command at 14.22 ms/submission against the 40 ms
+      ceiling. The verified release binary was installed for owner retesting;
+      `.zshrc` and config checksums, all 102 accumulated natural-use events,
+      and private `0700`/`0600` modes were preserved exactly.
 
 - [ ] Teach the product from the ground up, one small section at a time: what
       the Zsh plugin intercepts, what the Rust binary analyzes, how the four

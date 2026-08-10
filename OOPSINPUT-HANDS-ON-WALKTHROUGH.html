@@ -669,9 +669,12 @@ print -r -- "Disposable practice area: $OOPSINPUT_HANDSON_DIR"</code></pre>
             <pre><code>oopspecialxq accepted</code></pre>
             <p>Wait until the <code>[y/n]</code> prompt is visible, then press <kbd>y</kbd> once.</p>
             <div class="expect">
-              <b>Expected:</b> oopsinput suggests <code>oopspecialx</code>, and accepting prints
+              <b>Expected:</b> the oopsinput question begins on a clean line and suggests
+              <code>oopspecialx</code>. Accepting prints
               <code>TYPO CORRECTION WORKED: accepted</code>. The argument survives unchanged;
-              only the command name is corrected after your explicit consent.
+              only the command name is corrected after your explicit consent. If no key is
+              entered for ten seconds, oopsinput instead says it timed out and is running the
+              original unchanged; that message is not acceptance, and the alias must not run.
             </div>
             <label class="checkline"><input type="checkbox"> Pressing <kbd>y</kbd> ran the corrected alias with its argument intact.</label>
           </div>
