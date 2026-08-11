@@ -36,16 +36,18 @@ oopsinput is three things working together:
    decides to intervene it talks to your terminal directly (see §4.9) rather
    than through the plugin. There is no daemon, no background process, no
    state held in memory between commands.
-3. **Install/uninstall scripts** (`zsh/install.zsh`, `zsh/uninstall.zsh`) —
-   copy the binary into `~/.local/bin` and the plugin into
-   `~/.local/share/oopsinput`, add/remove one clearly-marked block in
-   `~/.zshrc`, and write a default config file on first install. The shell
-   edit is backed up byte-for-byte (including a missing final newline), and
-   the original backup is retained across updates and uninstall. The marker
-   block is also the receipt that authorizes later updates and removal of the
-   two installed runtime files. A fresh install stages the shell edit and
-   backup before runtime assets and removes newly installed assets if the
-   final shell replacement fails, so failure cannot strand unowned files.
+3. **Guided install/uninstall scripts** (`zsh/install.zsh`,
+   `zsh/uninstall.zsh`) — copy the binary into `~/.local/bin` and the plugin
+   plus a stable uninstaller into `~/.local/share/oopsinput`, then add/remove
+   one clearly marked block in `~/.zshrc`. A fresh install has no default mode:
+   it requires an unfocused terminal choice, or an explicit public `--mode`
+   argument for automation, before creating its config. The shell edit is
+   backed up byte-for-byte (including a missing final newline), and the
+   original backup is retained across updates and uninstall. The marker block
+   is the receipt that authorizes later updates and removal of the three
+   installed runtime files. Every new output and old rollback copy is staged
+   before commit; a handled fresh failure removes only newly created files,
+   while a failed update restores the complete previous runtime set.
 
 The trust and failure model in one sentence: the plugin treats the binary as
 something that can crash, hang, or be missing at any moment, and in every one
@@ -112,27 +114,43 @@ against a release build:
 scripts/perf-gate.zsh
 ```
 
-These three gates run separately from `cargo test`: they need a release build
-and real process spawns, and keeping them separate keeps the test suite fast.
-Run all three before release; run both timing gates before claiming a
+These three runtime gates run separately from `cargo test`: they need a release
+build and real process spawns, and keeping them separate keeps the test suite
+fast. Run all three before release; run both timing gates before claiming a
 performance number.
 
-To install on your own machine:
+The official artifact builder uses the pinned Rust 1.89.0 toolchain and its
+musl target to create the versioned static archive plus `SHA256SUMS`. The
+archive gate rejects extra or missing members, wrong types or modes, a version
+mismatch, dynamic linkage, or a failed checksum, then passes the extracted
+files—not repository-private source overrides—to the lifecycle gate:
 
 ```
-zsh/install.zsh
+rustup target add --toolchain 1.89.0 x86_64-unknown-linux-musl
+scripts/build-release-bundle.zsh
+scripts/release-bundle-gate.zsh dist/oopsinput-0.1.0-x86_64-unknown-linux-musl.tar.gz
 ```
 
-This installs in **suggest** mode: the typo layer may ask you a question
-(only ever about a command that could not have run anyway), and everything
-else is silently observed and recorded. Danger warnings are off by default —
-see §4.8 for the modes and how one is chosen. The release binary lands at
-`~/.local/bin/oopsinput`; the plugin lands at
-`~/.local/share/oopsinput/oopsinput.zsh`, and the marked `~/.zshrc` block
-sources that installed copy. Moving or deleting the checkout therefore does
-not break a new shell. Rerunning the installer atomically updates both runtime
-files and migrates an older checkout-pointing block in place, while preserving
-the original pre-install shell backup.
+The tag-triggered `.github/workflows/release.yml` performs those same steps,
+generates GitHub build provenance for the archive, and publishes the archive
+and checksum receipt only after every gate succeeds.
+
+To install a source build on your own machine:
+
+```
+zsh zsh/install.zsh
+```
+
+On a fresh install, the script explains Shadow, Suggest, Warn, and Confirm;
+nothing begins focused, and a direct digit or Tab followed by Enter is required.
+For non-interactive use, `--mode shadow` (or one of the other three exact mode
+names) is mandatory. The release binary lands at `~/.local/bin/oopsinput`; the
+plugin and stable uninstaller land at `~/.local/share/oopsinput/`, and the
+marked `.zshrc` block sources only the installed plugin. Moving or deleting the
+checkout therefore does not break a new shell or removal path. Rerunning the
+installer atomically updates the complete three-file runtime set, while
+preserving both the original pre-install shell backup and every existing config
+byte-for-byte.
 
 Before editing, the installer requires one exact, standalone marker boundary
 (marker text joined to a user line is damaged, never an ownership receipt) and
@@ -140,18 +158,18 @@ refuses symbolic-link or non-regular destinations. On a fresh install it also
 refuses to overwrite same-named regular files: only an existing healthy marker
 block authorizes update behavior.
 
-To remove:
+To remove without the checkout or archive:
 
 ```
-zsh/uninstall.zsh
+zsh "$HOME/.local/share/oopsinput/uninstall.zsh"
 ```
 
 The uninstaller uses the same healthy marker block as its ownership receipt.
-It removes that block and the two installed runtime files, restores whether
-the preceding shell line originally lacked a final newline, and preserves any
-unrecognized file in the plugin directory. Configuration, the original shell
-backup, and recorded state remain; run `oopsinput purge` first when recorded
-state should be removed.
+It removes that block, the binary, plugin, and its own installed copy; restores
+whether the preceding shell line originally lacked a final newline; and
+preserves any unrecognized file in the plugin directory. Configuration, the
+original shell backup, and recorded state remain; run the installed binary's
+`purge` command first when recorded state should be removed.
 
 ## 3. The zsh side, ground-up
 
@@ -657,9 +675,11 @@ it lets the M5 report ask "how often would this have spoken?" without
 misclassifying intrinsic Observe reasons or depending on the final reason a
 Suggest-mode typo prompt may produce.
 
-The four modes (SPEC §8): **shadow** (analyze and record, never visible —
-the default), **suggest** (adds typo prompts), **warn** (adds nonblocking
-danger warnings), **confirm** (danger warnings pause for an answer).
+The four modes (SPEC §8): **shadow** (analyze and record, never visible),
+**suggest** (adds typo prompts), **warn** (adds nonblocking danger warnings),
+and **confirm** (danger warnings pause for an answer). Shadow is the config
+parser's conservative fallback when mode is missing or invalid; it is not a
+fresh-install default, because the installer requires an explicit choice.
 
 **`apply_gates`** is habituation control (SPEC §7): at most three visible
 interventions per rolling hour, and a per-rule cooldown — three consecutive
@@ -832,10 +852,10 @@ evidence. Every connection independently verifies the peer before sending.
 
 The brain above §4.10's transport: prompt assembly, the response schema, and
 validation. `check` consults it only when **all** of these hold: a model is
-configured (`model =` in config; the default is none, so default installs
-never touch the network), the danger layer marked a candidate that is *not*
-direct-catastrophic, and policy's mode-blind verdict came back Observe with
-an ambiguity reason — L3 neither cleared the command nor decided against
+configured (`model =` in config; the default is none, so an ordinary install
+never enables model network access), the danger layer marked a candidate that
+is *not* direct-catastrophic, and policy's mode-blind verdict came back Observe
+with an ambiguity reason — L3 neither cleared the command nor decided against
 it (`policy::l4_gate`). Replaying 1,107 natural commands from this
 machine's real history put the gate-eligible rate at 0.27%, inside SPEC
 §5-L4's <1% target. What the model says is consumed deterministically
@@ -1018,9 +1038,8 @@ Measured on the candidate path (release, including both our spawn and git's):
 
 The testing philosophy: **buffer exactness and fail-open behavior are the
 product**, so the highest-value tests drive a real interactive zsh, not mocks.
-299 automated tests today (298 passing by default plus one ignored live-model
-harness) across unit and nine integration suites, plus three gates that run
-separately.
+312 automated tests today (311 passing by default plus one ignored live-model
+harness) across unit and nine integration suites, plus four standalone gates.
 
 - **Unit tests** live inside each `src/` module (`#[cfg(test)] mod tests`):
   the closed resolution vocabulary, payload parsing edge cases (including the
@@ -1069,22 +1088,22 @@ separately.
   never appears fails with the terminal transcript instead of hanging the
   suite.
 - **`tests/uninstall.rs`** — damaged or multiple marker blocks refuse without
-  editing; a healthy install removes only its marker, binary, and plugin while
-  preserving config, state, and unrecognized files; no marker means no
-  authority to remove same-named files; a no-final-newline shell file survives
-  install, update, and uninstall byte-exact with its original backup intact;
-  a later user suffix stays on its own line, and old marker text joined to a
-  user line is refused rather than treated as ownership; displayed paths
-  cannot inject terminal or bidi controls.
-- **`tests/install.rs`** — the installed defaults and lifecycle: a fresh
-  install writes `mode = suggest` with user-only permissions, copies both
-  runtime artifacts outside the checkout, migrates and updates an old source
-  block without changing surrounding lines, and refuses existing or symlinked
-  destinations rather than claiming or writing through them. A forced backup
-  failure happens before runtime assets exist and an ordinary retry succeeds
-  after the cause is removed. Joined marker text is refused before either
-  runtime asset exists. Its authored path messages are inert under both control
-  bytes and bidi controls.
+  editing; a healthy install removes only its marker and all three runtime
+  files, including the installed uninstaller itself, while preserving config,
+  state, and unrecognized files; no marker means no authority to remove
+  same-named files. A no-final-newline shell file survives install, update, and
+  uninstall byte-exact with its original backup intact; a later user suffix
+  stays on its own line, and old marker text joined to a user line is refused
+  rather than treated as ownership; displayed paths cannot inject terminal or
+  bidi controls.
+- **`tests/install.rs`** — the guided installation contract: all four explicit
+  promptless choices, missing and invalid choices, no initial terminal focus,
+  digit selection, Tab/Enter selection, bare Enter, Ctrl-C cancellation, and
+  existing-config preservation. It also pins private modes for every installed
+  file, symlink and marker refusal, checkout independence, stable-uninstaller
+  updates, path-display escaping, byte-exact shell handling, retry after an
+  early backup failure, complete fresh cleanup after a late failure, and
+  restoration of one coherent old runtime set after a failed update.
 - **`tests/doctor.rs`** — a complete healthy installation reports `ready`;
   missing runtime files, partial wrapper coverage, unsafe state permissions,
   invalid or over-cap config, a stale wrapper snapshot, and an unreachable
@@ -1108,14 +1127,19 @@ separately.
   retention-marker and abandoned-temp cleanup, and refusal to enter a
   symlinked directory or recurse into an unexpected one.
 - **`scripts/lifecycle-gate.zsh`** — the complete release lifecycle under one
-  `mktemp`-owned home: install the actual release binary and plugin, load them
-  in a real interactive ZLE shell, require `doctor` to report all four wrappers
-  ready in Shadow mode, record and report three commands, purge state, and
-  uninstall. It proves the original `.zshrc` bytes return exactly, runtime and
-  state disappear, and only the deliberately retained config plus `.zshrc`
-  backup remain. Its fixture deliberately lacks a final newline, covering both
-  the original unmarked-separator regression and the later marker-joined-to-
-  user-line failure.
+  `mktemp`-owned home: install the binary, plugin, and stable uninstaller; load
+  them in a real interactive ZLE shell; require `doctor` to report all four
+  wrappers ready in explicitly selected Shadow mode; record and report three
+  commands; purge state; then remove the runtime through the installed
+  uninstaller. It proves the original `.zshrc` bytes return exactly, runtime
+  and state disappear, and only the deliberately retained byte-exact config
+  plus `.zshrc` backup remain. Its optional argument switches it from private
+  source artifacts to an extracted public release directory.
+- **`scripts/build-release-bundle.zsh` and
+  `scripts/release-bundle-gate.zsh`** — build the pinned, reproducible
+  x86_64-musl archive and checksum receipt, then enforce the exact archive
+  boundary, modes, version, static linkage, repository-source identity, and
+  shipped lifecycle before those files can be published.
 - **`scripts/pty-gate.zsh`** — the volume acceptance gate: N unique
   submissions (default 10,000) through a PTY shell; every output must appear,
   nothing may hang. M1's run: 10,000/10,000, zero altered buffers, in 128 s.
@@ -1140,6 +1164,10 @@ separately.
   rejects advisories, yanked crates, unreviewed crate versions, unacceptable
   licenses, duplicate/wildcard dependencies, and non-crates.io sources. It
   runs on pushes, pull requests, manual dispatch, and a weekly schedule.
+- **`.github/workflows/release.yml`** — on a matching `vVERSION` tag, builds
+  the musl artifact with Rust 1.89.0, runs the release-bundle gate, generates a
+  GitHub artifact attestation through a commit-pinned official action, and
+  creates the prerelease with only the verified archive and `SHA256SUMS`.
 - **`eval/golden/`** — the golden corpus (SPEC §11), three files run as
   ordinary tests: `typo.json` (20 cases), `danger.json` (41 cases, command
   shapes) and `policy.json` (19 cases, context flips — the same command in
@@ -1207,11 +1235,11 @@ Short versions — SPEC has the full arguments:
 
 Honest about what today's code does *not* do:
 
-- **Danger warnings are off by default.** The default modes (shadow, and the
-  installed default suggest) never show them — the verdict is recorded as
-  shadow data instead. Visible warnings require `mode = warn` or `confirm`,
-  and no category is enabled by default until the pilot supplies evidence
-  (SPEC §8 graduation). This is deliberate sequencing, not an oversight.
+- **Danger warnings are mode-controlled, not comprehensive.** Shadow and
+  Suggest never show them—the verdict is recorded as shadow data instead.
+  Visible warnings require the user to select `mode = warn` or `confirm`, and
+  no unrecognized category becomes visible at any mode. This is deliberate
+  sequencing, not a safety guarantee.
 - **The rule tables are curated, not exhaustive.** They recognize the command
   shapes we chose; an unusual tool or an unfamiliar flag spelling is simply
   not recognized. The layer fails toward silence.
@@ -1247,17 +1275,10 @@ next; completed milestones are archived verbatim in
 [PLAN-ARCHIVE.md](PLAN-ARCHIVE.md), including the findings from each
 refactor, bug-hunt, and security-audit pass.
 
-In short: the deterministic product, optional local-model layer, and M5
-report, purge, retention, and security hardening are complete and tested —
-capture, lexing, all four layers, policy, prompts, model gating and fallback,
-structural logging, and pilot-data summaries. Both CI workflows and the public
-security policy are also live, and `doctor` now covers the complete installed,
-freshly verified live-shell, config, optional-model, and state-permission
-setup. The clean-machine release lifecycle is CI-enforced end to end. The
-`v0.1.0` code, documentation, and acceptance baseline is published as the
-first public alpha; M7's post-refactor stabilization then closed all nine
-reproduced correctness findings and passed the complete 298-test, lifecycle,
-latency, and 10,000-submission acceptance run. Later work is tracked in PLAN;
-its next candidate is the promptless agent request contract and one named-agent
-adapter. Passive local M5 observation continues only as an optional future
-data point.
+In short: the deterministic product, optional local-model layer, reporting,
+purge, retention, security hardening, guided mode-selecting installer, stable
+uninstaller, and static release-archive pipeline are implemented and tested.
+The published `v0.1.0` remains the first source-only public alpha. The active
+installation feature's remaining acceptance and publication work—and all later
+priorities—live in [PLAN.md](PLAN.md); this document deliberately does not
+duplicate their order.

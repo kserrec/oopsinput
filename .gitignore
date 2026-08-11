@@ -1,3 +1,4 @@
 /target
+/dist
 *.jsonl
 .DS_Store

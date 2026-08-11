@@ -12,10 +12,23 @@ PATH=/usr/bin:/bin
 export LC_ALL=C
 
 ROOT=${0:A:h:h}
-RELEASE_BIN=$ROOT/target/release/oopsinput
-PLUGIN_SRC=$ROOT/zsh/oopsinput.zsh
-INSTALL=$ROOT/zsh/install.zsh
-UNINSTALL=$ROOT/zsh/uninstall.zsh
+integer USE_SOURCE_OVERRIDES=1
+if (( $# == 0 )); then
+    RELEASE_BIN=$ROOT/target/release/oopsinput
+    PLUGIN_SRC=$ROOT/zsh/oopsinput.zsh
+    INSTALL=$ROOT/zsh/install.zsh
+    UNINSTALL_SRC=$ROOT/zsh/uninstall.zsh
+elif (( $# == 1 )); then
+    BUNDLE_DIR=${1:A}
+    RELEASE_BIN=$BUNDLE_DIR/oopsinput
+    PLUGIN_SRC=$BUNDLE_DIR/oopsinput.zsh
+    INSTALL=$BUNDLE_DIR/install.zsh
+    UNINSTALL_SRC=$BUNDLE_DIR/uninstall.zsh
+    USE_SOURCE_OVERRIDES=0
+else
+    print -u2 "usage: scripts/lifecycle-gate.zsh [EXTRACTED_RELEASE_DIRECTORY]"
+    exit 2
+fi
 
 fail() {
     print -u2 -r -- "lifecycle-gate: FAIL: $1"
@@ -23,7 +36,7 @@ fail() {
 }
 
 [[ -x $RELEASE_BIN ]] || fail "release binary missing; run cargo build --release first"
-[[ -f $PLUGIN_SRC && -f $INSTALL && -f $UNINSTALL ]] || fail "repository lifecycle files missing"
+[[ -f $PLUGIN_SRC && -f $INSTALL && -f $UNINSTALL_SRC ]] || fail "lifecycle files missing"
 for helper in zsh script timeout cmp grep stat wc find sort; do
     command -v $helper >/dev/null 2>&1 || fail "required helper not found: $helper"
 done
@@ -58,12 +71,26 @@ cp -- $ORIGINAL_ZSHRC $GATE_HOME/.zshrc
 # Remove every supported configuration/test override inherited from the
 # developer's shell. Only this isolated absolute HOME may participate.
 run_clean() {
+    local -a artifact_env
+    if (( USE_SOURCE_OVERRIDES == 1 )); then
+        artifact_env=(
+            OOPSINPUT_BIN_SRC=$RELEASE_BIN
+            OOPSINPUT_PLUGIN_SRC=$PLUGIN_SRC
+            OOPSINPUT_UNINSTALL_SRC=$UNINSTALL_SRC
+        )
+    else
+        artifact_env=()
+    fi
     env \
         -u XDG_CONFIG_HOME \
         -u XDG_STATE_HOME \
         -u OOPSINPUT_STATE_DIR \
         -u OOPSINPUT_MODE \
         -u OOPSINPUT_BIN \
+        -u OOPSINPUT_BIN_SRC \
+        -u OOPSINPUT_PLUGIN_SRC \
+        -u OOPSINPUT_UNINSTALL_SRC \
+        -u OOPSINPUT_TEST_FAIL_AFTER \
         -u OOPSINPUT_PLUGIN_ACTIVE \
         -u OOPSINPUT_WRAPPED_WIDGETS \
         -u OOPSINPUT_WIDGET_STATUS_FRESH \
@@ -74,35 +101,37 @@ run_clean() {
         ZDOTDIR=$GATE_HOME \
         TERM=xterm \
         LC_ALL=C \
-        OOPSINPUT_BIN_SRC=$RELEASE_BIN \
-        OOPSINPUT_PLUGIN_SRC=$PLUGIN_SRC \
+        $artifact_env \
         "$@"
 }
 
 print "lifecycle-gate: install -> interactive Shadow -> report -> purge -> uninstall"
 
-if ! INSTALL_OUT=$(run_clean zsh $INSTALL 2>&1); then
+if ! INSTALL_OUT=$(run_clean zsh $INSTALL --mode shadow 2>&1); then
     fail "installer failed:\n$INSTALL_OUT"
 fi
 
 INSTALLED_BIN=$GATE_HOME/.local/bin/oopsinput
 INSTALLED_PLUGIN=$GATE_HOME/.local/share/oopsinput/oopsinput.zsh
+INSTALLED_UNINSTALLER=$GATE_HOME/.local/share/oopsinput/uninstall.zsh
 CONFIG=$GATE_HOME/.config/oopsinput/config
 STATE=$GATE_HOME/.local/state/oopsinput
 BACKUP=$GATE_HOME/.zshrc.oopsinput-backup
 
 cmp -s -- $RELEASE_BIN $INSTALLED_BIN || fail "installed binary differs from the release artifact"
 cmp -s -- $PLUGIN_SRC $INSTALLED_PLUGIN || fail "installed plugin differs from the repository artifact"
+cmp -s -- $UNINSTALL_SRC $INSTALLED_UNINSTALLER || fail "installed uninstaller differs from the release artifact"
 cmp -s -- $ORIGINAL_ZSHRC $BACKUP || fail "installer backup differs from the original .zshrc"
 [[ $(stat -c %a -- $INSTALLED_BIN) == 755 ]] || fail "installed binary mode is not 755"
 [[ $(stat -c %a -- $INSTALLED_PLUGIN) == 600 ]] || fail "installed plugin mode is not 600"
+[[ $(stat -c %a -- $INSTALLED_UNINSTALLER) == 700 ]] || fail "installed uninstaller mode is not 700"
 [[ $(stat -c %a -- $CONFIG) == 600 ]] || fail "installed config mode is not 600"
-grep -Fq -- "mode = suggest" $CONFIG || fail "fresh install did not create Suggest config"
+grep -Fq -- "mode = shadow" $CONFIG || fail "fresh install did not write the explicit Shadow choice"
+INSTALLED_CONFIG_RECEIPT=$GATE_ROOT/installed.config
+cp -- $CONFIG $INSTALLED_CONFIG_RECEIPT
 
-# Exercise the documented silent-trial mode through the installed plugin in a
-# real interactive ZLE shell, not through a direct debug-binary shortcut.
-print -r -- "mode = shadow" > $CONFIG
-chmod 600 -- $CONFIG
+# Exercise the chosen silent mode through the installed plugin in a real
+# interactive ZLE shell, not through a direct debug-binary shortcut.
 PTY_INPUT=$GATE_ROOT/pty-input
 PTY_TRANSCRIPT=$GATE_ROOT/pty-transcript
 {
@@ -137,11 +166,12 @@ if ! PURGE_OUT=$(run_clean $INSTALLED_BIN purge 2>&1); then
 fi
 [[ ! -e $STATE && ! -L $STATE ]] || fail "purge left the oopsinput state directory behind"
 
-if ! UNINSTALL_OUT=$(run_clean zsh $UNINSTALL 2>&1); then
+if ! UNINSTALL_OUT=$(run_clean zsh $INSTALLED_UNINSTALLER 2>&1); then
     fail "uninstaller failed:\n$UNINSTALL_OUT"
 fi
 [[ ! -e $INSTALLED_BIN && ! -L $INSTALLED_BIN ]] || fail "uninstall left the installed binary"
 [[ ! -e $INSTALLED_PLUGIN && ! -L $INSTALLED_PLUGIN ]] || fail "uninstall left the installed plugin"
+[[ ! -e $INSTALLED_UNINSTALLER && ! -L $INSTALLED_UNINSTALLER ]] || fail "uninstall left the installed uninstaller"
 [[ ! -e ${INSTALLED_PLUGIN:h} && ! -L ${INSTALLED_PLUGIN:h} ]] || fail "uninstall left the empty plugin directory"
 
 # Reproduced before this gate landed (2026-08-08): a fresh install appended an
@@ -150,7 +180,7 @@ fi
 # artifacts are the user-owned config and the lifecycle backup.
 cmp -s -- $ORIGINAL_ZSHRC $GATE_HOME/.zshrc || fail "uninstall did not restore the original .zshrc bytes"
 [[ -f $CONFIG && ! -L $CONFIG ]] || fail "uninstall did not retain the regular config"
-[[ $(< $CONFIG) == "mode = shadow" ]] || fail "retained config changed"
+cmp -s -- $INSTALLED_CONFIG_RECEIPT $CONFIG || fail "retained config changed"
 [[ -f $BACKUP && ! -L $BACKUP ]] || fail "uninstall did not retain the regular .zshrc backup"
 
 REMAINING=$(find $GATE_HOME -name '*oopsinput*' -printf '%P\n' | sort)

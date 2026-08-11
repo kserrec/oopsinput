@@ -605,28 +605,49 @@ interactive Zsh. This replaces both the implementation's automatic Suggest
 choice and SPEC's former Shadow-default language without treating either as
 user consent.
 
-### Phase 2 — Implement the guided fresh install
+### Phase 2 — Implement the guided fresh install — ✅ 2026-08-11
 
-- [ ] Modify `zsh/install.zsh` to implement the exact SPEC §8 interface:
+- [x] Modify `zsh/install.zsh` to implement the exact SPEC §8 interface:
       read-only preflight first; direct `1`–`4` plus unfocused Tab/Enter mode
       selection from `/dev/tty`; public `--mode` automation; rejection before
       writes for invalid/missing non-interactive choice; and byte-exact
       preservation of every existing config.
-- [ ] Preserve the existing ownership and trust guarantees: user-level files,
+- [x] Preserve the existing ownership and trust guarantees: user-level files,
       byte-exact `.zshrc` backup, marked edits, symlink refusal, atomic staging,
       fresh-install cleanup, rollback to one complete old runtime set on update
       failure, and uninstall that keeps user-owned config and state unless
       deletion was separately requested. Install `uninstall.zsh` at its stable
       public path and make it safely remove its own owned copy.
-- [ ] Add the release-bundle builder and pinned CI release job for the
+- [x] Add the release-bundle builder and pinned CI release job for the
       `x86_64-unknown-linux-musl` archive, `SHA256SUMS`, and build-provenance
       attestation. Test the static artifact and archive contents before they
       can become release assets; add no Rust or installer dependency.
-- [ ] Add focused installer/uninstaller integration and PTY tests derived from
+- [x] Add focused installer/uninstaller integration and PTY tests derived from
       the concrete failure modes above in the same change as the behavior.
-- [ ] Update README and user-facing diagnostics to present one coherent route
+- [x] Update README and user-facing diagnostics to present one coherent route
       from first contact through a `doctor` result of `ready`, without assuming
       familiarity with Rust, repository layout, Zsh widgets, or XDG paths.
+
+The fresh installer now requires an explicit four-mode terminal choice with no
+initial focus, or the public `--mode` argument for deliberate automation; it
+never rewrites an existing config. The binary, plugin, and installed stable
+uninstaller commit and roll back as one runtime set, while shell bytes, backup
+ownership, config, and state retain their prior trust boundaries. A
+Rust-1.89-pinned builder produces a reproducible static musl archive and
+`SHA256SUMS`; the tag workflow pins Checkout and GitHub's attestation action by
+commit, runs the extracted public artifact through its archive and lifecycle
+gate, and only then creates a prerelease. No dependency was added.
+
+Verification on 2026-08-11: all 22 installer tests passed in ten consecutive
+runs (220/220 executions), all 12 uninstaller tests passed, and the complete
+suite passed 311 tests with one intentionally ignored live-model harness.
+Formatting, Clippy with warnings denied, the native release build, source
+lifecycle, static-link/archive checks, and the shipped archive's full
+install-to-doctor-to-stable-uninstall lifecycle all passed. Two consecutive
+bundle builds produced the same SHA-256. The release workflow YAML parses
+locally but remains deliberately untriggered: the published `v0.1.0` was
+directly verified to have no assets, and Phase 3 still owns public-artifact
+acceptance and publication.
 
 ### Phase 3 — Prove the experience as a user experiences it
 

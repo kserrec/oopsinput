@@ -7,16 +7,17 @@ Zsh shell. It catches misspelled command names, recognizes a curated set of
 high-consequence command shapes, checks the current context, and intervenes
 only when the evidence warrants it.
 
-> **Public alpha (`v0.1.0`):** Linux and interactive Zsh only; install from
-> source because no prebuilt packages are published. oopsinput is an assistance
-> layer, not a safety boundary: it deliberately fails open, so an internal
-> failure or an unrecognized command shape lets the original command run
-> unchanged. Never test it with a destructive command you would not otherwise
-> run.
+> **Public alpha (`v0.1.0`):** Linux and interactive Zsh only. The published
+> `v0.1.0` release is source-only; the guided binary-release path described
+> below is implemented on `main` but will not be published until its user
+> acceptance phase passes. oopsinput is an assistance layer, not a safety
+> boundary: it deliberately fails open, so an internal failure or an
+> unrecognized command shape lets the original command run unchanged. Never
+> test it with a destructive command you would not otherwise run.
 
 ## What it does today
 
-- In the installed default, **Suggest mode**, `gti pull` can prompt:
+- In **Suggest mode**, `gti pull` can prompt:
 
   ```text
   *** oops? ***
@@ -69,7 +70,7 @@ It does not:
   or prefilled initial multi-line ZLE buffer is analyzed in full);
 - execute, expand, source, or evaluate the command during analysis;
 - send telemetry or use a cloud service;
-- enable danger warnings by default.
+- show danger warnings unless the user explicitly chooses Warn or Confirm.
 
 For selected Git-related candidates, oopsinput runs a bounded, read-only
 `git status` helper with fixed arguments and a hard timeout. It never runs the
@@ -102,49 +103,102 @@ The default paths are:
 - config: `~/.config/oopsinput/config`;
 - recorded state: `~/.local/state/oopsinput/`;
 - installed binary: `~/.local/bin/oopsinput`;
-- installed plugin: `~/.local/share/oopsinput/oopsinput.zsh`.
+- installed plugin: `~/.local/share/oopsinput/oopsinput.zsh`;
+- installed uninstaller: `~/.local/share/oopsinput/uninstall.zsh`.
 
 The standard XDG configuration and state environment variables take precedence
 when set. State files are user-only, and retention removes records older than
 30 days during later analysis-time writes. No background cleanup process runs.
 
-## Install from source
+## Install
 
-Prerequisites are Linux, interactive Zsh, Git, and Rust 1.89 or newer through
-[rustup](https://rustup.rs). Installation is user-level and does not use root.
+Installation is user-level: it asks for no password or root access, makes no
+network connection, starts no daemon, never sources `.zshrc`, and does not
+change `PATH`.
 
-From a directory where you want the source checkout:
+### Release archive
+
+This is the ordinary-user path for a release that has these two assets:
+
+- `oopsinput-VERSION-x86_64-unknown-linux-musl.tar.gz`;
+- `SHA256SUMS`.
+
+The current published `v0.1.0` does not have them yet. When a later release
+does, its only prerequisites are x86_64 Linux, interactive Zsh, `tar`, and
+`sha256sum`; Rust and Git are not required.
+
+Download both files from the same [GitHub release](https://github.com/kserrec/oopsinput/releases)
+into an otherwise empty directory, open a terminal in that directory, and
+check that the downloaded archive matches the release's checksum receipt:
+
+```sh
+sha256sum --check SHA256SUMS
+```
+
+An `OK` result proves that the two downloaded files agree; it does not prove
+that the software is safe. If the GitHub CLI is already installed, the release
+also supports an optional provenance check showing that GitHub Actions built
+the archive from this repository:
+
+```sh
+gh attestation verify oopsinput-*-x86_64-unknown-linux-musl.tar.gz --repo kserrec/oopsinput
+```
+
+The GitHub CLI is not otherwise needed. After the integrity check succeeds,
+extract the archive, enter its single versioned directory, and start the local
+installer:
+
+```sh
+tar -xzf oopsinput-*-x86_64-unknown-linux-musl.tar.gz
+cd oopsinput-*/
+zsh install.zsh
+```
+
+### Current source build
+
+Until the verified archive is published, prerequisites are Linux, interactive
+Zsh, Git, and Rust 1.89 or newer through [rustup](https://rustup.rs). From a
+directory where you want the source checkout:
 
 ```sh
 git clone https://github.com/kserrec/oopsinput.git
 cd oopsinput
 cargo build --release
-zsh/install.zsh
+zsh zsh/install.zsh
 ```
 
-Before you run the installer, know exactly what it changes:
+Both entry points use the same installer. On a fresh install it explains all
+four modes, starts with nothing focused, and requires a direct `1`–`4` choice
+or Tab followed by Enter. Ctrl-C or terminal EOF cancels before any write. For
+deliberate promptless automation, the equivalent source-checkout form is:
 
-- copies the release binary and plugin to the paths listed above;
-- creates a user-only config with `mode = suggest` only when no config already
-  exists;
+```sh
+zsh zsh/install.zsh --mode shadow
+```
+
+`shadow` may be replaced by `suggest`, `warn`, or `confirm`; there is no
+implicit starting mode.
+
+Before committing, the installer lists every effect. It:
+
+- copies the release binary, plugin, and stable uninstaller to the paths listed
+  above;
+- creates a user-only config containing the mode the user selected, but only
+  when no config path exists;
 - backs up an existing `~/.zshrc` byte-for-byte to
-  `~/.zshrc.oopsinput-backup` and keeps that original backup across updates
-  and uninstall;
+  `~/.zshrc.oopsinput-backup` and keeps that original backup across updates and
+  uninstall;
 - adds one clearly marked source block to `~/.zshrc`.
 
-It refuses symbolic-link and non-regular destinations. On a fresh install it
-also refuses to overwrite same-named runtime files; a healthy marked
-`~/.zshrc` block, with both markers on exact standalone lines, is the ownership
-receipt that permits later updates. Rerunning the installer atomically updates
-the installed binary and plugin without
-changing an existing config. The installed shell hook does not depend on the
-checkout remaining in place. A fresh install stages the shell edit and backup
-before installing runtime files, and removes newly installed runtime files if
-the final shell replacement fails; an interrupted failure cannot strand files
-that a retry and uninstaller both refuse. A `.zshrc` with no final newline is
-restored with that byte shape on uninstall.
+It refuses symbolic-link and non-regular destinations. A healthy marked
+`.zshrc` block is the ownership receipt that permits later updates; without it,
+the installer refuses to overwrite same-named runtime files. It stages every
+complete output before committing. A handled fresh-install failure restores
+the shell and removes only files that invocation created; a failed update
+restores the complete previous binary, plugin, and uninstaller set. Every
+existing config is user-owned and remains byte-for-byte unchanged.
 
-Open a new terminal, then verify the pieces that `doctor` currently checks:
+Open a new terminal, then run the read-only readiness check:
 
 ```sh
 "$HOME/.local/bin/oopsinput" doctor
@@ -158,16 +212,25 @@ effective mode, the configured Ollama model when one is enabled, and
 yet is valid. The
 check is read-only: it never installs, creates state, or repairs permissions.
 It prints `result: ready` and exits zero only when every required check passes;
-otherwise it prints `result: problems found` and exits nonzero.
+otherwise it prints `result: problems found` and exits nonzero. The installer
+has copied the files when it finishes, but the new shell is not considered
+ready until this check succeeds.
 
-## Self-serve Shadow or Suggest trial
+To update a healthy installation, run the newer archive's `zsh install.zsh`,
+or rebuild a newer checkout and run `zsh zsh/install.zsh`. An update does not
+show the mode chooser and preserves the existing config byte-for-byte. Passing
+`--mode` when a config exists is rejected; changing modes is a separate,
+deliberate config edit.
+
+## Choose or change a mode
 
 Use oopsinput on normal commands you already intended to run. Do not manufacture
 dangerous probes: because the tool fails open and its rules are deliberately
 incomplete, a real destructive command can still execute.
 
-Choose one of these two trial modes in the config file. The installer creates
-the file at `~/.config/oopsinput/config` unless `$XDG_CONFIG_HOME` is set.
+The fresh installer requires one of all four modes. To change it later, edit
+the config file at `~/.config/oopsinput/config` unless `$XDG_CONFIG_HOME` is
+set. New commands read the change immediately; no daemon needs restarting.
 
 - **Shadow** gives a completely silent trial. Set:
 
@@ -178,7 +241,7 @@ the file at `~/.config/oopsinput/config` unless `$XDG_CONFIG_HOME` is set.
   Decisions are recorded locally when the state directory is writable, but no
   typo or danger prompt is shown.
 
-- **Suggest** is the installed default. Keep:
+- **Suggest** enables typo prompts. Set:
 
   ```text
   mode = suggest
@@ -188,9 +251,8 @@ the file at `~/.config/oopsinput/config` unless `$XDG_CONFIG_HOME` is set.
   Danger decisions remain invisible and are only recorded as hypothetical
   interventions.
 
-After changing the file, new commands use the selected mode immediately; no
-daemon needs restarting. Use the shell normally for as long as you find useful,
-then inspect the local aggregate:
+Use the shell normally for as long as you find useful, then inspect the local
+aggregate:
 
 ```sh
 "$HOME/.local/bin/oopsinput" report
@@ -208,8 +270,9 @@ to test destructive commands.
 
 ## Remove it
 
-Run the uninstaller from the source checkout. It removes the marked `~/.zshrc`
-block and the installed binary/plugin that the block proves it owns. It keeps
+Run the installed stable uninstaller; the source checkout or downloaded archive
+is not needed. It removes the marked `.zshrc` block and the installed binary,
+plugin, and its own installed copy that the block proves it owns. It keeps
 configuration, recorded state, and `~/.zshrc.oopsinput-backup`; uninstalling
 therefore does not silently delete user data.
 
@@ -218,7 +281,7 @@ binary:
 
 ```sh
 "$HOME/.local/bin/oopsinput" purge
-zsh/uninstall.zsh
+zsh "$HOME/.local/share/oopsinput/uninstall.zsh"
 ```
 
 `purge` keeps the config. After uninstalling, open a new terminal. If you want
@@ -249,6 +312,11 @@ scripts/perf-gate.zsh
 The lifecycle and PTY gates need Zsh plus util-linux `script`; the Git context
 tests also need Git. The lifecycle gate changes only a temporary isolated home
 and deletes it afterward. Performance claims count only in release builds.
+Release engineering additionally installs Rust 1.89.0's
+`x86_64-unknown-linux-musl` target, then runs
+`scripts/build-release-bundle.zsh` followed by
+`scripts/release-bundle-gate.zsh` on the resulting archive. The pinned release
+workflow performs those steps before attestation or publication.
 
 ## License
 

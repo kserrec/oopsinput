@@ -115,15 +115,21 @@ fn no_block_does_not_authorize_removing_same_named_files() {
     ));
     let binary = home.join(".local/bin/oopsinput");
     let plugin = home.join(".local/share/oopsinput/oopsinput.zsh");
+    let uninstaller = home.join(".local/share/oopsinput/uninstall.zsh");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
     std::fs::write(&binary, "not ours\n").unwrap();
     std::fs::write(&plugin, "also not ours\n").unwrap();
+    std::fs::write(&uninstaller, "still not ours\n").unwrap();
 
     let out = uninstall(&home);
     assert!(out.status.success());
     assert_eq!(std::fs::read_to_string(&binary).unwrap(), "not ours\n");
     assert_eq!(std::fs::read_to_string(&plugin).unwrap(), "also not ours\n");
+    assert_eq!(
+        std::fs::read_to_string(&uninstaller).unwrap(),
+        "still not ours\n"
+    );
 
     cleanup(&home);
 }
@@ -152,6 +158,7 @@ fn fresh_install_uninstalls_runtime_artifacts_but_keeps_config_and_state() {
 
     let installed = Command::new("zsh")
         .arg(install_script())
+        .args(["--mode", "suggest"])
         .env("HOME", &home)
         .env("OOPSINPUT_BIN_SRC", &fake_bin)
         .env("OOPSINPUT_PLUGIN_SRC", &fake_plugin)
@@ -183,6 +190,7 @@ fn fresh_install_uninstalls_runtime_artifacts_but_keeps_config_and_state() {
     );
     assert!(!home.join(".local/bin/oopsinput").exists());
     assert!(!home.join(".local/share/oopsinput/oopsinput.zsh").exists());
+    assert!(!home.join(".local/share/oopsinput/uninstall.zsh").exists());
     assert!(
         !home.join(".local/share/oopsinput").exists(),
         "the empty plugin directory should be removed"
@@ -219,9 +227,13 @@ fn install_update_uninstall_preserves_zshrc_without_final_newline() {
     std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(&fake_plugin, "# fake plugin\n").unwrap();
 
-    let install = || {
-        Command::new("zsh")
-            .arg(install_script())
+    let install = |fresh: bool| {
+        let mut command = Command::new("zsh");
+        command.arg(install_script());
+        if fresh {
+            command.args(["--mode", "suggest"]);
+        }
+        command
             .env("HOME", &home)
             .env("OOPSINPUT_BIN_SRC", &fake_bin)
             .env("OOPSINPUT_PLUGIN_SRC", &fake_plugin)
@@ -230,7 +242,7 @@ fn install_update_uninstall_preserves_zshrc_without_final_newline() {
             .expect("run install.zsh")
     };
     for pass in 1..=2 {
-        let out = install();
+        let out = install(pass == 1);
         assert!(
             out.status.success(),
             "install pass {pass} failed: {}",

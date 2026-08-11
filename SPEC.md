@@ -632,7 +632,8 @@ oopsinput/
 ├── deny.toml            # advisories, licenses, sources, exact crate allowlist
 ├── .github/workflows/
 │   ├── ci.yml                # fmt, clippy, tests + release acceptance gates
-│   └── dependency-policy.yml # cargo-deny on changes + weekly
+│   ├── dependency-policy.yml # cargo-deny on changes + weekly
+│   └── release.yml           # pinned musl build, attestation, tag publication
 ├── src/
 │   ├── main.rs          # dispatch + check/report/purge/help/version
 │   ├── doctor.rs        # read-only install/environment diagnosis
@@ -650,7 +651,14 @@ oopsinput/
 │   ├── oopsinput.zsh    # widget wrapper plugin
 │   ├── install.zsh
 │   └── uninstall.zsh
-├── scripts/             # lifecycle, PTY-volume, and latency acceptance gates
+├── release/
+│   └── INSTALL.md       # short readme rendered into each release archive
+├── scripts/
+│   ├── build-release-bundle.zsh # reproducible musl archive + SHA256SUMS
+│   ├── release-bundle-gate.zsh  # static/archive/shipped-lifecycle gate
+│   ├── lifecycle-gate.zsh       # clean-home install-to-uninstall gate
+│   ├── pty-gate.zsh             # PTY volume and buffer-integrity gate
+│   └── perf-gate.zsh            # release-binary latency gate
 ├── eval/golden/         # paired JSON cases
 └── tests/               # integration + PTY tests
 ```

@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 # oopsinput uninstaller: removes the marked ~/.zshrc block and the installed
-# binary/plugin. It deliberately leaves recorded state and config; run
+# binary/plugin/uninstaller. It deliberately leaves recorded state and config; run
 # `oopsinput purge` first if recorded state should also go. Idempotent.
 set -eu
 umask 077
@@ -12,6 +12,7 @@ ZSHRC_BACKUP=$HOME/.zshrc.oopsinput-backup
 BIN=$HOME/.local/bin/oopsinput
 PLUGIN_DIR=$HOME/.local/share/oopsinput
 PLUGIN=$PLUGIN_DIR/oopsinput.zsh
+UNINSTALLER=$PLUGIN_DIR/uninstall.zsh
 MARK_BEGIN="# >>> oopsinput >>>"
 MARK_END="# <<< oopsinput <<<"
 MARK_RESTORE_NO_FINAL="# oopsinput: restore preceding no-final-newline"
@@ -49,6 +50,7 @@ fail() {
 [[ ! -L $PLUGIN_DIR ]] || fail "refusing to enter symlink at $PLUGIN_DIR"
 [[ ! -e $PLUGIN_DIR || -d $PLUGIN_DIR ]] || fail "refusing to enter non-directory at $PLUGIN_DIR"
 [[ ! -e $PLUGIN || -f $PLUGIN || -L $PLUGIN ]] || fail "refusing to remove non-file at $PLUGIN"
+[[ ! -e $UNINSTALLER || -f $UNINSTALLER || -L $UNINSTALLER ]] || fail "refusing to remove non-file at $UNINSTALLER"
 
 integer B_COUNT=0 E_COUNT=0 B=0 E=0 ADDED_SEPARATOR=0
 if [[ -f $ZSHRC ]]; then
@@ -116,6 +118,10 @@ if (( B_COUNT == 1 )); then
     if [[ -e $PLUGIN || -L $PLUGIN ]]; then
         rm -- $PLUGIN
         print -r -- "removed $(_oopsinput_escape_for_display "$PLUGIN")"
+    fi
+    if [[ -e $UNINSTALLER || -L $UNINSTALLER ]]; then
+        rm -- $UNINSTALLER
+        print -r -- "removed $(_oopsinput_escape_for_display "$UNINSTALLER")"
     fi
     if [[ -d $PLUGIN_DIR ]]; then
         if rmdir -- $PLUGIN_DIR 2>/dev/null; then
