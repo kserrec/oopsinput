@@ -1,6 +1,6 @@
 # oopsinput — Specification
 
-**Version:** 1.0-draft · **Status:** canonical · **License:** Apache-2.0 · **Updated:** 2026-08-09
+**Version:** 1.0-draft · **Status:** canonical · **License:** Apache-2.0 · **Updated:** 2026-08-11
 
 This document is the source of truth for the project. It supersedes the earlier
 "Binput Guard" canonical spec (kept privately as background reading; its long-horizon
@@ -70,19 +70,23 @@ safety. An allowed command is "no intervention under current evidence," never
 - A single Rust binary, `oopsinput`, spawned per command. **No daemon.**
   (Ollama is already a resident daemon; it does the model keep-alive for us.)
 - Four detection layers (§5): typo, danger, context, inference.
-- Shadow mode (observe, never interrupt) as the default for new installs.
+- A fresh install requires the user to choose Shadow, Suggest, Warn, or
+  Confirm explicitly; there is no installer-selected intervention default.
 - JSONL event log with structural features only — no raw commands by default.
 - `oopsinput report` summarizing shadow data; `oopsinput doctor` for setup checks.
 - Golden evaluation corpus with counterfactual paired cases (§11).
-- Install/uninstall scripts that touch shell config only with explicit markers.
+- A versioned, prebuilt x86_64 Linux release bundle plus source-build developer
+  path; both use the same guided install/uninstall scripts, which touch shell
+  config only with explicit markers.
 
 ### Excluded from v1 (deferred, not rejected)
 
 Bash/Fish/other shells · daemon + socket protocol · SQLite · agent/tool-call
 adapters (the current check path emits structured decision JSON, but an agent
 request schema and origin/goal/provenance fields remain future work) ·
-non-interactive scripts · cloud models · fine-tuning · persistent cross-session
-personalization · packaging beyond a repo install script · Windows/macOS.
+non-interactive command interception · cloud models · fine-tuning · persistent
+cross-session personalization · prebuilt targets beyond x86_64 Linux ·
+distribution packages such as AUR/deb/Homebrew · Windows/macOS.
 
 ## 4. Vocabulary
 
@@ -281,16 +285,139 @@ interventions per session-hour, direct-catastrophic rules exempt) plus
 per-rule cooldown after repeated run-unchanged outcomes. Budget exhaustion
 degrades to shadow recording, never to nagging.
 
-## 8. Modes and rollout
+## 8. Modes, installation, and rollout
 
-- **shadow** (default): everything is analyzed and recorded; nothing visible.
-- **suggest**: L1 typo prompts only. (Safe to enable immediately — zero
-  false-positive cost by construction.)
-- **warn**: adds L2/L3/L4 nonblocking warnings.
-- **confirm**: adds pausing confirmations for gated rule categories.
+- **shadow**: everything is analyzed and recorded; nothing is visible.
+- **suggest**: adds L1 typo prompts. Danger decisions remain invisible and are
+  recorded only as hypothetical interventions.
+- **warn**: adds advisory L2/L3/L4 danger prompts. The user can edit, cancel,
+  or run unchanged; if the prompt times out, the original runs unchanged.
+- **confirm**: keeps typo prompts and advisory warnings, while rule categories
+  assessed as Confirm pause for a deliberate choice. If a Confirm prompt times
+  out, the command is cancelled; an internal failure still follows §9's
+  fail-open contract.
 
 A rule category may graduate from shadow → warn → confirm only with evidence
-from the log (see §11). New installs: `shadow` + `suggest`.
+from the log (see §11). There is no fresh-install default. Shadow remains the
+configuration parser's conservative fallback for a missing or invalid `mode`,
+but a fallback is failure behavior, never consent for an installer to choose a
+starting mode.
+
+### 8.1 Required fresh-install choice
+
+The installer performs every read-only prerequisite, source-artifact,
+destination-type, ownership-marker, and backup-path check before asking about
+mode or writing anything. When no config exists, an interactive installation
+then displays the complete consequence of each choice:
+
+```text
+Choose how oopsinput may interrupt you (required):
+
+1  Shadow   Never interrupts; analyzes and records locally.
+2  Suggest  Also asks about likely misspelled command names.
+3  Warn     Also shows danger prompts; no answer eventually runs the original.
+4  Confirm  Highest-risk prompts require a choice; no answer cancels.
+
+Press 1–4, or Tab to focus an option and Enter to choose.
+```
+
+Nothing starts focused. `1`–`4` select directly; Tab establishes and then
+cycles visible focus; Enter accepts only an already-focused choice. Bare Enter
+or an unrecognized key cannot select a mode. Ctrl-C or terminal EOF cancels
+without being advertised as a fifth choice, exits nonzero, and changes no
+file.
+
+For deliberate automation, the only promptless fresh-install interface is
+`zsh install.zsh --mode <shadow|suggest|warn|confirm>`. Inherited environment
+variables do not count as a choice. A missing value, unknown flag, invalid
+mode, or unavailable controlling terminal without `--mode` fails before any
+write. Tests use this same public argument rather than a private mode override.
+
+Any existing config path is user-owned. An install or update preserves it
+byte-for-byte, does not show the chooser, and reports that it was retained.
+Supplying `--mode` when a config already exists is rejected rather than
+silently overwriting or pretending to reconfigure it; changing an existing
+mode remains a deliberate config-file edit. A symlinked, non-regular,
+oversized, or invalid retained config is never repaired by the installer and
+will keep `doctor` from reporting `ready` as specified in §14–§15.
+
+### 8.2 Ordinary-user release path
+
+The primary v1 user artifact is
+`oopsinput-VERSION-x86_64-unknown-linux-musl.tar.gz`, built with the declared
+minimum Rust toolchain and `--locked` from the matching `vVERSION` tag. The
+musl target is deliberate: the current developer build is dynamically linked
+to its host GNU C library and is not a portable release contract. Each archive
+has one top-level versioned directory containing:
+
+- the static `oopsinput` release binary;
+- `oopsinput.zsh`, `install.zsh`, and `uninstall.zsh`;
+- the license and a short release-install readme.
+
+The same GitHub release publishes `SHA256SUMS`, and CI generates an artifact
+attestation for the archive. Public instructions require checking the archive
+against `SHA256SUMS` before extraction, describe that as an integrity check
+rather than proof of safety, and offer GitHub's attestation verification as an
+optional provenance check for users who already have the GitHub CLI. The
+GitHub CLI is not an installation prerequisite. The official path never uses
+`curl | zsh` or another download-and-execute pipe: the versioned archive is
+saved and verified before its local installer runs.
+
+Ordinary-user prerequisites are x86_64 Linux, interactive Zsh, and the standard
+Linux `tar`/`sha256sum` plus installer helpers under `/usr/bin` or `/bin`.
+Neither Rust nor a source checkout is required. Git is optional at runtime: if
+it is absent, repository dirty/untracked facts are honestly unavailable, while
+the rest of oopsinput continues to work. Source building remains the developer
+path and feeds its release binary into the same installer contract.
+
+The installer itself performs no network access, launches no daemon, asks for
+no credentials or root access, never sources the user's `.zshrc`, and does not
+change `PATH`. Downloading the release is a separate, visible acquisition
+step; runtime network behavior remains limited to optional loopback Ollama.
+
+### 8.3 Owned changes, failure, update, verification, and removal
+
+Before committing a fresh install, the installer names every effect. It:
+
+- installs the binary at `~/.local/bin/oopsinput` and the plugin plus stable
+  uninstaller at `~/.local/share/oopsinput/`;
+- creates a user-only config containing the explicitly chosen mode only when
+  the config path does not already exist;
+- preserves an existing `~/.zshrc` byte-for-byte at
+  `~/.zshrc.oopsinput-backup`, without replacing the original backup on an
+  update; and
+- adds one exact marked block to `.zshrc` that sources only the installed
+  plugin. State is created later by product use, not installation.
+
+All complete output files are staged before the first owned destination is
+changed. Cancellation occurs before that commit point. On an ordinary error or
+a handled HUP/INT/TERM, a fresh install removes every file and backup it alone
+created and restores the prior `.zshrc`; an update restores the previously
+installed runtime set rather than leaving mixed versions. Existing user-owned
+config, backup, state, and unrecognized files are never cleanup targets.
+Symlink refusal, regular-file checks, private staging, exact marker ownership,
+and byte-exact no-final-newline restoration remain mandatory.
+
+Rerunning a release installer over one healthy marker block is the update
+path. It atomically replaces the binary, plugin, and stable uninstaller as one
+rollback-capable set, retains the original shell backup, and preserves any
+existing config without prompting. No marker means no authority to overwrite
+same-named runtime files. Source-install test overrides remain private test
+seams and are not a second user contract.
+
+After installation, the script reports the selected or preserved mode and
+instructs the user to open a new terminal, then run the absolute installed
+binary's read-only `doctor` command. It does not claim success as a ready shell
+until `doctor` in that newly loaded interactive Zsh reports `result: ready`.
+
+Removal never requires the downloaded archive or source checkout. The public
+command runs the installed `~/.local/share/oopsinput/uninstall.zsh`; the
+healthy marker remains its ownership receipt. It removes the marker and the
+three runtime files (binary, plugin, uninstaller), while retaining config,
+recorded state, and the original shell backup. A user who wants recorded state
+deleted runs the installed binary's exact `purge` command first. Configuration
+and backup deletion remain separate manual choices because the uninstaller
+does not own that data.
 
 ## 9. Security invariants (test-enforced)
 
@@ -470,7 +597,7 @@ uncertainty, not as safety.
 ## 15. Config (initial surface)
 
 ```
-mode = shadow            # shadow | suggest | warn | confirm
+mode = shadow            # parser fallback; installer writes explicit choice
 model = qwen3.5:4b       # empty = deterministic-only
 model_timeout_ms = 2000
 det_timeout_ms = 150
@@ -478,8 +605,10 @@ budget_per_hour = 3
 log_raw = false          # opt-in research capture (redacted first)
 ```
 
-Unknown keys: warn once, ignore. Invalid values: fall back to the default for
-that key, say so once. The warning fingerprint check, display, and marker
+Unknown keys: warn once, ignore. Invalid values: fall back to the parser
+default for that key, say so once. Shadow is the parser fallback for `mode`,
+not a fresh-install selection; §8.1 requires the installer to write the user's
+explicit choice. The warning fingerprint check, display, and marker
 replacement are one state-locked transaction across concurrent shells. The
 Zsh adapter requests direct `/dev/tty` delivery only when a warning exists; the
 marker is committed only after that complete display succeeds.
@@ -542,7 +671,9 @@ may weaken §9 invariants.
 
 v1 is done when: Kyle has been taught the product from the ground up and has
 personally exercised its complete documented user workflow in a real
-interactive Zsh session; install/uninstall are clean on this machine; 10,000
+interactive Zsh session; the verified prebuilt release archive has completed
+the guided fresh-install, `doctor`, update, purge, and stable-uninstall journey
+without a source checkout; install/uninstall are clean on this machine; 10,000
 scripted PTY submissions produce zero altered/lost buffers and zero hangs; the
 typo layer works with exact-resolution zero false positives; the danger+context
 layers pass the paired golden corpus; the inference layer produces valid schema

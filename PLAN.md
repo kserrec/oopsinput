@@ -568,43 +568,62 @@ the rest of the walkthrough continues.
       publish this milestone's release before Kyle completes Phase 2 and the
       Phase 3 review.
 
-## Committed near-term feature — Guided installation experience (order TBD)
+## Active near-term feature — Guided installation experience
 
-This is committed post-M8 work, but its exact position among the next features
-is deliberately unfixed; it is not automatically the direct next `$next`
-chunk. The outcome is an installation path designed for a new user rather than
-only a source-building developer. Fresh installation must never silently choose
-the user's intervention level.
+Kyle selected this post-M8 feature for active work on 2026-08-11. The outcome
+is an installation path designed for a new user rather than only a
+source-building developer. Fresh installation must never silently choose the
+user's intervention level.
 
-### Phase 1 — Define the installation contract
+### Phase 1 — Define the installation contract — ✅ 2026-08-11
 
-- [ ] Update SPEC before implementation. Replace the automatic fresh-install
+- [x] Update SPEC before implementation. Replace the automatic fresh-install
       Suggest choice with a required, explicit selection among Shadow, Suggest,
       Warn, and Confirm. Explain in plain language exactly what each mode will
       display or pause before asking, and provide no preselected answer that an
       Enter keypress could accept accidentally.
-- [ ] Define the ordinary-user delivery path from obtaining oopsinput through
+- [x] Define the ordinary-user delivery path from obtaining oopsinput through
       a ready interactive Zsh session: prerequisites, release artifact and
-      authenticity check, files changed, cancellation and failure behavior,
-      update behavior, verification with `doctor`, and removal. Decide the
-      exact delivery mechanism from evidence rather than assuming that the
-      current clone/build/script sequence is the finished experience.
-- [ ] Define the non-interactive equivalent for lifecycle tests and deliberate
+      integrity/provenance checks, files changed, cancellation and failure
+      behavior, update behavior, verification with `doctor`, and removal.
+- [x] Define the non-interactive equivalent for lifecycle tests and deliberate
       automation: the caller must supply an explicit mode, and a missing or
-      invalid choice must fail before changing user files. An update that finds
-      an existing valid config preserves it and does not ask again unless the
-      user explicitly requests reconfiguration.
+      invalid choice must fail before changing user files. An existing config
+      is always preserved and suppresses the chooser; changing it remains an
+      explicit user edit rather than installer-owned reconfiguration.
+
+SPEC §8 now fixes the contract. The official artifact is a versioned,
+CI-built x86_64 musl archive with SHA-256 integrity data and an optional GitHub
+provenance attestation; the verified local installer performs no download and
+never uses a download-and-execute pipe. The source build remains the developer
+path. Fresh interactive installs require an unfocused four-mode chooser;
+promptless use requires public `--mode`, and an update preserves existing
+config byte-for-byte. The stable uninstaller is installed alongside the
+plugin, handled failure must roll fresh changes back or restore the prior
+runtime set, and readiness is established only by `doctor` in a newly loaded
+interactive Zsh. This replaces both the implementation's automatic Suggest
+choice and SPEC's former Shadow-default language without treating either as
+user consent.
 
 ### Phase 2 — Implement the guided fresh install
 
-- [ ] Build the selected installation entry point and its mode chooser. Show
-      the consequence of each choice, require an unambiguous selection, allow
-      cancellation with no partial installation, and write only the chosen
-      mode after every earlier prerequisite and ownership check succeeds.
+- [ ] Modify `zsh/install.zsh` to implement the exact SPEC §8 interface:
+      read-only preflight first; direct `1`–`4` plus unfocused Tab/Enter mode
+      selection from `/dev/tty`; public `--mode` automation; rejection before
+      writes for invalid/missing non-interactive choice; and byte-exact
+      preservation of every existing config.
 - [ ] Preserve the existing ownership and trust guarantees: user-level files,
       byte-exact `.zshrc` backup, marked edits, symlink refusal, atomic staging,
-      safe retry/update behavior, and uninstall that keeps user-owned config
-      and state unless deletion was separately requested.
+      fresh-install cleanup, rollback to one complete old runtime set on update
+      failure, and uninstall that keeps user-owned config and state unless
+      deletion was separately requested. Install `uninstall.zsh` at its stable
+      public path and make it safely remove its own owned copy.
+- [ ] Add the release-bundle builder and pinned CI release job for the
+      `x86_64-unknown-linux-musl` archive, `SHA256SUMS`, and build-provenance
+      attestation. Test the static artifact and archive contents before they
+      can become release assets; add no Rust or installer dependency.
+- [ ] Add focused installer/uninstaller integration and PTY tests derived from
+      the concrete failure modes above in the same change as the behavior.
 - [ ] Update README and user-facing diagnostics to present one coherent route
       from first contact through a `doctor` result of `ready`, without assuming
       familiarity with Rust, repository layout, Zsh widgets, or XDG paths.
@@ -615,7 +634,7 @@ the user's intervention level.
       choice, explicit non-interactive choice, cancellation, invalid input,
       interrupted failure, existing-config update, `doctor`, uninstall, and
       byte-for-byte shell restoration. Tests must exercise the shipped entry
-      point and release artifact, not a more convenient private path.
+      point from the verified archive, not a more convenient private path.
 - [ ] Have Kyle perform a genuinely fresh install by following only the public
       instructions, one step at a time, on an isolated clean user environment.
       Record every surprise or unexplained choice; automated success cannot
