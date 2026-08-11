@@ -78,6 +78,7 @@ impl FakeHome {
             Some(point) => cmd.env("OOPSINPUT_TEST_FAIL_AFTER", point),
             None => cmd.env_remove("OOPSINPUT_TEST_FAIL_AFTER"),
         };
+        cmd.env_remove("OOPSINPUT_TEST_SIGNAL_AFTER");
         cmd.output().expect("run install.zsh")
     }
 
@@ -86,7 +87,8 @@ impl FakeHome {
         use std::sync::mpsc;
 
         let command = format!(
-            "env -u XDG_CONFIG_HOME HOME={} OOPSINPUT_BIN_SRC={} \
+            "env -u XDG_CONFIG_HOME -u OOPSINPUT_TEST_FAIL_AFTER \
+             -u OOPSINPUT_TEST_SIGNAL_AFTER HOME={} OOPSINPUT_BIN_SRC={} \
              OOPSINPUT_PLUGIN_SRC={} OOPSINPUT_UNINSTALL_SRC={} zsh {}",
             shell_quote(&self.dir),
             shell_quote(&self.bin_src),

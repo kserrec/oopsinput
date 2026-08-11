@@ -315,8 +315,11 @@ and deletes it afterward. Performance claims count only in release builds.
 Release engineering additionally installs Rust 1.89.0's
 `x86_64-unknown-linux-musl` target, then runs
 `scripts/build-release-bundle.zsh` followed by
-`scripts/release-bundle-gate.zsh` on the resulting archive. The pinned release
-workflow performs those steps before attestation or publication.
+`scripts/release-bundle-gate.zsh` on the resulting archive. That gate extracts
+the archive and exercises every interactive mode, promptless installation,
+cancellation, signal rollback, update, `doctor`, and stable uninstall through
+the shipped entry point. The pinned release workflow performs those steps
+before attestation or publication.
 
 ## License
 

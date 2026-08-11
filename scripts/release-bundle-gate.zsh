@@ -8,6 +8,7 @@ export LC_ALL=C
 
 ROOT=${0:A:h:h}
 TARGET=x86_64-unknown-linux-musl
+EXPERIENCE_GATE=$ROOT/scripts/install-experience-gate.zsh
 
 if (( $# != 1 )); then
     print -u2 "usage: scripts/release-bundle-gate.zsh ARCHIVE"
@@ -22,6 +23,7 @@ fail() {
 for helper in cmp grep mktemp readelf sed sha256sum sort stat tar wc zsh; do
     command -v $helper >/dev/null 2>&1 || fail "required helper not found: $helper"
 done
+[[ -x $EXPERIENCE_GATE ]] || fail "install experience gate is missing or not executable"
 
 ARCHIVE=${1:A}
 [[ -f $ARCHIVE && ! -L $ARCHIVE ]] || fail "archive is not a regular file: $ARCHIVE"
@@ -101,6 +103,7 @@ if readelf -d -- $BUNDLE/oopsinput 2>/dev/null | grep -Fq NEEDED; then
 fi
 
 $ROOT/scripts/lifecycle-gate.zsh $BUNDLE
+$EXPERIENCE_GATE $BUNDLE
 
 trap - EXIT HUP INT TERM
 cleanup

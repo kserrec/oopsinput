@@ -416,6 +416,13 @@ maybe_test_fail() {
     [[ ${OOPSINPUT_TEST_FAIL_AFTER:-} != $1 ]] || fail "injected test failure after $1"
 }
 
+# Private acceptance seam: deliver a real signal at a named commit boundary so
+# the shipped script's signal trap and rollback path can be exercised without
+# relying on an unrepeatable race against fast renames.
+maybe_test_signal() {
+    [[ ${OOPSINPUT_TEST_SIGNAL_AFTER:-} != $1 ]] || kill -TERM $$
+}
+
 COMMIT_STARTED=1
 if (( BACKUP_WILL_WRITE == 1 )); then
     mv -f -- $BACKUP_TMP $ZSHRC_BACKUP
@@ -423,20 +430,25 @@ if (( BACKUP_WILL_WRITE == 1 )); then
 fi
 mv -f -- $BIN_TMP $BIN_DST
 BIN_TMP=""
+maybe_test_signal binary
 maybe_test_fail binary
 mv -f -- $PLUGIN_TMP $PLUGIN_DST
 PLUGIN_TMP=""
+maybe_test_signal plugin
 maybe_test_fail plugin
 mv -f -- $UNINSTALL_TMP $UNINSTALL_DST
 UNINSTALL_TMP=""
+maybe_test_signal uninstaller
 maybe_test_fail uninstaller
 if (( CONFIG_EXISTS == 0 )); then
     mv -f -- $CONFIG_TMP $CONFIG
     CONFIG_TMP=""
 fi
+maybe_test_signal config
 maybe_test_fail config
 mv -f -- $ZSHRC_TMP $ZSHRC
 ZSHRC_TMP=""
+maybe_test_signal zshrc
 maybe_test_fail zshrc
 COMMIT_DONE=1
 cleanup

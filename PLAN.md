@@ -651,7 +651,7 @@ acceptance and publication.
 
 ### Phase 3 — Prove the experience as a user experiences it
 
-- [ ] Extend clean-home lifecycle and PTY coverage for every interactive mode
+- [x] Extend clean-home lifecycle and PTY coverage for every interactive mode
       choice, explicit non-interactive choice, cancellation, invalid input,
       interrupted failure, existing-config update, `doctor`, uninstall, and
       byte-for-byte shell restoration. Tests must exercise the shipped entry
@@ -662,6 +662,20 @@ acceptance and publication.
       substitute for this acceptance.
 - [ ] Repeat the release acceptance set and publish the improved install path
       only after both the automated lifecycle and owner-run journey pass.
+
+Automated public-artifact acceptance completed 2026-08-11. The release gate
+now extracts the verified archive and supplies that directory—with every
+source-artifact override removed—to a staged-PTY experience gate. Across fresh
+homes it selects Shadow, Suggest, Warn, and Confirm; exercises direct digits,
+unfocused Tab/Enter, ignored keys, Ctrl-C, invalid `--mode`, explicit
+promptless selection, a real TERM after the final owned rename, and a poisoned
+three-file update; requires `doctor` to report each installed mode ready; then
+purges and runs the stable installed uninstaller while comparing the original
+no-final-newline `.zshrc`, retained config, and backup byte-for-byte. The full
+archive path passed ten consecutive runs. The 311-test default suite,
+formatting, Clippy with warnings denied, and the native release build also
+pass. Kyle's owner-run journey remains unstarted, so no final
+release-acceptance rerun, tag, push, attestation, or publication has occurred.
 
 ## Later (v2+ candidates — see SPEC §17)
 

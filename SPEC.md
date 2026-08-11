@@ -656,6 +656,7 @@ oopsinput/
 ├── scripts/
 │   ├── build-release-bundle.zsh # reproducible musl archive + SHA256SUMS
 │   ├── release-bundle-gate.zsh  # static/archive/shipped-lifecycle gate
+│   ├── install-experience-gate.zsh # every public installer path via archive
 │   ├── lifecycle-gate.zsh       # clean-home install-to-uninstall gate
 │   ├── pty-gate.zsh             # PTY volume and buffer-integrity gate
 │   └── perf-gate.zsh            # release-binary latency gate

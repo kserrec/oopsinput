@@ -123,7 +123,7 @@ The official artifact builder uses the pinned Rust 1.89.0 toolchain and its
 musl target to create the versioned static archive plus `SHA256SUMS`. The
 archive gate rejects extra or missing members, wrong types or modes, a version
 mismatch, dynamic linkage, or a failed checksum, then passes the extracted
-files—not repository-private source overrides—to the lifecycle gate:
+files—not repository-private source overrides—to both lifecycle gates:
 
 ```
 rustup target add --toolchain 1.89.0 x86_64-unknown-linux-musl
@@ -1039,7 +1039,7 @@ Measured on the candidate path (release, including both our spawn and git's):
 The testing philosophy: **buffer exactness and fail-open behavior are the
 product**, so the highest-value tests drive a real interactive zsh, not mocks.
 312 automated tests today (311 passing by default plus one ignored live-model
-harness) across unit and nine integration suites, plus four standalone gates.
+harness) across unit and nine integration suites, plus five standalone gates.
 
 - **Unit tests** live inside each `src/` module (`#[cfg(test)] mod tests`):
   the closed resolution vocabulary, payload parsing edge cases (including the
@@ -1135,11 +1135,19 @@ harness) across unit and nine integration suites, plus four standalone gates.
   and state disappear, and only the deliberately retained byte-exact config
   plus `.zshrc` backup remain. Its optional argument switches it from private
   source artifacts to an extracted public release directory.
+- **`scripts/install-experience-gate.zsh`** — accepts only an extracted public
+  release directory and drives its bundled installer through staged real PTYs.
+  It selects all four modes (including Tab/Enter and ignored input), requires
+  `doctor` to report each installed shell ready, proves Ctrl-C and a real TERM
+  leave a fresh home uninstalled, rejects an invalid promptless mode, updates
+  poisoned runtime files while preserving every config and shell byte, and
+  removes each successful install through the stable installed uninstaller.
 - **`scripts/build-release-bundle.zsh` and
   `scripts/release-bundle-gate.zsh`** — build the pinned, reproducible
   x86_64-musl archive and checksum receipt, then enforce the exact archive
-  boundary, modes, version, static linkage, repository-source identity, and
-  shipped lifecycle before those files can be published.
+  boundary, modes, version, static linkage, repository-source identity, basic
+  lifecycle, and complete install-experience gate before those files can be
+  published.
 - **`scripts/pty-gate.zsh`** — the volume acceptance gate: N unique
   submissions (default 10,000) through a PTY shell; every output must appear,
   nothing may hang. M1's run: 10,000/10,000, zero altered buffers, in 128 s.
