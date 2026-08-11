@@ -568,6 +568,61 @@ the rest of the walkthrough continues.
       publish this milestone's release before Kyle completes Phase 2 and the
       Phase 3 review.
 
+## Committed near-term feature — Guided installation experience (order TBD)
+
+This is committed post-M8 work, but its exact position among the next features
+is deliberately unfixed; it is not automatically the direct next `$next`
+chunk. The outcome is an installation path designed for a new user rather than
+only a source-building developer. Fresh installation must never silently choose
+the user's intervention level.
+
+### Phase 1 — Define the installation contract
+
+- [ ] Update SPEC before implementation. Replace the automatic fresh-install
+      Suggest choice with a required, explicit selection among Shadow, Suggest,
+      Warn, and Confirm. Explain in plain language exactly what each mode will
+      display or pause before asking, and provide no preselected answer that an
+      Enter keypress could accept accidentally.
+- [ ] Define the ordinary-user delivery path from obtaining oopsinput through
+      a ready interactive Zsh session: prerequisites, release artifact and
+      authenticity check, files changed, cancellation and failure behavior,
+      update behavior, verification with `doctor`, and removal. Decide the
+      exact delivery mechanism from evidence rather than assuming that the
+      current clone/build/script sequence is the finished experience.
+- [ ] Define the non-interactive equivalent for lifecycle tests and deliberate
+      automation: the caller must supply an explicit mode, and a missing or
+      invalid choice must fail before changing user files. An update that finds
+      an existing valid config preserves it and does not ask again unless the
+      user explicitly requests reconfiguration.
+
+### Phase 2 — Implement the guided fresh install
+
+- [ ] Build the selected installation entry point and its mode chooser. Show
+      the consequence of each choice, require an unambiguous selection, allow
+      cancellation with no partial installation, and write only the chosen
+      mode after every earlier prerequisite and ownership check succeeds.
+- [ ] Preserve the existing ownership and trust guarantees: user-level files,
+      byte-exact `.zshrc` backup, marked edits, symlink refusal, atomic staging,
+      safe retry/update behavior, and uninstall that keeps user-owned config
+      and state unless deletion was separately requested.
+- [ ] Update README and user-facing diagnostics to present one coherent route
+      from first contact through a `doctor` result of `ready`, without assuming
+      familiarity with Rust, repository layout, Zsh widgets, or XDG paths.
+
+### Phase 3 — Prove the experience as a user experiences it
+
+- [ ] Extend clean-home lifecycle and PTY coverage for every interactive mode
+      choice, explicit non-interactive choice, cancellation, invalid input,
+      interrupted failure, existing-config update, `doctor`, uninstall, and
+      byte-for-byte shell restoration. Tests must exercise the shipped entry
+      point and release artifact, not a more convenient private path.
+- [ ] Have Kyle perform a genuinely fresh install by following only the public
+      instructions, one step at a time, on an isolated clean user environment.
+      Record every surprise or unexplained choice; automated success cannot
+      substitute for this acceptance.
+- [ ] Repeat the release acceptance set and publish the improved install path
+      only after both the automated lifecycle and owner-run journey pass.
+
 ## Later (v2+ candidates — see SPEC §17)
 
 - [ ] Agent request schema + one named-agent adapter. The current check path
