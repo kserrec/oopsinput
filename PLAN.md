@@ -656,12 +656,14 @@ acceptance and publication.
       interrupted failure, existing-config update, `doctor`, uninstall, and
       byte-for-byte shell restoration. Tests must exercise the shipped entry
       point from the verified archive, not a more convenient private path.
-- [ ] Have Kyle perform a genuinely fresh install by following only the public
+- [x] Have Kyle perform a genuinely fresh install by following only the public
       instructions, one step at a time, on an isolated clean user environment.
       Record every surprise or unexplained choice; automated success cannot
       substitute for this acceptance.
-- [ ] Repeat the release acceptance set and publish the improved install path
-      only after both the automated lifecycle and owner-run journey pass.
+- [x] Repeat the release acceptance set after both the automated lifecycle and
+      owner-run journey pass.
+- [ ] Publish the improved install path from a new package version and matching
+      tag only after the completed acceptance evidence is committed.
 
 Automated public-artifact acceptance completed 2026-08-11. The release gate
 now extracts the verified archive and supplies that directory—with every
@@ -672,10 +674,31 @@ promptless selection, a real TERM after the final owned rename, and a poisoned
 three-file update; requires `doctor` to report each installed mode ready; then
 purges and runs the stable installed uninstaller while comparing the original
 no-final-newline `.zshrc`, retained config, and backup byte-for-byte. The full
-archive path passed ten consecutive runs. The 311-test default suite,
-formatting, Clippy with warnings denied, and the native release build also
-pass. Kyle's owner-run journey remains unstarted, so no final
-release-acceptance rerun, tag, push, attestation, or publication has occurred.
+archive path passed ten consecutive runs.
+
+Kyle completed the owner-run journey on 2026-08-11 from a verified archive in
+an isolated empty home, with no private artifact override. The checksum passed;
+he selected Warn from the required unfocused chooser; the installer named its
+effects and installed only under the isolated home; a fresh interactive Zsh
+reported all four widgets wrapped, mode `warn`, and `result: ready`; and a live
+`gti --version` interception ran the accepted `git --version` correction and
+returned normally. Kyle found the prompt clear and approved keeping Run
+original as the Enter default so an accidental Enter never executes rewritten
+input. The empty-home harness exposed Zsh's own new-user helper, and the
+facilitator supplied one wrong extracted-directory name plus an incorrectly
+escaped test prompt `%`; none came from the shipped installer or public route.
+README already uses the correct `cd oopsinput-*/` form.
+
+The final release-acceptance set then passed from the clean committed tree:
+formatting; Clippy with warnings denied; 311 default tests with the one
+intentional live-model harness ignored; native release build; source lifecycle;
+the latency gate (common p95 4.39 ms, candidate p95 12.83 ms); 10,000 PTY
+submissions with zero lost or altered commands at 8.48 ms/submission; and a
+fresh static archive's complete lifecycle and install-experience gates. The
+published source-only `v0.1.0` prerelease was rechecked and still has no assets;
+because its tag already exists while the package remains version 0.1.0,
+artifact publication now requires a new version and matching tag. No version
+change, tag, push, attestation, or artifact publication has occurred.
 
 ## Later (v2+ candidates — see SPEC §17)
 
