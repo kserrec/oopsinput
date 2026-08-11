@@ -511,6 +511,22 @@ the rest of the walkthrough continues.
       `.zshrc` and config checksums, all 102 accumulated natural-use events,
       and private `0700`/`0600` modes were preserved exactly.
 
+- [x] Replace the terse one-line typo question with Kyle's approved full-buffer
+      `*** oops? ***` comparison and the same compact two-choice row. Preserve
+      immediate `y`/`n`, keep Ctrl-C functional but visually unadvertised, add
+      Tab focus switching and Enter activation, and start with the original
+      command focused so Enter can never implicitly consent to a correction.
+      Update SPEC first, then unit/PTY coverage and every truthful user-facing
+      description; the danger-warning prompt is behaviorally unchanged — ✅
+      2026-08-11. The prompt now receives the already-verified complete
+      original/replacement buffers, renders only bounded escaped copies, and
+      uses trusted reverse video to move focus without adding another row.
+      Five new unit/real-PTY tests pin full comparison rendering, hostile/long
+      display safety, Tab + Enter through fd 3, and bare Enter preserving the
+      original. All 303 default tests passed; the one live-model harness stayed
+      intentionally ignored; formatting, Clippy with warnings denied, and the
+      release build passed.
+
 - [ ] Teach the product from the ground up, one small section at a time: what
       the Zsh plugin intercepts, what the Rust binary analyzes, how the four
       evidence layers and policy modes interact, which bytes and local records

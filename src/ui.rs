@@ -3,8 +3,9 @@
 //! Everything shown to the user that originated outside this binary — typed
 //! words, candidate names, later paths and model reasons — passes through
 //! `escape_for_display` first, so no control character, ANSI/OSC sequence, or
-//! bidi override can reach the terminal active. The fixed `oopsinput:` prefix
-//! frames every message.
+//! bidi override can reach the terminal active. The fixed `*** oops? ***`
+//! banner frames a typo block; the fixed `oopsinput:` prefix frames warning
+//! and diagnostic lines. Trusted reverse video marks typo-choice focus.
 //!
 //! Prompts talk to /dev/tty directly, never stdout/stderr (stdout carries the
 //! decision JSON and the plugin discards both streams). Single-key reads use
@@ -22,8 +23,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 
 /// Outcome of the L1 typo prompt (SPEC §7): `y` consents to the correction,
-/// Ctrl-C cancels outright, and everything else runs the original unchanged
-/// (it was unexecutable anyway). Timeout stays distinct from a deliberate `n`
+/// `n` keeps the original, Tab + Enter activates a visibly focused choice,
+/// and Ctrl-C cancels outright. Timeout stays distinct from a deliberate `n`
 /// so evaluation never credits the user with a choice they did not make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypoChoice {
@@ -65,6 +66,13 @@ const DRAIN_TIMEOUT_DS: &str = "1";
 /// consumed as part of the sequence, never reinterpreted as a consent key.
 const CSI_FAST_BYTES: usize = 16;
 const CSI_DRAIN_BYTES: usize = 256;
+/// Keep each displayed command bounded even though the analyzed buffer cap is
+/// much larger. The typo is at the beginning, so the useful contrast survives
+/// truncation; the executed buffers themselves remain byte-exact and uncapped
+/// by this display-only limit.
+const TYPO_COMMAND_DISPLAY_LIMIT_BYTES: usize = 512;
+const FOCUS_ON: &str = "\x1b[7m";
+const FOCUS_OFF: &str = "\x1b[0m";
 
 /// A terminal a prompt can read decision keys from. `set_drain` flips the
 /// read timeout between "wait for a human" and "collect the rest of an
@@ -140,11 +148,13 @@ fn open_prompt_tty() -> Option<(RealTty, SttyRestore)> {
     Some((RealTty { file: tty }, restore))
 }
 
-/// Ask the L1 typo question on /dev/tty. Total failure of any step degrades
-/// to `Original` — the user just sees their command fail naturally.
-pub fn prompt_typo(typed: &str, candidate: &str) -> TypoChoice {
+/// Ask the L1 typo question on /dev/tty. `original` and `replacement` are the
+/// complete buffers; only their escaped, display-bounded representations are
+/// shown. Total failure of any step degrades to `Original` — the user just
+/// sees their command fail naturally.
+pub fn prompt_typo(original: &str, replacement: &str) -> TypoChoice {
     match open_prompt_tty() {
-        Some((mut tty, _restore)) => run_typo_prompt(&mut tty, typed, candidate),
+        Some((mut tty, _restore)) => run_typo_prompt(&mut tty, original, replacement),
         None => TypoChoice::Original,
     }
 }
@@ -315,14 +325,58 @@ fn consume_escape_sequence<T: Read>(tty: &mut T) -> Key {
     }
 }
 
-/// The L1 prompt proper, generic over the terminal handle so the key
-/// protocol is testable without a tty. One key decides; the escaper guards
-/// every piece of untrusted text in the message.
-fn run_typo_prompt<T: PromptTty>(tty: &mut T, typed: &str, candidate: &str) -> TypoChoice {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypoFocus {
+    Correction,
+    Original,
+}
+
+fn toggle_typo_focus(focus: TypoFocus) -> TypoFocus {
+    match focus {
+        TypoFocus::Correction => TypoFocus::Original,
+        TypoFocus::Original => TypoFocus::Correction,
+    }
+}
+
+fn focused_choice(label: &str, focused: bool) -> String {
+    if focused {
+        format!("{FOCUS_ON}{label}{FOCUS_OFF}")
+    } else {
+        label.to_string()
+    }
+}
+
+fn typo_choices_line(focus: TypoFocus) -> String {
+    format!(
+        "{}  {}",
+        focused_choice("[y] run correction", focus == TypoFocus::Correction),
+        focused_choice("[n] run original", focus == TypoFocus::Original),
+    )
+}
+
+fn redraw_typo_choices<T: PromptTty>(tty: &mut T, focus: TypoFocus) -> std::io::Result<()> {
+    tty.write_all(b"\r")?;
+    tty.write_all(typo_choices_line(focus).as_bytes())?;
+    tty.flush()
+}
+
+fn typo_focus_choice(focus: TypoFocus) -> TypoChoice {
+    match focus {
+        TypoFocus::Correction => TypoChoice::Correct,
+        TypoFocus::Original => TypoChoice::Original,
+    }
+}
+
+/// The L1 prompt proper, generic over the terminal handle so the key protocol
+/// is testable without a tty. The escaper guards every piece of untrusted text
+/// in the message; only trusted reverse-video sequences mark keyboard focus.
+fn run_typo_prompt<T: PromptTty>(tty: &mut T, original: &str, replacement: &str) -> TypoChoice {
+    let mut focus = TypoFocus::Original;
     let msg = format!(
-        "\r\noopsinput: '{}' not found — did you mean '{}'? [y/n] ",
-        escape_for_display(typed),
-        escape_for_display(candidate),
+        "\r\n\r\n*** oops? ***\r\nYou typed '{}'.\r\nDid you mean '{}'?\r\n{}",
+        escape_for_typo_prompt(original),
+        escape_for_typo_prompt(replacement),
+        typo_choices_line(focus),
     );
     if tty
         .write_all(msg.as_bytes())
@@ -335,6 +389,16 @@ fn run_typo_prompt<T: PromptTty>(tty: &mut T, typed: &str, candidate: &str) -> T
     for _ in 0..MAX_PROMPT_KEYS {
         choice = match read_key(tty) {
             Key::Char(b'y' | b'Y') => TypoChoice::Correct,
+            Key::Char(b'n' | b'N') => TypoChoice::Original,
+            Key::Char(b'\t') => {
+                focus = toggle_typo_focus(focus);
+                if redraw_typo_choices(tty, focus).is_err() {
+                    let _ = tty.write_all(FOCUS_OFF.as_bytes());
+                    break;
+                }
+                continue;
+            }
+            Key::Char(b'\r' | b'\n') => typo_focus_choice(focus),
             Key::Char(0x03) => TypoChoice::Cancel, // Ctrl-C
             // an escape sequence is not an answer — keep waiting
             Key::Seq => continue,
@@ -346,9 +410,9 @@ fn run_typo_prompt<T: PromptTty>(tty: &mut T, typed: &str, candidate: &str) -> T
         break;
     }
     let ending: &[u8] = if choice == TypoChoice::Timeout {
-        "\r\noopsinput: timed out — running original unchanged\r\n".as_bytes()
+        "\x1b[0m\r\noopsinput: timed out — running original unchanged\r\n".as_bytes()
     } else {
-        b"\r\n"
+        b"\x1b[0m\r\n"
     };
     let _ = tty.write_all(ending);
     choice
@@ -554,20 +618,41 @@ fn model_warning_lines(
 pub fn escape_for_display(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if !needs_escape(c) {
-            out.push(c);
-        } else if c == '\u{7F}' {
-            out.push_str("^?");
-        } else if (c as u32) < 0x20 {
-            // C0 in caret notation: ESC → ^[, BEL → ^G, newline → ^J …
-            out.push('^');
-            out.push(((c as u8) ^ 0x40) as char);
-        } else {
-            // C1 controls, bidi overrides/isolates, invisible formatting.
-            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+        push_escaped_char(&mut out, c);
+    }
+    out
+}
+
+/// The same terminal-neutral representation as `escape_for_display`, bounded
+/// for the two complete command buffers repeated in the typo prompt. The
+/// ellipsis is trusted literal text; no raw control can survive before it.
+fn escape_for_typo_prompt(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(TYPO_COMMAND_DISPLAY_LIMIT_BYTES + 3));
+    for c in s.chars() {
+        let before = out.len();
+        push_escaped_char(&mut out, c);
+        if out.len() > TYPO_COMMAND_DISPLAY_LIMIT_BYTES {
+            out.truncate(before);
+            out.push('…');
+            break;
         }
     }
     out
+}
+
+fn push_escaped_char(out: &mut String, c: char) {
+    if !needs_escape(c) {
+        out.push(c);
+    } else if c == '\u{7F}' {
+        out.push_str("^?");
+    } else if (c as u32) < 0x20 {
+        // C0 in caret notation: ESC → ^[, BEL → ^G, newline → ^J …
+        out.push('^');
+        out.push(((c as u8) ^ 0x40) as char);
+    } else {
+        // C1 controls, bidi overrides/isolates, invisible formatting.
+        out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+    }
 }
 
 /// Characters that must never reach the terminal raw: all Unicode `Cc`
@@ -830,23 +915,34 @@ mod tests {
     impl PromptTty for UnwritableTty {}
 
     #[test]
-    fn y_consents_and_message_is_framed() {
+    fn y_consents_and_full_comparison_is_framed() {
         let mut tty = FakeTty::new(b"y");
-        assert_eq!(run_typo_prompt(&mut tty, "gti", "git"), TypoChoice::Correct);
+        assert_eq!(
+            run_typo_prompt(&mut tty, "gti pull", "git pull"),
+            TypoChoice::Correct
+        );
         let shown = tty.shown();
         assert!(
-            shown.starts_with("\r\noopsinput: "),
-            "prompt did not begin on a clean, framed line: {shown:?}"
+            shown.starts_with("\r\n\r\n*** oops? ***\r\n"),
+            "prompt did not begin after a clean blank line with its trusted banner: {shown:?}"
         );
         assert!(
-            shown.contains("'gti' not found"),
-            "typed word missing: {shown}"
+            shown.contains("You typed 'gti pull'."),
+            "complete original buffer missing: {shown}"
         );
         assert!(
-            shown.contains("did you mean 'git'?"),
-            "candidate missing: {shown}"
+            shown.contains("Did you mean 'git pull'?"),
+            "complete replacement buffer missing: {shown}"
         );
-        assert!(shown.contains("[y/n]"), "keys missing: {shown}");
+        assert!(
+            shown.contains("[y] run correction") && shown.contains("[n] run original"),
+            "compact choices missing: {shown}"
+        );
+        assert!(
+            shown.contains("\x1b[7m[n] run original\x1b[0m"),
+            "original choice did not start focused: {shown:?}"
+        );
+        assert!(!shown.contains("cancel"), "Ctrl-C was advertised: {shown}");
     }
 
     #[test]
@@ -856,8 +952,8 @@ mod tests {
     }
 
     #[test]
-    fn n_and_any_other_key_run_the_original() {
-        for key in [b'n', b'N', b' ', b'q', 0x1b, b'\r'] {
+    fn n_enter_and_unrecognized_keys_run_the_original() {
+        for key in [b'n', b'N', b' ', b'q', 0x1b, b'\r', b'\n'] {
             let mut tty = FakeTty::new(&[key]);
             assert_eq!(
                 run_typo_prompt(&mut tty, "gti", "git"),
@@ -865,6 +961,54 @@ mod tests {
                 "key {key:#04x} must mean original"
             );
         }
+    }
+
+    #[test]
+    fn tab_moves_focus_and_enter_activates_it() {
+        let mut tty = FakeTty::new(b"\t\r");
+        assert_eq!(
+            run_typo_prompt(&mut tty, "gti pull", "git pull"),
+            TypoChoice::Correct
+        );
+        assert!(
+            tty.shown()
+                .contains("\r\x1b[7m[y] run correction\x1b[0m  [n] run original"),
+            "Tab did not redraw the same row with correction focused: {:?}",
+            tty.shown()
+        );
+
+        let mut tty = FakeTty::new(b"\t\t\r");
+        assert_eq!(
+            run_typo_prompt(&mut tty, "gti pull", "git pull"),
+            TypoChoice::Original,
+            "a second Tab must cycle focus back to the original"
+        );
+    }
+
+    #[test]
+    fn full_command_text_is_escaped_and_display_bounded() {
+        let hostile = format!("gti ^\n\x1b]0;EVIL\x07{}", "x".repeat(700));
+        let corrected = hostile.replacen("gti", "git", 1);
+        let mut tty = FakeTty::new(b"n");
+        assert_eq!(
+            run_typo_prompt(&mut tty, &hostile, &corrected),
+            TypoChoice::Original
+        );
+        let shown = tty.shown();
+        assert!(shown.contains("^J"), "newline was not escaped: {shown:?}");
+        assert!(
+            shown.contains("^[]0;EVIL^G"),
+            "terminal controls were not escaped: {shown:?}"
+        );
+        assert!(shown.contains('…'), "long command was not display-bounded");
+        let untrusted_section = shown
+            .split_once("You typed '")
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        assert!(
+            !untrusted_section.contains("\x1b]0;EVIL"),
+            "untrusted raw ESC reached the prompt: {shown:?}"
+        );
     }
 
     #[test]
@@ -1162,20 +1306,24 @@ mod tests {
         let mut tty = FakeTty::new(b"n");
         run_typo_prompt(&mut tty, "x\u{1b}]0;EVIL\u{7}", "gi\u{202E}t");
         let shown = tty.shown();
+        // The prompt now owns exactly two trusted SGR sequences for focus.
+        // Remove those fixed bytes before asserting that no untrusted escape
+        // sequence survived the display escaper.
+        let unstyled = shown.replace(FOCUS_ON, "").replace(FOCUS_OFF, "");
         assert!(
-            !shown.contains('\u{1b}'),
+            !unstyled.contains('\u{1b}'),
             "raw ESC reached the tty: {shown:?}"
         );
         assert!(
-            !shown.contains('\u{202E}'),
+            !unstyled.contains('\u{202E}'),
             "raw bidi override reached the tty: {shown:?}"
         );
         assert!(
-            shown.contains("^[]0;EVIL^G"),
+            unstyled.contains("^[]0;EVIL^G"),
             "escaped form missing: {shown:?}"
         );
         assert!(
-            shown.contains("gi\\u{202E}t"),
+            unstyled.contains("gi\\u{202E}t"),
             "escaped bidi missing: {shown:?}"
         );
     }

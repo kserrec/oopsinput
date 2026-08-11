@@ -734,12 +734,16 @@ environment-derived paths in all three surfaces.
 **Two prompts**, both on `/dev/tty` — the terminal itself — rather than
 stdout, which carries the decision JSON and is discarded by the plugin:
 
-- `prompt_typo` asks the L1 question. `y` accepts, Ctrl-C cancels, and
-  everything else (`n`, any other key, a ten-second timeout, a missing
-  terminal, any internal failure) runs the original command, which is the
-  safe outcome since that command could not have run anyway. Timeout is still
-  recorded as `typo.timed_out`, not as a deliberate `n`, and is named on the
-  terminal before the original runs so it cannot look like correction consent.
+- `prompt_typo` shows the complete original and corrected buffers in a bounded,
+  escaped `*** oops? ***` block. `y` accepts and `n` keeps the original.
+  The compact choice row starts with the original visibly focused; Tab switches
+  focus and Enter activates it, so a bare Enter can never consent to a
+  correction. Ctrl-C still cancels but is not advertised in the row. Any other
+  key, a ten-second timeout, a missing terminal, or an internal failure runs
+  the original command, which is the safe outcome since that command could not
+  have run anyway. Timeout is still recorded as `typo.timed_out`, not as a
+  deliberate `n`, and is named on the terminal before the original runs so it
+  cannot look like correction consent.
 - `prompt_warning` shows the L2+ warning, whose anatomy is fixed by SPEC §7:
   what the command does, the concrete facts, why the context is unusual,
   then the keys. `e` restores your exact buffer to ZLE for editing, `c`
@@ -755,9 +759,10 @@ stdout, which carries the decision JSON and is discarded by the plugin:
 
 `warning_lines` builds those message lines from evidence codes and context
 counts, with every untrusted fragment escaped and every line framed by the
-fixed `oopsinput:` prefix. Both prompt types first write a terminal line break:
-ZLE has intercepted Enter but has not delegated the accept widget yet, so
-without that break the question would be joined directly to the submitted
+fixed `oopsinput:` prefix. The warning writes a terminal line break and the
+typo block begins after a blank line: ZLE has intercepted Enter but has not
+delegated the accept widget yet, so without that separation the question would
+be joined directly to the submitted
 buffer on the same row.
 
 **Reading a keypress** is subtler than it looks: an arrow key is not one
@@ -946,8 +951,17 @@ You type `gti status` and press Enter, in suggest mode:
 5. The binary builds the corrected buffer *first*
    (`src/layers/typo.rs`) — `git status`, with every byte after the
    command word preserved. Only if that succeeds does it mark the prompt
-   active, retiring the watchdog, and ask on `/dev/tty`:
-   `oopsinput: 'gti' not found — did you mean 'git'? [y/n]`
+   active, retiring the watchdog, and show on `/dev/tty`:
+
+   ```text
+   *** oops? ***
+   You typed 'gti status'.
+   Did you mean 'git status'?
+   [y] run correction  [n] run original
+   ```
+
+   The original choice begins highlighted. Tab switches the highlight and
+   Enter activates it; `y` and `n` remain immediate shortcuts.
 6. You press `y`. The binary writes `git status` plus one NUL byte to
    descriptor 3 (`src/main.rs`), records `replace` / `typo.accepted`,
    and exits **10**.
@@ -1030,9 +1044,11 @@ separately.
   never reach the event log, resolution kinds are extracted correctly,
   double-sourcing is harmless, Vi keymap accepts work; the full typo flow (`y`
   runs the correction with arguments preserved byte-for-byte, prompts begin on
-  a clean line, a timeout names its unchanged-original outcome, `n` runs the
-  original, Ctrl-C runs nothing, resolving words never prompt, the config file
-  alone enables prompts); and the full warning flow (both halves of the
+  a clean blank line with the complete escaped comparison, Tab moves focus,
+  Enter activates the focused choice without defaulting to correction, a
+  timeout names its unchanged-original outcome, `n` runs the original, Ctrl-C
+  runs nothing, resolving words never prompt, the config file alone enables
+  prompts); and the full warning flow (both halves of the
   flagship pair, edit restoring the exact buffer to a live ZLE, run-once
   executing unchanged, cancel leaving the dirty bytes untouched *on disk*,
   warnings outranking the typo prompt, arrow keys leaving no stray bytes,

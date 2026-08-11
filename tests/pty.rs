@@ -459,17 +459,18 @@ fn suggest_mode_y_runs_the_correction_exactly() {
             "alias oopspecialx='echo CORRECTED-$((2+3))'\recho marker-y1\r",
         ),
         ("marker-y1", 0, "oopspecialxq --flag\r"),
-        ("[y/n]", 300, "yecho marker-y2\r"),
+        ("[y] run correction", 300, "yecho marker-y2\r"),
     ]);
     assert!(
-        out.contains("did you mean 'oopspecialx'?"),
-        "prompt missing or wrong candidate:\n{out}"
+        out.contains("You typed 'oopspecialxq --flag'.")
+            && out.contains("Did you mean 'oopspecialx --flag'?"),
+        "prompt missing the complete original/corrected comparison:\n{out}"
     );
     let (_, after_buffer) = out
         .split_once("oopspecialxq --flag")
         .expect("submitted typo missing from terminal transcript");
     let (line_boundary, _) = after_buffer
-        .split_once("oopsinput:")
+        .split_once("*** oops? ***")
         .expect("framed typo prompt missing from terminal transcript");
     assert!(
         line_boundary.contains('\n'),
@@ -496,6 +497,40 @@ fn suggest_mode_y_runs_the_correction_exactly() {
 }
 
 #[test]
+fn suggest_mode_tab_then_enter_runs_the_correction() {
+    // The prompt begins with the original focused. One Tab must move focus to
+    // the correction, and Enter must then provide the same explicit consent
+    // as `y`, through the real plugin, /dev/tty, and fd-3 replacement path.
+    let s = Session::new(None, &[("OOPSINPUT_MODE", "suggest")]);
+    let out = s.run_staged(&[
+        (
+            "PTYTEST%",
+            0,
+            "alias oopspecialt='echo TABBED-$((9+4))'\recho marker-t1\r",
+        ),
+        ("marker-t1", 0, "oopspecialtq argument\r"),
+        ("[y] run correction", 200, "\t\recho marker-t2\r"),
+    ]);
+    assert!(
+        out.contains("TABBED-13 argument"),
+        "Tab + Enter did not run the complete correction:\n{out}"
+    );
+    assert!(
+        !out.contains("command not found"),
+        "original typo ran after correction was focused:\n{out}"
+    );
+    assert!(
+        out.contains("marker-t2"),
+        "session did not continue:\n{out}"
+    );
+    let log = s.events_log();
+    assert!(
+        log.contains("\"decision\":\"replace\"") && log.contains("typo.accepted"),
+        "Tab + Enter consent was not recorded as accepted:\n{log}"
+    );
+}
+
+#[test]
 fn suggest_mode_resolving_words_never_prompt() {
     // M2 acceptance: zero tolerance for L1 false positives — every resolution
     // kind that can actually run must pass through silently even with prompts
@@ -509,7 +544,7 @@ fn suggest_mode_resolving_words_never_prompt() {
         "true && echo chain-ran",
     ]);
     assert!(
-        !out.contains("[y/n]"),
+        !out.contains("[y] run correction"),
         "a resolving command word prompted:\n{out}"
     );
     assert!(out.contains("ALIASRAN-13"), "alias did not run:\n{out}");
@@ -538,7 +573,7 @@ fn config_file_mode_suggest_enables_prompts() {
             "alias oopspecialf='echo CONFIGRAN-$((5+6))'\recho marker-f1\r",
         ),
         ("marker-f1", 0, "oopspecialfq\r"),
-        ("[y/n]", 0, "yecho marker-f2\r"),
+        ("[y] run correction", 0, "yecho marker-f2\r"),
     ]);
     assert!(
         out.contains("CONFIGRAN-11"),
@@ -588,7 +623,7 @@ fn suggest_mode_n_runs_the_original_unchanged() {
             "alias oopspecialn='echo WRONG-$((3+4))'\recho marker-n1\r",
         ),
         ("marker-n1", 0, "oopspecialnq\r"),
-        ("[y/n]", 0, "necho marker-n2\r"),
+        ("[y] run correction", 0, "necho marker-n2\r"),
     ]);
     assert!(
         out.contains("command not found: oopspecialnq"),
@@ -617,7 +652,7 @@ fn suggest_mode_ctrl_c_cancels_running_nothing() {
             "alias oopspecialc='echo WRONG-$((4+5))'\recho marker-c1\r",
         ),
         ("marker-c1", 0, "oopspecialcq\r"),
-        ("[y/n]", 0, "\u{3}echo marker-c2\r"),
+        ("[y] run correction", 0, "\u{3}echo marker-c2\r"),
     ]);
     assert!(
         !out.contains("command not found"),
@@ -662,7 +697,7 @@ fn run_prompt_seam(keys: &[u8]) -> String {
     let mut stdout = child.stdout.take().unwrap();
     let mut seen = Vec::new();
     let mut chunk = [0u8; 4096];
-    while !String::from_utf8_lossy(&seen).contains("[y/n]") {
+    while !String::from_utf8_lossy(&seen).contains("[y] run correction") {
         match stdout.read(&mut chunk) {
             Ok(0) | Err(_) => break, // EOF before prompt: fall through to asserts
             Ok(n) => seen.extend_from_slice(&chunk[..n]),
@@ -681,10 +716,29 @@ fn prompt_reads_single_key_on_real_tty() {
     // A bare 'y' with no Enter must resolve the prompt (single-key contract).
     let out = run_prompt_seam(b"y");
     assert!(
-        out.contains("did you mean 'git'?"),
+        out.contains("Did you mean 'git pull'?"),
         "prompt text missing:\n{out}"
     );
     assert!(out.contains("choice=Correct"), "y did not consent:\n{out}");
+}
+
+#[test]
+fn prompt_tab_then_enter_selects_correction_on_real_tty() {
+    let out = run_prompt_seam(b"\t\r");
+    assert!(
+        out.contains("choice=Correct"),
+        "Tab + Enter did not activate the correction:\n{out}"
+    );
+}
+
+#[test]
+fn prompt_enter_alone_keeps_original_on_real_tty() {
+    let out = run_prompt_seam(b"\r");
+    assert!(
+        out.contains("choice=Original"),
+        "initial Enter implicitly consented to a correction:\n{out}"
+    );
+    assert!(!out.contains("choice=Correct"), "false consent:\n{out}");
 }
 
 #[test]
@@ -966,7 +1020,7 @@ fn warning_outranks_the_typo_prompt_on_compound_buffers() {
         ("[e]dit", 300, "cecho marker-x2\r"),
     ]);
     assert!(
-        !out.contains("[y/n]"),
+        !out.contains("[y] run correction"),
         "typo prompt shown instead of the warning:\n{out}"
     );
     assert!(
@@ -1049,7 +1103,7 @@ fn arrow_keys_at_a_prompt_leave_no_stray_bytes() {
         ),
         ("marker-a1", 0, "oopspecialaq\r"),
         // Up arrow first — must be consumed whole and ignored — then n.
-        ("[y/n]", 200, "\u{1b}[Anecho marker-a2\r"),
+        ("[y] run correction", 200, "\u{1b}[Anecho marker-a2\r"),
     ]);
     assert!(
         out.contains("command not found: oopspecialaq"),

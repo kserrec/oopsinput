@@ -667,16 +667,21 @@ print -r -- "Disposable practice area: $OOPSINPUT_HANDSON_DIR"</code></pre>
             <pre><code>export OOPSINPUT_MODE=suggest</code></pre>
             <p>Submit the same safe typo with a different argument:</p>
             <pre><code>oopspecialxq accepted</code></pre>
-            <p>Wait until the <code>[y/n]</code> prompt is visible, then press <kbd>y</kbd> once.</p>
+            <p>Wait until the <code>*** oops? ***</code> block and its two-choice row are
+              visible. <code>run original</code> begins highlighted. Press <kbd>Tab</kbd>
+              once to highlight <code>run correction</code>, then press <kbd>Enter</kbd>.</p>
             <div class="expect">
-              <b>Expected:</b> the oopsinput question begins on a clean line and suggests
-              <code>oopspecialx</code>. Accepting prints
+              <b>Expected:</b> the oopsinput question begins after a clean blank line and
+              displays <code>You typed 'oopspecialxq accepted'.</code> followed by
+              <code>Did you mean 'oopspecialx accepted'?</code>. Tab changes only the
+              highlighted choice on the compact final row. Accepting prints
               <code>TYPO CORRECTION WORKED: accepted</code>. The argument survives unchanged;
-              only the command name is corrected after your explicit consent. If no key is
-              entered for ten seconds, oopsinput instead says it timed out and is running the
-              original unchanged; that message is not acceptance, and the alias must not run.
+              only the command name is corrected after your explicit consent. Pressing
+              <kbd>y</kbd> would accept immediately as well. If no key is entered for ten
+              seconds, oopsinput instead says it timed out and is running the original
+              unchanged; that message is not acceptance, and the alias must not run.
             </div>
-            <label class="checkline"><input type="checkbox"> Pressing <kbd>y</kbd> ran the corrected alias with its argument intact.</label>
+            <label class="checkline"><input type="checkbox"> Tab moved focus and Enter ran the corrected alias with its argument intact.</label>
           </div>
         </details>
 

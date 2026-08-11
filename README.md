@@ -17,12 +17,21 @@ only when the evidence warrants it.
 ## What it does today
 
 - In the installed default, **Suggest mode**, `gti pull` can prompt:
-  `'gti' not found — did you mean 'git pull'? [y/n]`. This only happens when
-  the first command name does not resolve in the live shell. The prompt starts
-  on a new terminal line. `y` runs the correction; `n` runs the original
-  unchanged; Ctrl-C cancels. With no answer for ten seconds, oopsinput
-  explicitly says it timed out and runs the original typo unchanged—never the
-  correction.
+
+  ```text
+  *** oops? ***
+  You typed 'gti pull'.
+  Did you mean 'git pull'?
+  [y] run correction  [n] run original
+  ```
+
+  This only happens when the first command name does not resolve in the live
+  shell. The block starts after a clean blank line, and the complete original
+  and corrected commands are escaped and display-bounded. `run original`
+  starts highlighted; Tab switches focus and Enter activates it. `y` and `n`
+  are immediate shortcuts. Ctrl-C still cancels but is not shown in the choice
+  row. With no answer for ten seconds, oopsinput explicitly says it timed out
+  and runs the original typo unchanged—never the correction.
 - It recognizes selected filesystem, Git, system, and privilege-related
   command shapes, then collects bounded context that can distinguish an
   unusual command from an ordinary one. For example, `git reset --hard` with

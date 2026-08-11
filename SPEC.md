@@ -26,7 +26,7 @@ silently rewrites a command.
 ```
 you press Enter ──► zsh widget ──► oopsinput binary ──► allow (silent, ~99%+)
                                           │
-                                          ├──► "did you mean git pull? [y/n]"   (typo)
+                                          ├──► full typed/corrected comparison  (typo)
                                           ├──► specific warning + edit/cancel   (danger/intent)
                                           └──► (rare) local model consulted first
 ```
@@ -115,8 +115,19 @@ this intervention is free: the alternative was an error message.
 
 - Find nearest candidates by edit distance (self-written, bounded) against
   PATH executables + plugin-supplied aliases/functions/builtins.
-- Prompt, beginning on a clean terminal line:
-  `oopsinput: 'gti' not found — did you mean 'git pull ...'? [y/n]`
+- Prompt, beginning after a clean blank line and showing the complete original
+  and corrected buffers in bounded, escaped form:
+
+  ```text
+  *** oops? ***
+  You typed 'gti pull'.
+  Did you mean 'git pull'?
+  [y] run correction  [n] run original
+  ```
+- The two choices stay on that one final row. `run original` starts visibly
+  focused; Tab switches focus and Enter activates the focused choice. `y` and
+  `n` remain immediate shortcuts. Ctrl-C still cancels but is not advertised
+  in the prompt.
 - **`y` runs the corrected command** — strong consent is acceptable here
   precisely because the original was unexecutable. `n` runs the original
   unchanged (it fails naturally). Ctrl-C cancels. Default on the ten-second
@@ -247,7 +258,7 @@ Two consent strengths, matched to what the user typed:
 
 | Situation | Prompt | Keys | Rationale |
 |---|---|---|---|
-| L1 typo (command couldn't run) | `'gti' not found — did you mean 'git'? [y/n]` | `y` = run corrected · `n` = run original · Ctrl-C = cancel | Original was unexecutable; `y` is explicit consent, not auto-fix |
+| L1 typo (command couldn't run) | `*** oops? ***` block showing the bounded, escaped full original and correction | `y` = run corrected · `n` = run original · Tab = switch focus · Enter = activate focused choice · Ctrl-C = cancel (not displayed) | Original was unexecutable; the original starts focused, so a correction still requires explicit consent |
 | L2–L4 (command is real) | Specific warning: what it does, what it hits, why context is unusual | `e` = edit (exact buffer restored to ZLE) · `c` = cancel · `r` = run unchanged once | The command has teeth; suggestions are only ever placed in the **editable buffer**, never run |
 
 Every intervention begins on a clean terminal line. This is part of the
@@ -261,8 +272,9 @@ deliberate key, never the default.
 
 Anti-spoofing: all untrusted text (command, paths, model reason) is escaped
 before display — control chars, ANSI/OSC sequences, bidi controls neutralized;
-fixed trusted prefix frames every oopsinput message. Warnings remain useful
-without color.
+a fixed trusted `*** oops? ***` banner frames the typo block and the fixed
+`oopsinput:` prefix frames every warning line. Warnings remain useful without
+color.
 
 Habituation control: an intervention budget (default: max 3 visible
 interventions per session-hour, direct-catastrophic rules exempt) plus

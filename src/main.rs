@@ -79,7 +79,7 @@ fn main() -> ExitCode {
         // prompt path under a PTY, without needing the full suggest-mode flow.
         #[cfg(debug_assertions)]
         Some("__prompt-typo-test") => {
-            let choice = ui::prompt_typo("gti", "git");
+            let choice = ui::prompt_typo("gti pull", "git pull");
             println!("choice={choice:?}");
             ExitCode::SUCCESS
         }
@@ -412,7 +412,7 @@ fn typo_intervention(buffer: &str, s: &layers::typo::Suggestion) -> CheckAction 
         };
     };
     PROMPT_ACTIVE.store(true, Ordering::SeqCst);
-    let (decision, reason_code, exit_code) = match ui::prompt_typo(&s.typed, &s.candidate) {
+    let (decision, reason_code, exit_code) = match ui::prompt_typo(buffer, &replacement) {
         ui::TypoChoice::Correct => {
             if write_replacement_fd3(&replacement).is_ok() {
                 ("replace", "typo.accepted", 10)
