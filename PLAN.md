@@ -465,6 +465,13 @@ acceptance gate.
       timeout from another fail-open path because the fixture deletes its event
       log while unwinding. Stop here under the two-failed-hypotheses rule;
       capture the structural event reason if it recurs before choosing a fix.
+      On 2026-08-11, the `main` push of release commit `41fabaa` produced a new
+      hosted `cargo test` exit 101 while that run's release-acceptance job and
+      the same commit's complete tag-triggered CI both passed. The public job
+      API exposes only the failed step and exit code, not the test name or log,
+      so current evidence cannot establish whether this was the same fixture
+      or a different failure. No code changed in response; authenticated logs
+      or a future structural event remain prerequisites for diagnosis.
 
 ### Phase 2 — Kyle learns and deliberately exercises the whole product
 
@@ -570,7 +577,7 @@ the rest of the walkthrough continues.
       `v0.1.1` prerelease on 2026-08-11 after its dedicated owner journey and
       release gates passed; that release neither completes nor relaxes M8.
 
-## Active near-term feature — Guided installation experience
+## Guided installation experience — ✅ 2026-08-11
 
 Kyle selected this post-M8 feature for active work on 2026-08-11. The outcome
 is an installation path designed for a new user rather than only a
@@ -651,7 +658,7 @@ locally but remains deliberately untriggered: the published `v0.1.0` was
 directly verified to have no assets, and Phase 3 still owns public-artifact
 acceptance and publication.
 
-### Phase 3 — Prove the experience as a user experiences it
+### Phase 3 — Prove the experience as a user experiences it — ✅ 2026-08-11
 
 - [x] Extend clean-home lifecycle and PTY coverage for every interactive mode
       choice, explicit non-interactive choice, cancellation, invalid input,
@@ -664,7 +671,7 @@ acceptance and publication.
       substitute for this acceptance.
 - [x] Repeat the release acceptance set after both the automated lifecycle and
       owner-run journey pass.
-- [ ] Publish the improved install path from a new package version and matching
+- [x] Publish the improved install path from a new package version and matching
       tag only after the completed acceptance evidence is committed.
 
 Automated public-artifact acceptance completed 2026-08-11. The release gate
@@ -701,9 +708,8 @@ published source-only `v0.1.0` prerelease was rechecked and still has no assets;
 because its tag already exists, artifact publication requires a new version and
 matching tag. Kyle authorized an installer-only `v0.1.1` prerelease on
 2026-08-11, explicitly separate from M8's later stabilized release. The package
-and release documentation are advancing to 0.1.1; the publication item remains
-unchecked until the annotated tag, GitHub workflow, assets, checksum, and
-attestation have all been verified.
+and release documentation advanced to 0.1.1 only after that boundary was
+recorded and approved.
 
 The resulting `v0.1.1` release candidate repeated the complete local gate on
 2026-08-11: formatting, Clippy with warnings denied, 311 default tests with the
@@ -714,6 +720,19 @@ ms/submission. Its fresh static musl archive then passed checksum, content,
 version, linkage, all-mode installation, cancellation, TERM rollback, update,
 `doctor`, purge, and stable-uninstall checks using only extracted public files.
 No tag or remote state had changed when these candidate checks completed.
+
+Publication completed on 2026-08-11. Annotated tag `v0.1.1` resolves to release
+commit `41fabaaf82516ebdfed31724f9dfa6d269dea74d`; its pinned release workflow and
+tag-triggered dependency/CI runs passed. GitHub published a non-draft
+prerelease with exactly `oopsinput-0.1.1-x86_64-unknown-linux-musl.tar.gz`
+(531,919 bytes, SHA-256
+`5280a2583d9dd477b13a1165aaeb858e304826342425e7da2d3bc680d942dd19`) and
+`SHA256SUMS`. Fresh public downloads matched both GitHub asset digests and the
+checksum receipt, then passed the complete release-bundle gate again. GitHub's
+attestation API returns one SLSA provenance bundle whose signed payload names
+that archive and digest, `refs/tags/v0.1.1`, the pinned `release.yml` workflow,
+and the exact release commit. This installer-only release does not complete or
+relax the separate M8 owner-pilot gate.
 
 ## Later (v2+ candidates — see SPEC §17)
 
