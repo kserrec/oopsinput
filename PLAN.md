@@ -564,9 +564,11 @@ the rest of the walkthrough continues.
       acceptance set.
 - [ ] Bump the package version, update truthful release documentation, cut an
       annotated follow-up tag after `v0.1.0`, publish the corresponding GitHub
-      prerelease, and verify that the tag and release checks all pass. Do not
-      publish this milestone's release before Kyle completes Phase 2 and the
-      Phase 3 review.
+      prerelease, and verify that the tag and release checks all pass. This
+      stabilized-release gate remains blocked until Kyle completes Phase 2 and
+      the Phase 3 review. Kyle separately authorized the installer-only
+      `v0.1.1` prerelease on 2026-08-11 after its dedicated owner journey and
+      release gates passed; that release neither completes nor relaxes M8.
 
 ## Active near-term feature — Guided installation experience
 
@@ -696,9 +698,22 @@ the latency gate (common p95 4.39 ms, candidate p95 12.83 ms); 10,000 PTY
 submissions with zero lost or altered commands at 8.48 ms/submission; and a
 fresh static archive's complete lifecycle and install-experience gates. The
 published source-only `v0.1.0` prerelease was rechecked and still has no assets;
-because its tag already exists while the package remains version 0.1.0,
-artifact publication now requires a new version and matching tag. No version
-change, tag, push, attestation, or artifact publication has occurred.
+because its tag already exists, artifact publication requires a new version and
+matching tag. Kyle authorized an installer-only `v0.1.1` prerelease on
+2026-08-11, explicitly separate from M8's later stabilized release. The package
+and release documentation are advancing to 0.1.1; the publication item remains
+unchecked until the annotated tag, GitHub workflow, assets, checksum, and
+attestation have all been verified.
+
+The resulting `v0.1.1` release candidate repeated the complete local gate on
+2026-08-11: formatting, Clippy with warnings denied, 311 default tests with the
+one intentional live-model harness ignored, native release build reporting
+`oopsinput 0.1.1`, source lifecycle, common/candidate p95 latency of 7.91/22.04
+ms, and 10,000 PTY submissions with zero lost or altered commands at 11.49
+ms/submission. Its fresh static musl archive then passed checksum, content,
+version, linkage, all-mode installation, cancellation, TERM rollback, update,
+`doctor`, purge, and stable-uninstall checks using only extracted public files.
+No tag or remote state had changed when these candidate checks completed.
 
 ## Later (v2+ candidates — see SPEC §17)
 

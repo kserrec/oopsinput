@@ -1,6 +1,6 @@
 [package]
 name = "oopsinput"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # std::fs::File locking, used to make retention/purge safe across shells.
 rust-version = "1.89"

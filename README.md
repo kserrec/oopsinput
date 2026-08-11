@@ -7,13 +7,13 @@ Zsh shell. It catches misspelled command names, recognizes a curated set of
 high-consequence command shapes, checks the current context, and intervenes
 only when the evidence warrants it.
 
-> **Public alpha (`v0.1.0`):** Linux and interactive Zsh only. The published
-> `v0.1.0` release is source-only; the guided binary-release path described
-> below is implemented on `main` but will not be published until its user
-> acceptance phase passes. oopsinput is an assistance layer, not a safety
-> boundary: it deliberately fails open, so an internal failure or an
-> unrecognized command shape lets the original command run unchanged. Never
-> test it with a destructive command you would not otherwise run.
+> **Installer-only public alpha (`v0.1.1`):** Linux and interactive Zsh only.
+> This is the first release with a verified prebuilt archive and guided mode
+> selection; it does not claim completion of the longer owner pilot tracked in
+> PLAN. oopsinput is an assistance layer, not a safety boundary: it deliberately
+> fails open, so an internal failure or an unrecognized command shape lets the
+> original command run unchanged. Never test it with a destructive command you
+> would not otherwise run.
 
 ## What it does today
 
@@ -123,9 +123,9 @@ This is the ordinary-user path for a release that has these two assets:
 - `oopsinput-VERSION-x86_64-unknown-linux-musl.tar.gz`;
 - `SHA256SUMS`.
 
-The current published `v0.1.0` does not have them yet. When a later release
-does, its only prerequisites are x86_64 Linux, interactive Zsh, `tar`, and
-`sha256sum`; Rust and Git are not required.
+The [`v0.1.1` installer-only prerelease](https://github.com/kserrec/oopsinput/releases/tag/v0.1.1)
+provides both assets. Its only prerequisites are x86_64 Linux, interactive Zsh,
+`tar`, and `sha256sum`; Rust and Git are not required.
 
 Download both files from the same [GitHub release](https://github.com/kserrec/oopsinput/releases)
 into an otherwise empty directory, open a terminal in that directory, and
@@ -154,11 +154,11 @@ cd oopsinput-*/
 zsh install.zsh
 ```
 
-### Current source build
+### Source build
 
-Until the verified archive is published, prerequisites are Linux, interactive
-Zsh, Git, and Rust 1.89 or newer through [rustup](https://rustup.rs). From a
-directory where you want the source checkout:
+The developer path requires Linux, interactive Zsh, Git, and Rust 1.89 or newer
+through [rustup](https://rustup.rs). From a directory where you want the source
+checkout:
 
 ```sh
 git clone https://github.com/kserrec/oopsinput.git
@@ -290,11 +290,14 @@ yourself; the uninstaller will not claim that authority.
 
 ## Project status and development
 
-[`v0.1.0`](https://github.com/kserrec/oopsinput/releases/tag/v0.1.0) is the
-first public alpha. The deterministic product, optional local-model path, local
-reporting, 30-day retention, purge, and clean-machine install-to-uninstall
-lifecycle are implemented and continuously checked. [PLAN.md](PLAN.md) is the
-live status record.
+[`v0.1.1`](https://github.com/kserrec/oopsinput/releases/tag/v0.1.1) is the
+current installer-only public alpha and the first release with the prebuilt
+archive; [`v0.1.0`](https://github.com/kserrec/oopsinput/releases/tag/v0.1.0)
+remains the first source-only alpha. The deterministic product, optional
+local-model path, local reporting, 30-day retention, purge, and clean-machine
+install-to-uninstall lifecycle are implemented and continuously checked.
+[PLAN.md](PLAN.md) is the live status record and retains the separate owner-pilot
+gate for a later stabilized release.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) is the developer guide. From a fresh clone,
 the required local checks are:

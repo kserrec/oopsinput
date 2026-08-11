@@ -128,7 +128,7 @@ files—not repository-private source overrides—to both lifecycle gates:
 ```
 rustup target add --toolchain 1.89.0 x86_64-unknown-linux-musl
 scripts/build-release-bundle.zsh
-scripts/release-bundle-gate.zsh dist/oopsinput-0.1.0-x86_64-unknown-linux-musl.tar.gz
+scripts/release-bundle-gate.zsh dist/oopsinput-0.1.1-x86_64-unknown-linux-musl.tar.gz
 ```
 
 The tag-triggered `.github/workflows/release.yml` performs those same steps,
@@ -1286,7 +1286,7 @@ refactor, bug-hunt, and security-audit pass.
 In short: the deterministic product, optional local-model layer, reporting,
 purge, retention, security hardening, guided mode-selecting installer, stable
 uninstaller, and static release-archive pipeline are implemented and tested.
-The published `v0.1.0` remains the first source-only public alpha. The active
-installation feature's remaining acceptance and publication work—and all later
-priorities—live in [PLAN.md](PLAN.md); this document deliberately does not
-duplicate their order.
+The published `v0.1.0` remains the first source-only public alpha; `v0.1.1` is
+the installer-only follow-up with the verified archive and does not claim the
+longer owner pilot is complete. That pilot and all later priorities live in
+[PLAN.md](PLAN.md); this document deliberately does not duplicate their order.

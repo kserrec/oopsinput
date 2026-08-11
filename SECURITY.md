@@ -12,7 +12,7 @@ states the security posture in one place and explains how to report a problem.
 ## Supported versions
 
 Security fixes target the current `main` branch and the latest tagged public
-alpha, `v0.1.0`. Earlier untagged snapshots are not separately supported.
+alpha, `v0.1.1`. Earlier untagged snapshots are not separately supported.
 Alpha support does not imply a response-time or long-term-support guarantee.
 
 ## Report a vulnerability privately
